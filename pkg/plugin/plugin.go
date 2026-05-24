@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
@@ -19,13 +20,20 @@ import (
 const ADAPTOR_VERSION = float64(2.0)
 
 const (
-	ExecutionModeSync   = "sync"
-	ExecutionModeAsync  = "async"
-	ExecutionModeStream = "stream"
+	ExecutionModeSync          = "sync"
+	ExecutionModeAsync         = "async"
+	ExecutionModePluginAsync   = "pluginAsync"
+	ExecutionModeDeferredAsync = "deferredAsync"
+	ExecutionModeStream        = "stream"
+
+	CompatibilityModeNative     = "native"
+	CompatibilityModeAquaQ      = "aquaq"
+	CompatibilityModePanopticon = "panopticon"
 
 	defaultQueryTimeout     = 10000
 	defaultPollIntervalMs   = 1000
 	defaultMaxStreamRows    = 1000
+	defaultAsyncMaxJobs     = 16
 	asyncQHelperUnavailable = "async/stream queries require q/asyncq_grafana.q to be loaded in the target kdb+ process or gateway"
 )
 
@@ -37,15 +45,20 @@ var (
 )
 
 type QueryModel struct {
-	QueryText         string `json:"queryText"`
-	Timeout           int    `json:"timeOut"`
-	UseTimeColumn     bool   `json:"useTimeColumn"`
-	TimeColumn        string `json:"timeColumn"`
-	IncludeKeyColumns bool   `json:"includeKeyColumns"`
-	ExecutionMode     string `json:"executionMode,omitempty"`
-	StreamName        string `json:"streamName,omitempty"`
-	PollIntervalMs    int    `json:"pollIntervalMs,omitempty"`
-	MaxStreamRows     int    `json:"maxStreamRows,omitempty"`
+	QueryText                 string `json:"queryText"`
+	Timeout                   int    `json:"timeOut"`
+	UseTimeColumn             bool   `json:"useTimeColumn"`
+	TimeColumn                string `json:"timeColumn"`
+	IncludeKeyColumns         bool   `json:"includeKeyColumns"`
+	ExecutionMode             string `json:"executionMode,omitempty"`
+	CompatibilityMode         string `json:"compatibilityMode,omitempty"`
+	DeferredQueryWrapper      string `json:"deferredQueryWrapper,omitempty"`
+	PanopticonQueryWrapper    string `json:"panopticonQueryWrapper,omitempty"`
+	PanopticonRequestFunction string `json:"panopticonRequestFunction,omitempty"`
+	StreamName                string `json:"streamName,omitempty"`
+	PollIntervalMs            int    `json:"pollIntervalMs,omitempty"`
+	MaxStreamRows             int    `json:"maxStreamRows,omitempty"`
+	OriginalQueryText         string `json:"-"`
 }
 
 type kdbSyncQuery struct {
@@ -67,16 +80,22 @@ type kdbSyncRes struct {
 }
 
 type KdbDatasource struct {
-	Host             string `json:"host"`
-	Port             int    `json:"port"`
-	Timeout          string `json:"timeout"`
-	WithTls          bool   `json:"withTLS"`
-	SkipVertifyTLS   bool   `json:"skipVerifyTLS"`
-	WithCACert       bool   `json:"withCACert"`
-	EnableAsync      bool   `json:"enableAsync"`
-	EnableStreaming  bool   `json:"enableStreaming"`
-	asyncConfigured  bool
-	streamConfigured bool
+	Host                      string `json:"host"`
+	Port                      int    `json:"port"`
+	Timeout                   string `json:"timeout"`
+	WithTls                   bool   `json:"withTLS"`
+	SkipVertifyTLS            bool   `json:"skipVerifyTLS"`
+	WithCACert                bool   `json:"withCACert"`
+	EnableAsync               bool   `json:"enableAsync"`
+	EnableStreaming           bool   `json:"enableStreaming"`
+	ExecutionMode             string `json:"executionMode,omitempty"`
+	CompatibilityMode         string `json:"compatibilityMode,omitempty"`
+	DeferredQueryWrapper      string `json:"deferredQueryWrapper,omitempty"`
+	PanopticonQueryWrapper    string `json:"panopticonQueryWrapper,omitempty"`
+	PanopticonRequestFunction string `json:"panopticonRequestFunction,omitempty"`
+	AsyncMaxJobs              int    `json:"asyncMaxJobs,omitempty"`
+	asyncConfigured           bool
+	streamConfigured          bool
 
 	user            string
 	pass            string
@@ -86,6 +105,7 @@ type KdbDatasource struct {
 	TlsServerConfig *tls.Config
 	DialTimeout     time.Duration
 	KdbHandle       *kdb.KDBConn
+	asyncJobs       chan struct{}
 
 	signals             chan int
 	syncQueue           chan *kdbSyncQuery
@@ -183,6 +203,7 @@ func NewKdbDatasource(_ context.Context, settings backend.DataSourceInstanceSett
 	client.DialTimeout = timeOutDuration
 	client.setupKdbConnectionHandlers()
 	client.IsOpen = false
+	client.normalizeDatasourceDefaults()
 
 	log.DefaultLogger.Info("Making synchronous query channel")
 	client.syncQueue = make(chan *kdbSyncQuery)
@@ -199,6 +220,21 @@ func NewKdbDatasource(_ context.Context, settings backend.DataSourceInstanceSett
 	return &client, nil
 }
 
+func (d *KdbDatasource) normalizeDatasourceDefaults() {
+	if d.ExecutionMode == "" {
+		d.ExecutionMode = ExecutionModeSync
+	}
+	if d.CompatibilityMode == "" {
+		d.CompatibilityMode = CompatibilityModeNative
+	}
+	if d.AsyncMaxJobs < 1 {
+		d.AsyncMaxJobs = defaultAsyncMaxJobs
+	}
+	if d.asyncJobs == nil {
+		d.asyncJobs = make(chan struct{}, d.AsyncMaxJobs)
+	}
+}
+
 func (d *KdbDatasource) Dispose() {
 	log.DefaultLogger.Info("Dispose called")
 	if d.IsOpen {
@@ -210,6 +246,7 @@ func (d *KdbDatasource) Dispose() {
 	safeCloseIntChan(d.signals)
 	safeCloseSyncQueryChan(d.syncQueue)
 	safeCloseSyncResChan(d.syncResChan)
+	safeCloseStructChan(d.asyncJobs)
 }
 
 func safeCloseIntChan(ch chan int) {
@@ -227,6 +264,13 @@ func safeCloseSyncQueryChan(ch chan *kdbSyncQuery) {
 }
 
 func safeCloseSyncResChan(ch chan *kdbSyncRes) {
+	defer func() { _ = recover() }()
+	if ch != nil {
+		close(ch)
+	}
+}
+
+func safeCloseStructChan(ch chan struct{}) {
 	defer func() { _ = recover() }()
 	if ch != nil {
 		close(ch)
@@ -301,9 +345,13 @@ func (d *KdbDatasource) query(_ context.Context, pCtx backend.PluginContext, que
 		response.Error = err
 		return response
 	}
-	normalizeQueryModel(&model)
+	d.normalizeQueryModel(&model)
 	if model.ExecutionMode != ExecutionModeSync {
 		response.Error = fmt.Errorf("%s mode is served through Grafana Live, not the standard query endpoint", model.ExecutionMode)
+		return response
+	}
+	if err := prepareQueryForExecution(pCtx, query, &model); err != nil {
+		response.Error = err
 		return response
 	}
 
@@ -323,11 +371,32 @@ func (d *KdbDatasource) query(_ context.Context, pCtx backend.PluginContext, que
 }
 
 func normalizeQueryModel(model *QueryModel) {
+	normalizeQueryModelWithDefaults(model, ExecutionModeSync, CompatibilityModeNative, "", "", "")
+}
+
+func (d *KdbDatasource) normalizeQueryModel(model *QueryModel) {
+	d.normalizeDatasourceDefaults()
+	normalizeQueryModelWithDefaults(model, d.ExecutionMode, d.CompatibilityMode, d.DeferredQueryWrapper, d.PanopticonQueryWrapper, d.PanopticonRequestFunction)
+}
+
+func normalizeQueryModelWithDefaults(model *QueryModel, executionMode string, compatibilityMode string, deferredWrapper string, panopticonWrapper string, panopticonRequestFunction string) {
 	if model.Timeout < 1 {
 		model.Timeout = defaultQueryTimeout
 	}
 	if model.ExecutionMode == "" {
-		model.ExecutionMode = ExecutionModeSync
+		model.ExecutionMode = executionMode
+	}
+	if model.CompatibilityMode == "" {
+		model.CompatibilityMode = compatibilityMode
+	}
+	if model.DeferredQueryWrapper == "" {
+		model.DeferredQueryWrapper = deferredWrapper
+	}
+	if model.PanopticonQueryWrapper == "" {
+		model.PanopticonQueryWrapper = panopticonWrapper
+	}
+	if model.PanopticonRequestFunction == "" {
+		model.PanopticonRequestFunction = panopticonRequestFunction
 	}
 	if model.PollIntervalMs < 1 {
 		model.PollIntervalMs = defaultPollIntervalMs
@@ -339,14 +408,20 @@ func normalizeQueryModel(model *QueryModel) {
 
 func buildSyncQueryPayload(pCtx backend.PluginContext, query backend.DataQuery, model QueryModel) *kdb.K {
 	masterKeys, masterValues := buildMasterKdbLists(pCtx, query, model)
-	return kdb.NewList(kdb.Atom(kdb.KC, "{[x] value x[`Query;`Query]}"), kdb.NewDict(masterKeys, masterValues))
+	return kdb.NewList(kdb.Atom(kdb.KC, queryExecutionFunction(model)), kdb.NewDict(masterKeys, masterValues))
+}
+
+func buildDirectQueryRequest(pCtx backend.PluginContext, query backend.DataQuery, model QueryModel) *kdb.K {
+	masterKeys, masterValues := buildMasterKdbLists(pCtx, query, model)
+	return kdb.NewDict(masterKeys, masterValues)
 }
 
 func buildMasterKdbLists(pCtx backend.PluginContext, query backend.DataQuery, model QueryModel) (*kdb.K, *kdb.K) {
 	userDict := buildUserKdbDict(pCtx.User)
 	datasourceDict := buildDatasourceKdbDict(pCtx.DataSourceInstanceSettings)
-	queryDict := buildQueryKdbDict(query, model.QueryText)
-	masterKeys := kdb.SymbolV([]string{"AQUAQ_KDB_BACKEND_GRAF_DATASOURCE", "Time", "OrgID", "Datasource", "User", "Query", "Timeout"})
+	queryDict := buildQueryKdbDict(query, model)
+	panopticonDict := buildPanopticonKdbDict(query, model)
+	masterKeys := kdb.SymbolV([]string{"AQUAQ_KDB_BACKEND_GRAF_DATASOURCE", "Time", "OrgID", "Datasource", "User", "Query", "Timeout", "ExecutionMode", "CompatibilityMode", "Panopticon"})
 	masterValues := kdb.NewList(
 		kdb.Float(ADAPTOR_VERSION),
 		kdb.Atom(-kdb.KP, time.Now()),
@@ -354,8 +429,47 @@ func buildMasterKdbLists(pCtx backend.PluginContext, query backend.DataQuery, mo
 		datasourceDict,
 		userDict,
 		queryDict,
-		kdb.Long(int64(model.Timeout)))
+		kdb.Long(int64(model.Timeout)),
+		kdb.Symbol(model.ExecutionMode),
+		kdb.Symbol(model.CompatibilityMode),
+		panopticonDict)
 	return masterKeys, masterValues
+}
+
+func queryExecutionFunction(model QueryModel) string {
+	requestFunction := strings.TrimSpace(model.PanopticonRequestFunction)
+	if model.CompatibilityMode == CompatibilityModePanopticon && requestFunction != "" {
+		return requestFunction
+	}
+	return "{[x] value x[`Query;`Query]}"
+}
+
+func buildPanopticonKdbDict(query backend.DataQuery, model QueryModel) *kdb.K {
+	keys := kdb.SymbolV([]string{"TimeWindowStart", "TimeWindowEnd", "Snapshot", "Start", "End", "From", "To", "Interval", "IntervalMs", "MaxDataPoints", "RefID", "Query", "OriginalQuery", "CompiledQuery", "QueryWrapper", "RequestFunction"})
+	originalQuery := model.OriginalQueryText
+	if originalQuery == "" {
+		originalQuery = model.QueryText
+	}
+	intervalMs := int64(query.Interval / time.Millisecond)
+	values := kdb.NewList(
+		kdb.Atom(-kdb.KP, query.TimeRange.From),
+		kdb.Atom(-kdb.KP, query.TimeRange.To),
+		kdb.Atom(-kdb.KP, query.TimeRange.To),
+		kdb.Atom(-kdb.KP, query.TimeRange.From),
+		kdb.Atom(-kdb.KP, query.TimeRange.To),
+		kdb.Atom(-kdb.KP, query.TimeRange.From),
+		kdb.Atom(-kdb.KP, query.TimeRange.To),
+		kdb.Long(int64(query.Interval)),
+		kdb.Long(intervalMs),
+		kdb.Long(query.MaxDataPoints),
+		kdb.Atom(kdb.KC, query.RefID),
+		kdb.Atom(kdb.KC, model.QueryText),
+		kdb.Atom(kdb.KC, originalQuery),
+		kdb.Atom(kdb.KC, model.QueryText),
+		kdb.Atom(kdb.KC, model.PanopticonQueryWrapper),
+		kdb.Atom(kdb.KC, model.PanopticonRequestFunction),
+	)
+	return kdb.NewDict(keys, values)
 }
 
 func parseKdbResponseToFrames(kdbResponse *kdb.K, model QueryModel, refID string) ([]*data.Frame, error) {
@@ -372,6 +486,23 @@ func parseKdbResponseToFrames(kdbResponse *kdb.K, model QueryModel, refID string
 		frame.RefID = refID
 		frames = append(frames, frame)
 	case kdbResponse.Type == kdb.XD:
+		if model.CompatibilityMode == CompatibilityModePanopticon {
+			frame, err := ParseKeyedKdbTableAsFrame(kdbResponse)
+			if err == nil {
+				frame.Name = refID
+				frame.RefID = refID
+				frames = append(frames, frame)
+				break
+			}
+			frame, err = ParseKdbDictAsFrame(kdbResponse)
+			if err != nil {
+				return nil, fmt.Errorf("unable to parse Panopticon dictionary result (%s): %w", describeKdbObject(kdbResponse), err)
+			}
+			frame.Name = refID
+			frame.RefID = refID
+			frames = append(frames, frame)
+			break
+		}
 		groupedFrames, err := ParseGroupedKdbTable(kdbResponse, model.IncludeKeyColumns)
 		if err != nil {
 			return nil, err
@@ -380,8 +511,27 @@ func parseKdbResponseToFrames(kdbResponse *kdb.K, model QueryModel, refID string
 			frame.RefID = refID
 		}
 		frames = append(frames, groupedFrames...)
+	case model.CompatibilityMode == CompatibilityModePanopticon && kdbResponse.Type == kdb.K0:
+		frame, err := ParseKdbDictListAsFrame(kdbResponse)
+		if err != nil {
+			frame, err = ParseKdbObjectAsFrame(kdbResponse)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("unable to parse Panopticon generic list result (%s): %w", describeKdbObject(kdbResponse), err)
+		}
+		frame.Name = refID
+		frame.RefID = refID
+		frames = append(frames, frame)
+	case model.CompatibilityMode == CompatibilityModePanopticon && (kdbResponse.Type < kdb.K0 || (kdbResponse.Type > kdb.K0 && kdbResponse.Type <= kdb.KT)):
+		frame, err := ParseKdbObjectAsFrame(kdbResponse)
+		if err != nil {
+			return nil, fmt.Errorf("unable to parse Panopticon scalar/vector result (%s): %w", describeKdbObject(kdbResponse), err)
+		}
+		frame.Name = refID
+		frame.RefID = refID
+		frames = append(frames, frame)
 	default:
-		return nil, fmt.Errorf("returned object of unsupported type %v, only tables and grouped tables are supported", kdbResponse.Type)
+		return nil, fmt.Errorf("returned unsupported kdb+ object (%s), only tables and grouped tables are supported in %s compatibility mode", describeKdbObject(kdbResponse), model.CompatibilityMode)
 	}
 
 	if model.UseTimeColumn {
@@ -392,6 +542,16 @@ func parseKdbResponseToFrames(kdbResponse *kdb.K, model QueryModel, refID string
 		}
 	}
 	return frames, nil
+}
+
+func applyDeferredQueryWrapper(queryText string, wrapper string) (string, error) {
+	if strings.TrimSpace(wrapper) == "" {
+		return "", fmt.Errorf("deferred async mode requires a query wrapper containing {Query}")
+	}
+	if strings.Count(wrapper, "{Query}") != 1 {
+		return "", fmt.Errorf("deferred query wrapper must contain exactly one {Query} placeholder")
+	}
+	return strings.Replace(wrapper, "{Query}", queryText, 1), nil
 }
 
 func moveTimeColumnToFront(frame *data.Frame, timeColumn string) error {

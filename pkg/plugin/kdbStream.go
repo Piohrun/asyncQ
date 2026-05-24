@@ -104,7 +104,11 @@ func decodeLiveQueryRequest(raw json.RawMessage, mode string, path string) (live
 	}
 	model := liveReq.QueryModel
 	normalizeQueryModel(&model)
-	model.ExecutionMode = mode
+	if mode == ExecutionModeStream {
+		model.ExecutionMode = ExecutionModeStream
+	} else if model.ExecutionMode == "" || model.ExecutionMode == ExecutionModeSync || model.ExecutionMode == ExecutionModeStream {
+		model.ExecutionMode = ExecutionModeAsync
+	}
 	if liveReq.RefID == "" {
 		liveReq.RefID = "A"
 	}
@@ -130,6 +134,36 @@ func (d *KdbDatasource) runAsyncQueryStream(ctx context.Context, req *backend.Ru
 	if err != nil {
 		return err
 	}
+	d.normalizeAsyncQueryModel(liveReq, &model)
+	switch model.ExecutionMode {
+	case ExecutionModePluginAsync:
+		if err := prepareQueryForExecution(req.PluginContext, query, &model); err != nil {
+			_ = sendControlFrame(sender, liveReq.RefID, model.ExecutionMode, "error", requestID, "", err.Error(), 0, true)
+			return nil
+		}
+		return d.runPluginManagedAsyncQueryStream(ctx, req.PluginContext, liveReq, query, model, requestID, sender)
+	case ExecutionModeDeferredAsync:
+		model.OriginalQueryText = model.QueryText
+		wrappedQuery, err := applyDeferredQueryWrapper(model.QueryText, model.DeferredQueryWrapper)
+		if err != nil {
+			_ = sendControlFrame(sender, liveReq.RefID, model.ExecutionMode, "error", requestID, "", err.Error(), 0, true)
+			return nil
+		}
+		model.QueryText = wrappedQuery
+		if err := prepareQueryForExecution(req.PluginContext, query, &model); err != nil {
+			_ = sendControlFrame(sender, liveReq.RefID, model.ExecutionMode, "error", requestID, "", err.Error(), 0, true)
+			return nil
+		}
+		return d.runPluginManagedAsyncQueryStream(ctx, req.PluginContext, liveReq, query, model, requestID, sender)
+	case ExecutionModeAsync, "":
+	default:
+		return fmt.Errorf("unsupported async execution mode: %s", model.ExecutionMode)
+	}
+	if err := prepareQueryForExecution(req.PluginContext, query, &model); err != nil {
+		_ = sendControlFrame(sender, liveReq.RefID, model.ExecutionMode, "error", requestID, "", err.Error(), 0, true)
+		return nil
+	}
+
 	conn, err := d.newConnection()
 	if err != nil {
 		return err
@@ -200,9 +234,106 @@ func (d *KdbDatasource) runAsyncQueryStream(ctx context.Context, req *backend.Ru
 	}
 }
 
+func (d *KdbDatasource) normalizeAsyncQueryModel(liveReq liveQueryRequest, model *QueryModel) {
+	if liveReq.QueryModel.ExecutionMode == "" {
+		model.ExecutionMode = ""
+	}
+	d.normalizeQueryModel(model)
+	if model.ExecutionMode == "" || model.ExecutionMode == ExecutionModeSync || model.ExecutionMode == ExecutionModeStream {
+		model.ExecutionMode = ExecutionModeAsync
+	}
+}
+
+func (d *KdbDatasource) runPluginManagedAsyncQueryStream(ctx context.Context, pCtx backend.PluginContext, liveReq liveQueryRequest, query backend.DataQuery, model QueryModel, requestID string, sender *backend.StreamSender) error {
+	if err := d.acquireAsyncSlot(ctx); err != nil {
+		_ = sendControlFrame(sender, liveReq.RefID, model.ExecutionMode, "error", requestID, "", err.Error(), 0, true)
+		return nil
+	}
+	defer d.releaseAsyncSlot()
+
+	if err := sendControlFrame(sender, liveReq.RefID, model.ExecutionMode, "queued", requestID, "", "", 0, false); err != nil {
+		return err
+	}
+
+	conn, err := d.newConnection()
+	if err != nil {
+		_ = sendControlFrame(sender, liveReq.RefID, model.ExecutionMode, "error", requestID, "", err.Error(), 0, true)
+		return nil
+	}
+	defer conn.Close()
+
+	resultCh := make(chan *kdb.K, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		result, err := callKdbFunction(conn, queryExecutionFunction(model), buildDirectQueryRequest(pCtx, query, model))
+		if err != nil {
+			errCh <- err
+			return
+		}
+		resultCh <- result
+	}()
+
+	ticker := time.NewTicker(time.Duration(model.PollIntervalMs) * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+			_ = sendControlFrame(sender, liveReq.RefID, model.ExecutionMode, "cancelled", requestID, "", ctx.Err().Error(), 1, true)
+			return nil
+		case err := <-errCh:
+			_ = sendControlFrame(sender, liveReq.RefID, model.ExecutionMode, "error", requestID, "", err.Error(), 1, true)
+			return nil
+		case result := <-resultCh:
+			frames, err := parseKdbResponseToFrames(result, model, liveReq.RefID)
+			if err != nil {
+				_ = sendControlFrame(sender, liveReq.RefID, model.ExecutionMode, "error", requestID, "", err.Error(), 1, true)
+				return nil
+			}
+			for _, frame := range frames {
+				markFrame(frame, model.ExecutionMode, "data", requestID, false, false)
+				if err := sender.SendFrame(frame, data.IncludeAll); err != nil {
+					return err
+				}
+			}
+			return sendControlFrame(sender, liveReq.RefID, model.ExecutionMode, "done", requestID, "", "", 1, true)
+		case <-ticker.C:
+			if err := sendControlFrame(sender, liveReq.RefID, model.ExecutionMode, "running", requestID, "", "", 0.5, false); err != nil {
+				_ = conn.Close()
+				return err
+			}
+		}
+	}
+}
+
+func (d *KdbDatasource) acquireAsyncSlot(ctx context.Context) error {
+	d.normalizeDatasourceDefaults()
+	select {
+	case d.asyncJobs <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return fmt.Errorf("async job limit reached (%d)", d.AsyncMaxJobs)
+	}
+}
+
+func (d *KdbDatasource) releaseAsyncSlot() {
+	select {
+	case <-d.asyncJobs:
+	default:
+	}
+}
+
 func (d *KdbDatasource) runKdbPushStream(ctx context.Context, req *backend.RunStreamRequest, sender *backend.StreamSender) error {
 	liveReq, query, model, streamID, err := decodeLiveQueryRequest(req.Data, ExecutionModeStream, req.Path)
 	if err != nil {
+		return err
+	}
+	d.normalizeQueryModel(&model)
+	model.ExecutionMode = ExecutionModeStream
+	if err := prepareQueryForExecution(req.PluginContext, query, &model); err != nil {
 		return err
 	}
 	conn, err := d.newConnection()
@@ -307,11 +438,10 @@ func callKdbFunction(conn *kdb.KDBConn, fn string, args ...*kdb.K) (*kdb.K, erro
 func buildHelperRequest(pCtx backend.PluginContext, query backend.DataQuery, model QueryModel, requestID string, streamID string) *kdb.K {
 	baseKeys, baseValues := buildMasterKdbLists(pCtx, query, model)
 	keys := append(append([]string{}, baseKeys.Data.([]string)...),
-		"RequestID", "StreamID", "ExecutionMode", "PollIntervalMs", "MaxStreamRows")
+		"RequestID", "StreamID", "PollIntervalMs", "MaxStreamRows")
 	values := append(append([]*kdb.K{}, baseValues.Data.([]*kdb.K)...),
 		kdb.Atom(kdb.KC, requestID),
 		kdb.Atom(kdb.KC, streamID),
-		kdb.Symbol(model.ExecutionMode),
 		kdb.Long(int64(model.PollIntervalMs)),
 		kdb.Long(int64(model.MaxStreamRows)))
 	return kdb.NewDict(kdb.SymbolV(keys), kdb.NewList(values...))

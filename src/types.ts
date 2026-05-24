@@ -1,12 +1,19 @@
 import { DataQuery, DataSourceJsonData } from '@grafana/data';
 
+export type ExecutionMode = 'sync' | 'async' | 'pluginAsync' | 'deferredAsync' | 'stream';
+export type CompatibilityMode = 'native' | 'aquaq' | 'panopticon';
+
 export interface MyQuery extends DataQuery {
   queryText?: string;
   timeOut: number;
   useTimeColumn: boolean;
   timeColumn: string;
   includeKeyColumns: boolean;
-  executionMode?: 'sync' | 'async' | 'stream';
+  executionMode?: ExecutionMode;
+  compatibilityMode?: CompatibilityMode;
+  deferredQueryWrapper?: string;
+  panopticonQueryWrapper?: string;
+  panopticonRequestFunction?: string;
   streamName?: string;
   pollIntervalMs?: number;
   maxStreamRows?: number;
@@ -24,6 +31,12 @@ export interface MyDataSourceOptions extends DataSourceJsonData {
   withCACert: boolean;
   enableAsync?: boolean;
   enableStreaming?: boolean;
+  executionMode?: ExecutionMode;
+  compatibilityMode?: CompatibilityMode;
+  deferredQueryWrapper?: string;
+  panopticonQueryWrapper?: string;
+  panopticonRequestFunction?: string;
+  asyncMaxJobs?: number;
 }
 
 export const defaultConfig: Partial<MyDataSourceOptions> = {
@@ -32,6 +45,8 @@ export const defaultConfig: Partial<MyDataSourceOptions> = {
   withCACert: false,
   enableAsync: true,
   enableStreaming: true,
+  executionMode: 'sync',
+  compatibilityMode: 'native',
 };
 
 /**

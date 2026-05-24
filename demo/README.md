@@ -5,7 +5,7 @@ This demo runs:
 - a local q process on port `5000`
 - Grafana 13 on `http://localhost:3000`
 - a provisioned `AsyncQ Demo` datasource
-- a provisioned `AsyncQ kdb+ demo` dashboard with sync, async, and stream panels
+- a provisioned `AsyncQ kdb+ demo` dashboard with sync, helper async, plugin async, deferred wrapper, Panopticon compatibility, and stream panels
 
 ## Start without Docker
 
@@ -38,6 +38,10 @@ Docker is optional. It is useful when you want a fully disposable Grafana contai
 
 - `Sync latest trades` calls `.demo.asyncq.latest 25`.
 - `Async aggregate after queued delay` calls `.demo.asyncq.slowAgg[]` through the async helper functions. The demo q process waits about three seconds before marking the job done.
+- `Plugin async aggregate` runs `.demo.asyncq.slowAgg[]` without loading any q async helper functions for that query path.
+- `Deferred wrapper aggregate` runs `.demo.asyncq.deferred[{Query}]` around `.demo.asyncq.slowAgg[]` to demonstrate wrapper expansion.
+- `Panopticon dict result` enables Panopticon compatibility mode and displays a symbol-keyed q dictionary from `.demo.asyncq.panopticonSummary[]`.
+- To try Panopticon request-function mode, set `Compatibility` to `Panopticon`, set `Pano Fn` to `{[req] .demo.asyncq.panopticonRequest req}`, and run any harmless query text such as `1+1`.
 - `Streaming tick prices` and `Streaming rows` subscribe through Grafana Live. The q timer publishes five new rows every second to active streams.
 - `Demo process counters` shows row, stream, and job counts from the q process.
 

@@ -1,12 +1,12 @@
 # AsyncQ kdb+ Grafana datasource
 
-AsyncQ is a Grafana 13 backend datasource for kdb+ derived from AquaQ Analytics' community kdb+ backend datasource. The synchronous query path is intentionally kept compatible with the original plugin, while panel queries can opt into asynchronous execution or q-driven streaming through Grafana Live.
+AsyncQ is a Grafana 13 backend datasource for kdb+ derived from AquaQ Analytics' community kdb+ backend datasource. The synchronous query path is intentionally kept compatible with the original plugin, while panel queries can opt into helper async, plugin-managed async, deferred-wrapper async, or q-driven streaming through Grafana Live.
 
 ## Query modes
 
 Sync mode is the default and matches the upstream datasource behavior. Variables and alerting use sync mode.
 
-Async mode uses Grafana Live and calls q helper functions:
+Helper Async mode uses Grafana Live and calls q helper functions:
 
 ```q
 .grafana.asyncq.async.submit requestDict
@@ -14,6 +14,10 @@ Async mode uses Grafana Live and calls q helper functions:
 .grafana.asyncq.async.result jobId
 .grafana.asyncq.async.cancel jobId
 ```
+
+Plugin Async mode uses Grafana Live but does not require q helper functions. The backend opens a dedicated IPC connection, evaluates the query in a goroutine, emits status frames while waiting, and returns the final q result when it arrives.
+
+Deferred Async mode first expands a wrapper containing exactly one `{Query}` placeholder, then runs that expression through Plugin Async. Use this for q gateways that already support deferred responses or wrapper-based submission.
 
 Stream mode uses Grafana Live and calls:
 
@@ -41,4 +45,8 @@ The helper documents the backend contract and supports local testing. Its async 
 
 ## Data contract
 
-Queries must return either a flat kdb+ table or a grouped table. The request dictionary preserves the upstream `AQUAQ_KDB_BACKEND_GRAF_DATASOURCE` key for compatibility and adds async/stream metadata such as `RequestID`, `StreamID`, `ExecutionMode`, `PollIntervalMs`, and `MaxStreamRows`.
+Native and AquaQ compatibility modes accept flat kdb+ tables or grouped tables. Panopticon compatibility mode also accepts keyed tables, symbol-keyed dictionaries, atoms, vectors, and lists of row dictionaries and converts them into Grafana frames for table-style panels.
+
+The request dictionary preserves the upstream `AQUAQ_KDB_BACKEND_GRAF_DATASOURCE` key for compatibility and adds metadata such as `ExecutionMode`, `CompatibilityMode`, `RequestID`, `StreamID`, `PollIntervalMs`, `MaxStreamRows`, and a `Panopticon` dict containing timestamp aliases, interval metadata, `RefID`, `OriginalQuery`, and `CompiledQuery`.
+
+Panopticon query text and wrappers expand q-literal macros such as `{TimeWindowStart}`, `{TimeWindowEnd}`, `{Snapshot}`, `{IntervalMs}`, `{MaxDataPoints}`, `{RefID}`, and `{UserLogin}`. `Pano Wrapper` rewrites query text with one `{Query}` placeholder. `Pano Fn` calls a q function or lambda with the full request dictionary instead of evaluating query text directly.

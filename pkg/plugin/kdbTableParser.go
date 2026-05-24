@@ -115,6 +115,431 @@ func ParseSimpleKdbTable(res *kdb.K) (*data.Frame, error) {
 	}
 	return frame, nil
 }
+
+func ParseKeyedKdbTableAsFrame(res *kdb.K) (*data.Frame, error) {
+	kdbDict := res.Data.(kdb.Dict)
+	if kdbDict.Key.Type != kdb.XT || kdbDict.Value.Type != kdb.XT {
+		return nil, fmt.Errorf("dictionary is not a keyed table")
+	}
+	keyFrame, err := ParseSimpleKdbTable(kdbDict.Key)
+	if err != nil {
+		return nil, err
+	}
+	valueFrame, err := ParseSimpleKdbTable(kdbDict.Value)
+	if err != nil {
+		return nil, err
+	}
+	if len(keyFrame.Fields) > 0 && len(valueFrame.Fields) > 0 && keyFrame.Fields[0].Len() != valueFrame.Fields[0].Len() {
+		return nil, fmt.Errorf("key and value table row counts differ")
+	}
+	frame := data.NewFrame("response")
+	frame.Fields = append(frame.Fields, keyFrame.Fields...)
+	frame.Fields = append(frame.Fields, valueFrame.Fields...)
+	return frame, nil
+}
+
+func ParseKdbObjectAsFrame(res *kdb.K) (*data.Frame, error) {
+	frame := data.NewFrame("response")
+	values, err := kdbObjectColumn(res)
+	if err != nil {
+		return nil, err
+	}
+	frame.Fields = append(frame.Fields, data.NewField("value", nil, values))
+	return frame, nil
+}
+
+func ParseKdbDictAsFrame(res *kdb.K) (*data.Frame, error) {
+	d := res.Data.(kdb.Dict)
+	columnNames, err := dictColumnNames(d.Key)
+	if err != nil {
+		return nil, err
+	}
+	values, err := dictValues(d.Value, len(columnNames))
+	if err != nil {
+		return nil, err
+	}
+	if len(columnNames) != len(values) {
+		return nil, fmt.Errorf("dictionary key/value lengths differ")
+	}
+	depth := dictFrameDepth(values)
+	frame := data.NewFrame("response")
+	for i, name := range columnNames {
+		col, err := kdbObjectColumnWithDepth(values[i], depth)
+		if err != nil {
+			return nil, fmt.Errorf("dictionary value %q: %w", name, err)
+		}
+		frame.Fields = append(frame.Fields, data.NewField(name, nil, col))
+	}
+	return frame, nil
+}
+
+func ParseKdbDictListAsFrame(res *kdb.K) (*data.Frame, error) {
+	if res.Type != kdb.K0 {
+		return nil, fmt.Errorf("object is not a generic list")
+	}
+	rows := res.Data.([]*kdb.K)
+	if len(rows) == 0 {
+		return nil, fmt.Errorf("dictionary list is empty")
+	}
+	if rows[0] == nil || rows[0].Type != kdb.XD {
+		return nil, fmt.Errorf("first item is not a dictionary")
+	}
+	firstDict := rows[0].Data.(kdb.Dict)
+	columnNames, err := dictColumnNames(firstDict.Key)
+	if err != nil {
+		return nil, err
+	}
+	columns := make([][]interface{}, len(columnNames))
+	for i := range columns {
+		columns[i] = make([]interface{}, 0, len(rows))
+	}
+	for rowIndex, row := range rows {
+		if row == nil || row.Type != kdb.XD {
+			return nil, fmt.Errorf("item %d is not a dictionary", rowIndex)
+		}
+		rowDict := row.Data.(kdb.Dict)
+		rowNames, err := dictColumnNames(rowDict.Key)
+		if err != nil {
+			return nil, fmt.Errorf("item %d keys: %w", rowIndex, err)
+		}
+		if !sameStringSlice(columnNames, rowNames) {
+			return nil, fmt.Errorf("item %d keys differ from first item", rowIndex)
+		}
+		values, err := dictValues(rowDict.Value, len(columnNames))
+		if err != nil {
+			return nil, fmt.Errorf("item %d values: %w", rowIndex, err)
+		}
+		for colIndex, value := range values {
+			columns[colIndex] = append(columns[colIndex], kdbCellValue(value))
+		}
+	}
+	frame := data.NewFrame("response")
+	for i, name := range columnNames {
+		frame.Fields = append(frame.Fields, data.NewField(name, nil, typedInterfaceColumn(columns[i])))
+	}
+	return frame, nil
+}
+
+func dictColumnNames(keys *kdb.K) ([]string, error) {
+	switch keys.Type {
+	case -kdb.KS:
+		return []string{keys.Data.(string)}, nil
+	case kdb.KS:
+		return keys.Data.([]string), nil
+	case kdb.KC:
+		return []string{keys.Data.(string)}, nil
+	case kdb.K0:
+		items := keys.Data.([]*kdb.K)
+		names := make([]string, len(items))
+		for i, item := range items {
+			names[i] = kdbObjectString(item)
+		}
+		return names, nil
+	default:
+		return nil, fmt.Errorf("unsupported dictionary key type %v", keys.Type)
+	}
+}
+
+func sameStringSlice(a []string, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func kdbCellValue(value *kdb.K) interface{} {
+	if value == nil {
+		return nil
+	}
+	if value.Type < kdb.K0 {
+		return kdbAtomValue(value)
+	}
+	if value.Type == kdb.KC {
+		return value.Data.(string)
+	}
+	if value.Type > kdb.K0 && value.Type <= kdb.KT && value.Len() == 1 {
+		if item, ok := correctedIndex(value, 0).(*kdb.K); ok {
+			return kdbAtomValue(item)
+		}
+	}
+	return kdbObjectString(value)
+}
+
+func typedInterfaceColumn(col []interface{}) interface{} {
+	if len(col) == 0 {
+		return []string{}
+	}
+	for _, value := range col {
+		if value == nil {
+			return stringInterfaceColumn(col)
+		}
+		switch value.(type) {
+		case string:
+			return typedStringColumn(col)
+		case bool:
+			return typedBoolColumn(col)
+		case int16:
+			return typedInt16Column(col)
+		case int32:
+			return typedInt32Column(col)
+		case int64:
+			return typedInt64Column(col)
+		case float32:
+			return typedFloat32Column(col)
+		case float64:
+			return typedFloat64Column(col)
+		case time.Time:
+			return typedTimeColumn(col)
+		default:
+			return stringInterfaceColumn(col)
+		}
+	}
+	return stringInterfaceColumn(col)
+}
+
+func typedStringColumn(col []interface{}) interface{} {
+	out := make([]string, len(col))
+	for i, value := range col {
+		v, ok := value.(string)
+		if !ok {
+			return stringInterfaceColumn(col)
+		}
+		out[i] = v
+	}
+	return out
+}
+
+func typedBoolColumn(col []interface{}) interface{} {
+	out := make([]bool, len(col))
+	for i, value := range col {
+		v, ok := value.(bool)
+		if !ok {
+			return stringInterfaceColumn(col)
+		}
+		out[i] = v
+	}
+	return out
+}
+
+func typedInt16Column(col []interface{}) interface{} {
+	out := make([]int16, len(col))
+	for i, value := range col {
+		v, ok := value.(int16)
+		if !ok {
+			return stringInterfaceColumn(col)
+		}
+		out[i] = v
+	}
+	return out
+}
+
+func typedInt32Column(col []interface{}) interface{} {
+	out := make([]int32, len(col))
+	for i, value := range col {
+		v, ok := value.(int32)
+		if !ok {
+			return stringInterfaceColumn(col)
+		}
+		out[i] = v
+	}
+	return out
+}
+
+func typedInt64Column(col []interface{}) interface{} {
+	out := make([]int64, len(col))
+	for i, value := range col {
+		v, ok := value.(int64)
+		if !ok {
+			return stringInterfaceColumn(col)
+		}
+		out[i] = v
+	}
+	return out
+}
+
+func typedFloat32Column(col []interface{}) interface{} {
+	out := make([]float32, len(col))
+	for i, value := range col {
+		v, ok := value.(float32)
+		if !ok {
+			return stringInterfaceColumn(col)
+		}
+		out[i] = v
+	}
+	return out
+}
+
+func typedFloat64Column(col []interface{}) interface{} {
+	out := make([]float64, len(col))
+	for i, value := range col {
+		v, ok := value.(float64)
+		if !ok {
+			return stringInterfaceColumn(col)
+		}
+		out[i] = v
+	}
+	return out
+}
+
+func typedTimeColumn(col []interface{}) interface{} {
+	out := make([]time.Time, len(col))
+	for i, value := range col {
+		v, ok := value.(time.Time)
+		if !ok {
+			return stringInterfaceColumn(col)
+		}
+		out[i] = v
+	}
+	return out
+}
+
+func stringInterfaceColumn(col []interface{}) []string {
+	out := make([]string, len(col))
+	for i, value := range col {
+		out[i] = fmt.Sprint(value)
+	}
+	return out
+}
+
+func dictValues(values *kdb.K, keyCount int) ([]*kdb.K, error) {
+	if values == nil {
+		return nil, fmt.Errorf("dictionary values are nil")
+	}
+	if list, ok := values.Data.([]*kdb.K); ok {
+		return list, nil
+	}
+	if keyCount == 1 {
+		return []*kdb.K{values}, nil
+	}
+	if values.Type > kdb.K0 && values.Type <= kdb.KT && values.Len() == keyCount {
+		out := make([]*kdb.K, keyCount)
+		for i := 0; i < keyCount; i++ {
+			item, ok := correctedIndex(values, i).(*kdb.K)
+			if !ok || item == nil {
+				return nil, fmt.Errorf("dictionary value at index %d could not be indexed", i)
+			}
+			out[i] = item
+		}
+		return out, nil
+	}
+	return nil, fmt.Errorf("dictionary values are not compatible with %d keys", keyCount)
+}
+
+func dictFrameDepth(values []*kdb.K) int {
+	depth := 1
+	for _, value := range values {
+		if value == nil || value.Type < kdb.K0 {
+			continue
+		}
+		if value.Type == kdb.KC {
+			continue
+		}
+		if value.Len() > depth {
+			depth = value.Len()
+		}
+	}
+	return depth
+}
+
+func kdbObjectColumn(value *kdb.K) (interface{}, error) {
+	return kdbObjectColumnWithDepth(value, kdbObjectDepth(value))
+}
+
+func kdbObjectColumnWithDepth(value *kdb.K, depth int) (interface{}, error) {
+	if value == nil {
+		return []interface{}{nil}, nil
+	}
+	if value.Type < kdb.K0 {
+		return projectAtom(kdbAtomValue(value), depth), nil
+	}
+	if value.Type == kdb.KC {
+		if depth <= 1 {
+			return []string{value.Data.(string)}, nil
+		}
+		return projectAtom(value.Data.(string), depth), nil
+	}
+	if value.Type == kdb.K0 {
+		if strings, err := stringParser(value); err == nil {
+			return resizeColumn(strings, depth), nil
+		}
+		items := value.Data.([]*kdb.K)
+		out := make([]string, len(items))
+		for i, item := range items {
+			out[i] = kdbObjectString(item)
+		}
+		return resizeColumn(out, depth), nil
+	}
+	return resizeParsedColumn(standardColumnParser(value), depth), nil
+}
+
+func kdbObjectDepth(value *kdb.K) int {
+	if value == nil || value.Type < kdb.K0 || value.Type == kdb.KC {
+		return 1
+	}
+	return value.Len()
+}
+
+func kdbAtomValue(value *kdb.K) interface{} {
+	if value.Type == -kdb.KC {
+		return string(value.Data.(byte))
+	}
+	return value.Data
+}
+
+func kdbObjectString(value *kdb.K) string {
+	if value == nil {
+		return ""
+	}
+	if value.Type == -kdb.KC {
+		return string(value.Data.(byte))
+	}
+	if value.Type == kdb.KC {
+		return value.Data.(string)
+	}
+	return fmt.Sprint(value.Data)
+}
+
+func resizeParsedColumn(col interface{}, depth int) interface{} {
+	switch v := col.(type) {
+	case []string:
+		return resizeColumn(v, depth)
+	case []bool:
+		return resizeColumn(v, depth)
+	case []byte:
+		return resizeColumn(v, depth)
+	case []int16:
+		return resizeColumn(v, depth)
+	case []int32:
+		return resizeColumn(v, depth)
+	case []int64:
+		return resizeColumn(v, depth)
+	case []float32:
+		return resizeColumn(v, depth)
+	case []float64:
+		return resizeColumn(v, depth)
+	case []time.Time:
+		return resizeColumn(v, depth)
+	default:
+		return col
+	}
+}
+
+func resizeColumn[T any](col []T, depth int) []T {
+	if len(col) == depth || len(col) != 1 || depth <= 1 {
+		return col
+	}
+	out := make([]T, depth)
+	for i := range out {
+		out[i] = col[0]
+	}
+	return out
+}
+
 func ParseGroupedKdbTable(res *kdb.K, includeKeys bool) ([]*data.Frame, error) {
 	kdbDict := res.Data.(kdb.Dict)
 	if kdbDict.Key.Type != kdb.XT || kdbDict.Value.Type != kdb.XT {

@@ -16,3 +16,8 @@ datasources:
       withCACert: false
       enableAsync: true
       enableStreaming: true
+      executionMode: sync
+      compatibilityMode: native
+      panopticonQueryWrapper: ""
+      panopticonRequestFunction: ""
+      asyncMaxJobs: 16

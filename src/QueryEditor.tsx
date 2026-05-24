@@ -35,6 +35,22 @@ export class QueryEditor extends PureComponent<Props> {
         const { onChange, query } = this.props;
         onChange({ ...query, executionMode: event.target.value as MyQuery['executionMode'] });
     };
+    onCompatibilityModeChange = (event: ChangeEvent<HTMLSelectElement>) => {
+        const { onChange, query } = this.props;
+        onChange({ ...query, compatibilityMode: event.target.value as MyQuery['compatibilityMode'] });
+    };
+    onDeferredWrapperChange = (event: ChangeEvent<HTMLInputElement>) => {
+        const { onChange, query } = this.props;
+        onChange({ ...query, deferredQueryWrapper: event.target.value });
+    };
+    onPanopticonQueryWrapperChange = (event: ChangeEvent<HTMLInputElement>) => {
+        const { onChange, query } = this.props;
+        onChange({ ...query, panopticonQueryWrapper: event.target.value });
+    };
+    onPanopticonRequestFunctionChange = (event: ChangeEvent<HTMLInputElement>) => {
+        const { onChange, query } = this.props;
+        onChange({ ...query, panopticonRequestFunction: event.target.value });
+    };
     onStreamNameChange = (event: ChangeEvent<HTMLInputElement>) => {
         const { onChange, query } = this.props;
         onChange({ ...query, streamName: event.target.value });
@@ -54,16 +70,27 @@ export class QueryEditor extends PureComponent<Props> {
 
     render() {
         const query = this.props.query;
-        const { queryText, timeOut, useTimeColumn, includeKeyColumns, timeColumn, executionMode, streamName, pollIntervalMs, maxStreamRows } = query;
+        const { queryText, timeOut, useTimeColumn, includeKeyColumns, timeColumn, executionMode, compatibilityMode, deferredQueryWrapper, panopticonQueryWrapper, panopticonRequestFunction, streamName, pollIntervalMs, maxStreamRows } = query;
         const mode = executionMode || 'sync';
+        const compat = compatibilityMode || 'native';
         return (
             <>
                 <div className="gf-form" style={{paddingBottom: 4}}>
                     <span className="gf-form-label width-13">Mode</span>
                     <select className="gf-form-input width-15" value={mode} onChange={this.onExecutionModeChange}>
                         <option value="sync">Sync</option>
-                        <option value="async">Async</option>
+                        <option value="async">Helper Async</option>
+                        <option value="pluginAsync">Plugin Async</option>
+                        <option value="deferredAsync">Deferred Async</option>
                         <option value="stream">Stream</option>
+                    </select>
+                </div>
+                <div className="gf-form" style={{paddingBottom: 4}}>
+                    <span className="gf-form-label width-13">Compatibility</span>
+                    <select className="gf-form-input width-15" value={compat} onChange={this.onCompatibilityModeChange}>
+                        <option value="native">Native AsyncQ</option>
+                        <option value="aquaq">AquaQ</option>
+                        <option value="panopticon">Panopticon</option>
                     </select>
                 </div>
                 <div style={{paddingBottom: 4}}>
@@ -77,6 +104,44 @@ export class QueryEditor extends PureComponent<Props> {
                     tooltip="Please enter a KDB Query"
                 />
                 </div>
+                {mode === 'deferredAsync' && <div style={{paddingBottom: 4}}>
+                <FormField
+                    name="DeferredWrapperInputField"
+                    inputWidth={40}
+                    labelWidth={13}
+                    value={deferredQueryWrapper || ''}
+                    onChange={this.onDeferredWrapperChange}
+                    label="Wrapper"
+                    tooltip="Deferred async wrapper containing exactly one {Query} placeholder."
+                    placeholder=".gateway.defer[{Query}]"
+                />
+                </div>}
+                {compat === 'panopticon' && <>
+                <div style={{paddingBottom: 4}}>
+                <FormField
+                    name="PanopticonWrapperInputField"
+                    inputWidth={40}
+                    labelWidth={13}
+                    value={panopticonQueryWrapper || ''}
+                    onChange={this.onPanopticonQueryWrapperChange}
+                    label="Pano Wrapper"
+                    tooltip="Optional Panopticon wrapper expression. Use exactly one {Query}; supported macros include {TimeWindowStart}, {TimeWindowEnd}, {Snapshot}, {IntervalMs}, and {MaxDataPoints}."
+                    placeholder=".pano.run[{Query};{TimeWindowStart};{TimeWindowEnd}]"
+                />
+                </div>
+                <div style={{paddingBottom: 4}}>
+                <FormField
+                    name="PanopticonRequestFunctionInputField"
+                    inputWidth={40}
+                    labelWidth={13}
+                    value={panopticonRequestFunction || ''}
+                    onChange={this.onPanopticonRequestFunctionChange}
+                    label="Pano Fn"
+                    tooltip="Optional q function or lambda that accepts the full request dictionary. When set, the backend calls it instead of evaluating Query text directly."
+                    placeholder="{[req] .pano.run req}"
+                />
+                </div>
+                </>}
                 {mode !== 'sync' && <div style={{paddingBottom: 4}}>
                 <FormField
                     name="PollIntervalInputField"

@@ -26,8 +26,11 @@ interface StreamSession {
 const streamSessions = new Map<string, StreamSession>();
 
 export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptions> {
+  private options: MyDataSourceOptions;
+
   constructor(instanceSettings: DataSourceInstanceSettings<MyDataSourceOptions>) {
     super(instanceSettings);
+    this.options = instanceSettings.jsonData || ({} as MyDataSourceOptions);
   }
 
   applyTemplateVariables(query: MyQuery, scopedVars?: ScopedVars) {
@@ -35,13 +38,17 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
     return {
       ...query,
       queryText: query.queryText ? templateSrv.replace(query.queryText, scopedVars) : '',
-      executionMode: query.executionMode || defaultMode,
+      executionMode: query.executionMode || this.options.executionMode || defaultMode,
+      compatibilityMode: query.compatibilityMode || this.options.compatibilityMode || 'native',
+      deferredQueryWrapper: query.deferredQueryWrapper || this.options.deferredQueryWrapper || '',
+      panopticonQueryWrapper: query.panopticonQueryWrapper || this.options.panopticonQueryWrapper || '',
+      panopticonRequestFunction: query.panopticonRequestFunction || this.options.panopticonRequestFunction || '',
     };
   }
 
   query(request: DataQueryRequest<MyQuery>): Observable<DataQueryResponse> {
-    const syncTargets = request.targets.filter((target) => (target.executionMode || defaultMode) === 'sync');
-    const liveTargets = request.targets.filter((target) => (target.executionMode || defaultMode) !== 'sync');
+    const syncTargets = request.targets.filter((target) => this.targetMode(target) === 'sync');
+    const liveTargets = request.targets.filter((target) => this.targetMode(target) !== 'sync');
     const streams: Array<Observable<DataQueryResponse>> = [];
 
     if (syncTargets.length > 0) {
@@ -59,6 +66,10 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
       return streams[0];
     }
     return merge(...streams);
+  }
+
+  private targetMode(target: MyQuery): string {
+    return target.executionMode || this.options.executionMode || defaultMode;
   }
 
   private runLiveQuery(target: MyQuery, request: DataQueryRequest<MyQuery>): Observable<DataQueryResponse> {

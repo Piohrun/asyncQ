@@ -15,7 +15,7 @@ Grafana Live demos.
 .demo.asyncq.SYMS:`AAPL`MSFT`GOOG`AMZN`KX;
 .demo.asyncq.MAXROWS:5000;
 .demo.asyncq.JOBDELAY:0D00:00:03.000000000;
-.demo.asyncq.JOBS:([] jobId:(); status:(); progress:`float$(); query:(); result:(); error:(); submitted:`timestamp$(); due:`timestamp$(); finished:`timestamp$());
+.demo.asyncq.JOBS:([] jobId:(); status:(); progress:`float$(); query:(); request:(); result:(); error:(); submitted:`timestamp$(); due:`timestamp$(); finished:`timestamp$());
 
 .demo.asyncq.text:{[cell]
     $[0=type cell; $[0=count cell; ""; .demo.asyncq.text first cell]; cell]
@@ -68,6 +68,21 @@ Grafana Live demos.
     select avgPrice:avg price, maxPrice:max price, minPrice:min price, trades:count i, turnover:sum price*size by sym from .demo.asyncq.trade where time>.z.p-0D00:05:00.000000000
   };
 
+.demo.asyncq.deferred:{[result]
+    result
+  };
+
+.demo.asyncq.panopticonSummary:{
+    lastAAPL:last exec price from .demo.asyncq.trade where sym=`AAPL;
+    `sym`lastPrice`rows!(`AAPL;lastAAPL;count .demo.asyncq.trade)
+  };
+
+.demo.asyncq.panopticonRequest:{[req]
+    qd:req`Query;
+    p:req`Panopticon;
+    ([] timeWindowStart:enlist p`TimeWindowStart; timeWindowEnd:enlist p`TimeWindowEnd; refId:enlist qd`RefID; originalQuery:enlist qd`OriginalQuery; compiledQuery:enlist qd`CompiledQuery)
+  };
+
 .demo.asyncq.counts:{
     ([] time:enlist .z.p; rows:enlist count .demo.asyncq.trade; streams:enlist count .grafana.asyncq.STREAMS; jobs:enlist count .demo.asyncq.JOBS)
   };
@@ -78,7 +93,7 @@ Grafana Live demos.
     now:.z.p;
     rows:.demo.asyncq.byJobId jobId;
     .demo.asyncq.JOBS::delete from .demo.asyncq.JOBS where i in rows;
-    .demo.asyncq.JOBS::.demo.asyncq.JOBS,enlist `jobId`status`progress`query`result`error`submitted`due`finished!(enlist jobId;enlist "queued";0f;enlist query;(::);enlist "";now;now+.demo.asyncq.JOBDELAY;0Np);
+    .demo.asyncq.JOBS::.demo.asyncq.JOBS,enlist `jobId`status`progress`query`request`result`error`submitted`due`finished!(enlist jobId;enlist "queued";0f;enlist query;enlist req;(::);enlist "";now;now+.demo.asyncq.JOBDELAY;0Np);
     .demo.asyncq.statusDict[jobId;"queued";0f;""]
   };
 
@@ -108,8 +123,8 @@ Grafana Live demos.
 
 .demo.asyncq.completeJob:{[idx]
     row:first select from .demo.asyncq.JOBS where i=idx;
-    query:.demo.asyncq.text row`query;
-    trapped:@[{(1b; value x)}; query; {(0b; x)}];
+    req:row`request;
+    trapped:@[{(1b; .grafana.asyncq.util.evalQuery x)}; req; {(0b; x)}];
     ok:first trapped;
     payload:last trapped;
     $[ok;
@@ -159,3 +174,5 @@ Grafana Live demos.
 -1 "AsyncQ demo q process ready on port ",string system "p";
 -1 "Try sync:  .demo.asyncq.latest 10";
 -1 "Try async: .demo.asyncq.slowAgg[]";
+-1 "Try Panopticon-style dict: .demo.asyncq.panopticonSummary[]";
+-1 "Try Panopticon request function: {[req] .demo.asyncq.panopticonRequest req}";

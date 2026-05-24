@@ -176,14 +176,22 @@ func buildUserKdbDict(settings *backend.User) *kdb.K {
 	return kdb.NewDict(userKeys, userValues)
 }
 
-func buildQueryKdbDict(q backend.DataQuery, qText string) *kdb.K {
-	queryKeys := kdb.SymbolV([]string{"RefID", "Query", "QueryType", "MaxDataPoints", "Interval", "TimeRange"})
+func buildQueryKdbDict(q backend.DataQuery, model QueryModel) *kdb.K {
+	originalQuery := model.OriginalQueryText
+	if originalQuery == "" {
+		originalQuery = model.QueryText
+	}
+	queryKeys := kdb.SymbolV([]string{"RefID", "Query", "QueryType", "MaxDataPoints", "Interval", "TimeRange", "OriginalQuery", "CompiledQuery", "PanopticonQueryWrapper", "PanopticonRequestFunction"})
 	queryValues := kdb.NewList(
 		kdb.Atom(kdb.KC, q.RefID),
-		kdb.Atom(kdb.KC, qText),
+		kdb.Atom(kdb.KC, model.QueryText),
 		kdb.Symbol("QUERY"),
 		kdb.Long(q.MaxDataPoints),
 		kdb.Long(int64(q.Interval)),
-		kdb.Atom(kdb.KP, []time.Time{q.TimeRange.From, q.TimeRange.To}))
+		kdb.Atom(kdb.KP, []time.Time{q.TimeRange.From, q.TimeRange.To}),
+		kdb.Atom(kdb.KC, originalQuery),
+		kdb.Atom(kdb.KC, model.QueryText),
+		kdb.Atom(kdb.KC, model.PanopticonQueryWrapper),
+		kdb.Atom(kdb.KC, model.PanopticonRequestFunction))
 	return kdb.NewDict(queryKeys, queryValues)
 }

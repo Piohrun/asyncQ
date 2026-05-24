@@ -41,15 +41,20 @@ whenever new rows are ready.
     `MessageType`StreamID`Seq`Payload`Error!(status;streamId;seq;payload;err)
   };
 
+.grafana.asyncq.util.evalQuery:{[req]
+    qd:req`Query;
+    fn:.grafana.asyncq.util.get[qd;`PanopticonRequestFunction;""];
+    $[0<count fn; (value fn) req; value qd`Query]
+  };
+
 / Submit an async query.
-/ params:  req - dictionary sent by the Grafana backend; req[`Query;`Query] is evaluated.
+/ params:  req - dictionary sent by the Grafana backend; Query text or Panopticon request function is evaluated.
 / returns: status dictionary with JobID, Status, Progress, Error.
 .grafana.asyncq.async.submit:{[req]
     jobId:.grafana.asyncq.util.get[req;`RequestID; string .z.p];
-    query:req[`Query;`Query];
     .grafana.asyncq.JOBS::.grafana.asyncq.JOBS,enlist `jobId`status`progress`result`error`request`started`finished!(enlist jobId;enlist "running";0f;(::);enlist "";req;.z.p;0Np);
 
-    trapped:@[{(1b; value x)}; query; {(0b; x)}];
+    trapped:@[{(1b; .grafana.asyncq.util.evalQuery x)}; req; {(0b; x)}];
     ok:first trapped;
     payload:last trapped;
     rows:.grafana.asyncq.util.byJobId jobId;

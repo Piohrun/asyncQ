@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	kdb "github.com/sv/kdbgo"
 )
 
@@ -50,6 +51,93 @@ func TestDecodeLiveQueryRequestNormalizesModel(t *testing.T) {
 	}
 	if query.TimeRange.From.IsZero() || query.TimeRange.To.IsZero() {
 		t.Fatal("time range was not parsed")
+	}
+}
+
+func TestDecodeLiveQueryRequestPreservesAsyncStrategy(t *testing.T) {
+	raw := json.RawMessage(`{
+		"refId": "A",
+		"queryText": "select from trade",
+		"executionMode": "pluginAsync"
+	}`)
+
+	_, _, model, _, err := decodeLiveQueryRequest(raw, ExecutionModeAsync, "async/job-1")
+	if err != nil {
+		t.Fatalf("decodeLiveQueryRequest returned error: %v", err)
+	}
+	if model.ExecutionMode != ExecutionModePluginAsync {
+		t.Fatalf("execution mode was not preserved: %q", model.ExecutionMode)
+	}
+}
+
+func TestNormalizeAsyncQueryModelUsesDatasourceDefault(t *testing.T) {
+	liveReq := liveQueryRequest{QueryModel: QueryModel{}}
+	model := QueryModel{ExecutionMode: ExecutionModeAsync}
+	d := KdbDatasource{
+		ExecutionMode:     ExecutionModePluginAsync,
+		CompatibilityMode: CompatibilityModePanopticon,
+	}
+
+	d.normalizeAsyncQueryModel(liveReq, &model)
+
+	if model.ExecutionMode != ExecutionModePluginAsync {
+		t.Fatalf("execution mode did not use datasource default: %q", model.ExecutionMode)
+	}
+	if model.CompatibilityMode != CompatibilityModePanopticon {
+		t.Fatalf("compatibility mode did not use datasource default: %q", model.CompatibilityMode)
+	}
+}
+
+func TestNormalizeAsyncQueryModelFallsBackToHelperAsyncForSyncDefault(t *testing.T) {
+	liveReq := liveQueryRequest{QueryModel: QueryModel{}}
+	model := QueryModel{ExecutionMode: ExecutionModeAsync}
+	d := KdbDatasource{ExecutionMode: ExecutionModeSync}
+
+	d.normalizeAsyncQueryModel(liveReq, &model)
+
+	if model.ExecutionMode != ExecutionModeAsync {
+		t.Fatalf("execution mode should fall back to helper async on async path: %q", model.ExecutionMode)
+	}
+}
+
+func TestApplyDeferredQueryWrapper(t *testing.T) {
+	got, err := applyDeferredQueryWrapper(".slow.query[]", ".gw.defer[{Query}]")
+	if err != nil {
+		t.Fatalf("applyDeferredQueryWrapper returned error: %v", err)
+	}
+	if got != ".gw.defer[.slow.query[]]" {
+		t.Fatalf("unexpected wrapped query: %q", got)
+	}
+}
+
+func TestApplyDeferredQueryWrapperRequiresOnePlaceholder(t *testing.T) {
+	for _, wrapper := range []string{"", ".gw.defer[]", "{Query};{Query}"} {
+		if _, err := applyDeferredQueryWrapper("1+1", wrapper); err == nil {
+			t.Fatalf("expected wrapper %q to fail", wrapper)
+		}
+	}
+}
+
+func TestBuildHelperRequestUsesUniqueKeys(t *testing.T) {
+	req := buildHelperRequest(
+		backend.PluginContext{},
+		backend.DataQuery{},
+		QueryModel{ExecutionMode: ExecutionModeAsync, CompatibilityMode: CompatibilityModeNative},
+		"job-1",
+		"stream-1",
+	)
+	dict := req.Data.(kdb.Dict)
+	seen := map[string]bool{}
+	for _, key := range dict.Key.Data.([]string) {
+		if seen[key] {
+			t.Fatalf("duplicate helper request key: %s", key)
+		}
+		seen[key] = true
+	}
+	for _, key := range []string{"ExecutionMode", "CompatibilityMode", "Panopticon", "RequestID", "StreamID", "PollIntervalMs", "MaxStreamRows"} {
+		if !seen[key] {
+			t.Fatalf("missing helper request key: %s", key)
+		}
 	}
 }
 
