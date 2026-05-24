@@ -142,6 +142,14 @@ This repo includes a Codex-style skill for LLM-assisted Panopticon migrations:
 
 Use it as the instruction bundle when asking an LLM to translate Panopticon q-backed table panels into Grafana panels that use this datasource.
 
+The current compatibility matrix is captured in the skill reference and mirrored by the local demo dashboard:
+
+```text
+http://localhost:3000/d/asyncq-compat-matrix/asyncq-panopticon-compatibility-matrix
+```
+
+The proposed design for configurable same-port legacy async adapters lives in [research/legacy-async-adapter.md](research/legacy-async-adapter.md). That design is intentionally separate from the current runtime until real gateway protocols can be compared against it.
+
 ## Diagnostics
 
 Datasource config includes two diagnostic switches:

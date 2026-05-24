@@ -102,6 +102,7 @@ echo "$PID" > "$PID_FILE"
 
 echo "Started Grafana demo locally with PID $PID"
 echo "URL: http://localhost:$PORT/d/asyncq-kdb-demo/asyncq-kdb-demo"
+echo "Compatibility matrix: http://localhost:$PORT/d/asyncq-compat-matrix/asyncq-panopticon-compatibility-matrix"
 echo "Panopticon tests: http://localhost:$PORT/d/asyncq-pano-compat/asyncq-panopticon-compatibility-tests"
 echo "Async tests: http://localhost:$PORT/d/asyncq-async-tests/asyncq-async-execution-tests"
 echo "Login: admin / admin, or use anonymous admin access."

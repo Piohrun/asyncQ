@@ -120,6 +120,8 @@ Discovery workflow for source code and q ports:
 
 Do not claim the plugin can use arbitrary legacy async protocols by configuration unless the code already supports that adapter. It is acceptable to produce a plugin patch plan when the unchanged gateway contract is understood.
 
+For the proposed configurable adapter shape, see `research/legacy-async-adapter.md` in this repository.
+
 ## Query Target Template
 
 ```json

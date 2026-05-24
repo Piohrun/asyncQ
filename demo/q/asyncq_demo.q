@@ -116,6 +116,18 @@ Grafana Live demos.
     ([] timeWindowStart:enlist p`TimeWindowStart; topLevelStart:enlist req`TimeWindowStart; focusTime:enlist req`FocusTime; intervalMs:enlist req`IntervalMs; refId:enlist qd`RefID; originalQuery:enlist qd`OriginalQuery; compiledQuery:enlist qd`CompiledQuery)
   };
 
+.demo.asyncq.compatMatrixDirect:{
+    ([] feature:enlist "plain q expression/function call"; verdict:enlist "Direct"; mode:enlist "sync or pluginAsync"; rows:enlist count .demo.asyncq.trade; observedAt:enlist .z.p)
+  };
+
+.demo.asyncq.panoUnsupportedNumericKeys:{
+    1 2!3 4
+  };
+
+.demo.asyncq.panoUnsupportedAdapted:{
+    ([] dictKey:string 1 2; dictValue:3 4; verdict:2#enlist "Direct after table adapter")
+  };
+
 .demo.asyncq.counts:{
     ([] time:enlist .z.p; rows:enlist count .demo.asyncq.trade; streams:enlist count .grafana.asyncq.STREAMS; jobs:enlist count .demo.asyncq.JOBS)
   };
@@ -210,3 +222,4 @@ Grafana Live demos.
 -1 "Try async: .demo.asyncq.slowAgg[]";
 -1 "Try Panopticon-style dict: .demo.asyncq.panopticonSummary[]";
 -1 "Try Panopticon request function: {[req] .demo.asyncq.panopticonRequest req}";
+-1 "Try compatibility matrix direct fixture: .demo.asyncq.compatMatrixDirect[]";
