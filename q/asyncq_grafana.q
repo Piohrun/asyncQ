@@ -42,6 +42,7 @@ whenever new rows are ready.
   };
 
 .grafana.asyncq.util.evalQuery:{[req]
+    req:$[98h=type req; first req; req];
     qd:req`Query;
     fn:.grafana.asyncq.util.get[qd;`PanopticonRequestFunction;""];
     $[0<count fn; (value fn) req; value qd`Query]
