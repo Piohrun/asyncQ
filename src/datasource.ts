@@ -23,7 +23,15 @@ interface StreamSession {
   state: LoadingState;
 }
 
+interface AsyncSession {
+  framesByKey: Map<string, DataFrame>;
+  maxRows: number;
+  state: LoadingState;
+}
+
 const streamSessions = new Map<string, StreamSession>();
+const asyncSessions = new Map<string, AsyncSession>();
+const maxAsyncSessions = 100;
 
 export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptions> {
   private options: MyDataSourceOptions;
@@ -82,7 +90,7 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
     const mode = query.executionMode === 'stream' ? 'stream' : 'async';
     const liveID = this.liveID(query, mode, request);
     const path = `${mode}/${liveID}`;
-    const cacheKey = this.liveCacheKey(query, mode, path);
+    const cacheKey = this.liveCacheKey(query, mode, path, request);
     const maxRows = query.maxStreamRows || request.maxDataPoints || 1000;
 
     if (mode === 'stream') {
@@ -95,10 +103,23 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
       return session.response;
     }
 
-    const framesByKey = new Map<string, DataFrame>();
-    let state = LoadingState.Streaming;
+    return this.runAsyncLiveQuery(live, cacheKey, query, request, path, maxRows);
+  }
 
-    return live
+  private runAsyncLiveQuery(
+    live: ReturnType<typeof getGrafanaLiveSrv>,
+    cacheKey: string,
+    query: MyQuery,
+    request: DataQueryRequest<MyQuery>,
+    path: string,
+    maxRows: number
+  ): Observable<DataQueryResponse> {
+    const session = this.getOrCreateAsyncSession(cacheKey, maxRows);
+    session.maxRows = Math.max(session.maxRows, maxRows);
+    session.state = LoadingState.Streaming;
+    const responseKey = `async-${this.stableHash(cacheKey)}`;
+
+    const response = live!
       .getStream({
         scope: LiveChannelScope.DataSource,
         stream: this.uid,
@@ -117,7 +138,11 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
       .pipe(
         map((event: any) => {
           if (!event?.message) {
-            return { data: Array.from(framesByKey.values()), state, key: liveID };
+            return {
+              data: this.snapshotFrames(session.framesByKey, session.maxRows),
+              state: session.state,
+              key: responseKey,
+            };
           }
 
           const frame = dataFrameFromJSON(event.message);
@@ -126,19 +151,34 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
           if (custom.asyncqControl) {
             const nextState = String(custom.asyncqState || '').toLowerCase();
             if (custom.asyncqTerminal) {
-              state = nextState === 'error' ? LoadingState.Error : LoadingState.Done;
+              session.state = nextState === 'error' ? LoadingState.Error : LoadingState.Done;
             } else {
-              state = LoadingState.Streaming;
+              session.state = LoadingState.Streaming;
             }
-            return { data: Array.from(framesByKey.values()), state, key: liveID };
+            return {
+              data: this.snapshotFrames(session.framesByKey, session.maxRows),
+              state: session.state,
+              key: responseKey,
+            };
           }
 
           const frameKey = `${frame.refId || query.refId || 'A'}/${frame.name || 'response'}`;
-          framesByKey.set(frameKey, frame);
-          return { data: Array.from(framesByKey.values()), state: LoadingState.Streaming, key: liveID };
+          session.framesByKey.set(frameKey, this.trimFrame(frame, session.maxRows));
+          session.state = LoadingState.Streaming;
+          return {
+            data: this.snapshotFrames(session.framesByKey, session.maxRows),
+            state: LoadingState.Streaming,
+            key: responseKey,
+          };
         }),
         takeWhile((response) => response.state !== LoadingState.Done && response.state !== LoadingState.Error, true)
       );
+
+    const snapshot = this.snapshotFrames(session.framesByKey, maxRows);
+    if (snapshot.length > 0) {
+      return merge(of({ data: snapshot, state: LoadingState.Streaming, key: responseKey }), response);
+    }
+    return response;
   }
 
   private liveID(query: MyQuery, mode: string, request: DataQueryRequest<MyQuery>): string {
@@ -153,11 +193,27 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
     return raw.replace(/[^A-Za-z0-9_\-./=]/g, '-').slice(0, 96);
   }
 
-  private liveCacheKey(query: MyQuery, mode: string, path: string): string {
+  private liveCacheKey(query: MyQuery, mode: string, path: string, request: DataQueryRequest<MyQuery>): string {
     if (mode !== 'stream') {
-      return path;
+      return [
+        this.uid,
+        request.dashboardUID || '',
+        request.panelId || 'panel',
+        query.refId || 'A',
+        query.executionMode || '',
+        query.compatibilityMode || '',
+        this.rawTimeRangeKey(request),
+        query.queryText || '',
+        query.deferredQueryWrapper || '',
+        query.panopticonQueryWrapper || '',
+        query.panopticonRequestFunction || '',
+        query.timeColumn || '',
+        query.useTimeColumn ? 'time' : 'notime',
+        query.includeKeyColumns ? 'keys' : 'nokeys',
+      ].join('|');
     }
     return [
+      this.uid,
       path,
       query.queryText || '',
       query.timeColumn || '',
@@ -235,6 +291,30 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
     return session;
   }
 
+  private getOrCreateAsyncSession(cacheKey: string, maxRows: number): AsyncSession {
+    const existing = asyncSessions.get(cacheKey);
+    if (existing) {
+      asyncSessions.delete(cacheKey);
+      asyncSessions.set(cacheKey, existing);
+      return existing;
+    }
+
+    if (asyncSessions.size >= maxAsyncSessions) {
+      const oldestKey = asyncSessions.keys().next().value;
+      if (oldestKey !== undefined) {
+        asyncSessions.delete(oldestKey);
+      }
+    }
+
+    const session: AsyncSession = {
+      framesByKey: new Map<string, DataFrame>(),
+      maxRows,
+      state: LoadingState.Streaming,
+    };
+    asyncSessions.set(cacheKey, session);
+    return session;
+  }
+
   private snapshotFrames(framesByKey: Map<string, DataFrame>, maxRows: number): DataFrame[] {
     return Array.from(framesByKey.values()).map((frame) => this.cloneFrame(frame, maxRows));
   }
@@ -255,6 +335,10 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
       hash = (Math.imul(31, hash) + value.charCodeAt(i)) | 0;
     }
     return Math.abs(hash).toString(36);
+  }
+
+  private rawTimeRangeKey(request: DataQueryRequest<MyQuery>): string {
+    return `${String(request.rangeRaw?.from || '')}/${String(request.rangeRaw?.to || '')}`;
   }
 
   private appendFrame(existing: DataFrame | undefined, incoming: DataFrame, maxRows: number): DataFrame {
