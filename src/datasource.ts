@@ -90,7 +90,7 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
     const mode = query.executionMode === 'stream' ? 'stream' : 'async';
     const liveID = this.liveID(query, mode, request);
     const path = `${mode}/${liveID}`;
-    const cacheKey = this.liveCacheKey(query, mode, path, request);
+    const cacheKey = this.liveCacheKey(this.cacheIdentityQuery(target, query), mode, path, request);
     const maxRows = query.maxStreamRows || request.maxDataPoints || 1000;
 
     if (mode === 'stream') {
@@ -202,7 +202,6 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
         query.refId || 'A',
         query.executionMode || '',
         query.compatibilityMode || '',
-        this.rawTimeRangeKey(request),
         query.queryText || '',
         query.deferredQueryWrapper || '',
         query.panopticonQueryWrapper || '',
@@ -220,6 +219,16 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
       query.useTimeColumn ? 'time' : 'notime',
       query.includeKeyColumns ? 'keys' : 'nokeys',
     ].join('|');
+  }
+
+  private cacheIdentityQuery(target: MyQuery, applied: MyQuery): MyQuery {
+    return {
+      ...applied,
+      queryText: target.queryText || '',
+      deferredQueryWrapper: target.deferredQueryWrapper || this.options.deferredQueryWrapper || '',
+      panopticonQueryWrapper: target.panopticonQueryWrapper || this.options.panopticonQueryWrapper || '',
+      panopticonRequestFunction: target.panopticonRequestFunction || this.options.panopticonRequestFunction || '',
+    };
   }
 
   private getOrCreateStreamSession(
@@ -335,10 +344,6 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
       hash = (Math.imul(31, hash) + value.charCodeAt(i)) | 0;
     }
     return Math.abs(hash).toString(36);
-  }
-
-  private rawTimeRangeKey(request: DataQueryRequest<MyQuery>): string {
-    return `${String(request.rangeRaw?.from || '')}/${String(request.rangeRaw?.to || '')}`;
   }
 
   private appendFrame(existing: DataFrame | undefined, incoming: DataFrame, maxRows: number): DataFrame {
