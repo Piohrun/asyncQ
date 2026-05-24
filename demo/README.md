@@ -21,6 +21,13 @@ Open:
 http://localhost:3000/d/asyncq-kdb-demo/asyncq-kdb-demo
 ```
 
+Additional provisioned test dashboards:
+
+```text
+http://localhost:3000/d/asyncq-pano-compat/asyncq-panopticon-compatibility-tests
+http://localhost:3000/d/asyncq-async-tests/asyncq-async-execution-tests
+```
+
 Grafana is configured with anonymous admin access for the demo. The explicit login is `admin` / `admin`.
 
 The local starter downloads Grafana OSS `13.0.1` into `demo/runtime/` on first run and keeps all Grafana data, logs, generated provisioning, and plugin symlinks under that ignored runtime directory.
@@ -44,6 +51,8 @@ Docker is optional. It is useful when you want a fully disposable Grafana contai
 - To try Panopticon request-function mode, set `Compatibility` to `Panopticon`, set `Pano Fn` to `{[req] .demo.asyncq.panopticonRequest req}`, and run any harmless query text such as `1+1`.
 - `Streaming tick prices` and `Streaming rows` subscribe through Grafana Live. The q timer publishes five new rows every second to active streams.
 - `Demo process counters` shows row, stream, and job counts from the q process.
+- `AsyncQ Panopticon compatibility tests` exercises macro expansion, `Pano Wrapper`, `Pano Fn`, scalar/vector/string returns, keyed tables, and lists of row dictionaries.
+- `AsyncQ async execution tests` compares sync, helper async, plugin async, deferred async, streaming, and Panopticon request-function execution.
 
 If you restart the q process while the dashboard is already open, refresh the browser tab so the async and streaming panels create fresh Grafana Live subscriptions.
 
@@ -60,6 +69,8 @@ For the Docker path, run `docker compose down` from `demo/`, then `./scripts/sto
 - `demo/q/asyncq_demo.q` - q demo process
 - `demo/grafana/provisioning/datasources/asyncq.yml` - datasource provisioning
 - `demo/grafana/provisioning/dashboards/json/asyncq-demo.json` - dashboard
+- `demo/grafana/provisioning/dashboards/json/asyncq-panopticon-compat.json` - Panopticon compatibility test dashboard
+- `demo/grafana/provisioning/dashboards/json/asyncq-async-tests.json` - async execution mode test dashboard
 - `demo/docker-compose.yml` - Grafana 13 container
 
 ## Notes

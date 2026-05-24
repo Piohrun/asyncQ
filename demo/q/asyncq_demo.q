@@ -77,6 +77,26 @@ Grafana Live demos.
     `sym`lastPrice`rows!(`AAPL;lastAAPL;count .demo.asyncq.trade)
   };
 
+.demo.asyncq.panoScalar:{42};
+
+.demo.asyncq.panoVector:{10 20 30 40 50};
+
+.demo.asyncq.panoString:{"ready"};
+
+.demo.asyncq.panoKeyed:{
+    `sym xkey select lastPrice:last price, lastSize:last size by sym from .demo.asyncq.trade
+  };
+
+.demo.asyncq.panoRows:{
+    aapl:last exec price from .demo.asyncq.trade where sym=`AAPL;
+    msft:last exec price from .demo.asyncq.trade where sym=`MSFT;
+    (`sym`metric`value!(`AAPL;"lastPrice";aapl);`sym`metric`value!(`MSFT;"lastPrice";msft);`sym`metric`value!(`ALL;"rows";"f"$count .demo.asyncq.trade))
+  };
+
+.demo.asyncq.panoWrap:{[result;start;end;intervalMs]
+    ([] timeWindowStart:enlist start; timeWindowEnd:enlist end; intervalMs:enlist intervalMs; resultType:enlist type result; rowCount:enlist count result)
+  };
+
 .demo.asyncq.panopticonRequest:{[req]
     qd:req`Query;
     p:req`Panopticon;

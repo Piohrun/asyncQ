@@ -1,0 +1,570 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "liveNow": true,
+  "panels": [
+    {
+      "datasource": {
+        "type": "asyncq-kdbbackend-datasource",
+        "uid": "asyncq-demo"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "13.0.1",
+      "targets": [
+        {
+          "compatibilityMode": "panopticon",
+          "datasource": {
+            "type": "asyncq-kdbbackend-datasource",
+            "uid": "asyncq-demo"
+          },
+          "executionMode": "pluginAsync",
+          "includeKeyColumns": false,
+          "maxStreamRows": 1000,
+          "pollIntervalMs": 500,
+          "queryText": "([] start:enlist {TimeWindowStart}; end:enlist {TimeWindowEnd}; snapshot:enlist {Snapshot}; intervalMs:enlist {IntervalMs}; maxDataPoints:enlist {MaxDataPoints}; refId:enlist {RefID})",
+          "refId": "A",
+          "timeColumn": "time",
+          "timeOut": 10000,
+          "useTimeColumn": false
+        }
+      ],
+      "title": "Macro expansion",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "asyncq-kdbbackend-datasource",
+        "uid": "asyncq-demo"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "13.0.1",
+      "targets": [
+        {
+          "compatibilityMode": "panopticon",
+          "datasource": {
+            "type": "asyncq-kdbbackend-datasource",
+            "uid": "asyncq-demo"
+          },
+          "executionMode": "pluginAsync",
+          "includeKeyColumns": false,
+          "maxStreamRows": 1000,
+          "panopticonQueryWrapper": ".demo.asyncq.panoWrap[{Query};{TimeWindowStart};{TimeWindowEnd};{IntervalMs}]",
+          "pollIntervalMs": 500,
+          "queryText": ".demo.asyncq.panopticonSummary[]",
+          "refId": "A",
+          "timeColumn": "time",
+          "timeOut": 10000,
+          "useTimeColumn": false
+        }
+      ],
+      "title": "Pano wrapper",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "asyncq-kdbbackend-datasource",
+        "uid": "asyncq-demo"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 7
+      },
+      "id": 3,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "13.0.1",
+      "targets": [
+        {
+          "compatibilityMode": "panopticon",
+          "datasource": {
+            "type": "asyncq-kdbbackend-datasource",
+            "uid": "asyncq-demo"
+          },
+          "executionMode": "pluginAsync",
+          "includeKeyColumns": false,
+          "maxStreamRows": 1000,
+          "panopticonRequestFunction": "{[req] .demo.asyncq.panopticonRequest req}",
+          "pollIntervalMs": 500,
+          "queryText": "1+1",
+          "refId": "A",
+          "timeColumn": "time",
+          "timeOut": 10000,
+          "useTimeColumn": false
+        }
+      ],
+      "title": "Pano request function - plugin async",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "asyncq-kdbbackend-datasource",
+        "uid": "asyncq-demo"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 7
+      },
+      "id": 4,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "13.0.1",
+      "targets": [
+        {
+          "compatibilityMode": "panopticon",
+          "datasource": {
+            "type": "asyncq-kdbbackend-datasource",
+            "uid": "asyncq-demo"
+          },
+          "executionMode": "async",
+          "includeKeyColumns": false,
+          "maxStreamRows": 1000,
+          "panopticonRequestFunction": "{[req] .demo.asyncq.panopticonRequest req}",
+          "pollIntervalMs": 500,
+          "queryText": "1+1",
+          "refId": "A",
+          "timeColumn": "time",
+          "timeOut": 10000,
+          "useTimeColumn": false
+        }
+      ],
+      "title": "Pano request function - helper async",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "asyncq-kdbbackend-datasource",
+        "uid": "asyncq-demo"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 14
+      },
+      "id": 5,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "13.0.1",
+      "targets": [
+        {
+          "compatibilityMode": "panopticon",
+          "datasource": {
+            "type": "asyncq-kdbbackend-datasource",
+            "uid": "asyncq-demo"
+          },
+          "executionMode": "pluginAsync",
+          "includeKeyColumns": false,
+          "maxStreamRows": 1000,
+          "pollIntervalMs": 500,
+          "queryText": ".demo.asyncq.panoScalar[]",
+          "refId": "A",
+          "timeColumn": "time",
+          "timeOut": 10000,
+          "useTimeColumn": false
+        }
+      ],
+      "title": "Scalar result",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "asyncq-kdbbackend-datasource",
+        "uid": "asyncq-demo"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 14
+      },
+      "id": 6,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "13.0.1",
+      "targets": [
+        {
+          "compatibilityMode": "panopticon",
+          "datasource": {
+            "type": "asyncq-kdbbackend-datasource",
+            "uid": "asyncq-demo"
+          },
+          "executionMode": "pluginAsync",
+          "includeKeyColumns": false,
+          "maxStreamRows": 1000,
+          "pollIntervalMs": 500,
+          "queryText": ".demo.asyncq.panoVector[]",
+          "refId": "A",
+          "timeColumn": "time",
+          "timeOut": 10000,
+          "useTimeColumn": false
+        }
+      ],
+      "title": "Vector result",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "asyncq-kdbbackend-datasource",
+        "uid": "asyncq-demo"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 14
+      },
+      "id": 7,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "13.0.1",
+      "targets": [
+        {
+          "compatibilityMode": "panopticon",
+          "datasource": {
+            "type": "asyncq-kdbbackend-datasource",
+            "uid": "asyncq-demo"
+          },
+          "executionMode": "pluginAsync",
+          "includeKeyColumns": false,
+          "maxStreamRows": 1000,
+          "pollIntervalMs": 500,
+          "queryText": ".demo.asyncq.panoString[]",
+          "refId": "A",
+          "timeColumn": "time",
+          "timeOut": 10000,
+          "useTimeColumn": false
+        }
+      ],
+      "title": "Char-vector string result",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "asyncq-kdbbackend-datasource",
+        "uid": "asyncq-demo"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
+      "id": 8,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "13.0.1",
+      "targets": [
+        {
+          "compatibilityMode": "panopticon",
+          "datasource": {
+            "type": "asyncq-kdbbackend-datasource",
+            "uid": "asyncq-demo"
+          },
+          "executionMode": "pluginAsync",
+          "includeKeyColumns": false,
+          "maxStreamRows": 1000,
+          "pollIntervalMs": 500,
+          "queryText": ".demo.asyncq.panoKeyed[]",
+          "refId": "A",
+          "timeColumn": "time",
+          "timeOut": 10000,
+          "useTimeColumn": false
+        }
+      ],
+      "title": "Keyed table result",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "asyncq-kdbbackend-datasource",
+        "uid": "asyncq-demo"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
+      "id": 9,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "13.0.1",
+      "targets": [
+        {
+          "compatibilityMode": "panopticon",
+          "datasource": {
+            "type": "asyncq-kdbbackend-datasource",
+            "uid": "asyncq-demo"
+          },
+          "executionMode": "pluginAsync",
+          "includeKeyColumns": false,
+          "maxStreamRows": 1000,
+          "pollIntervalMs": 500,
+          "queryText": ".demo.asyncq.panoRows[]",
+          "refId": "A",
+          "timeColumn": "time",
+          "timeOut": 10000,
+          "useTimeColumn": false
+        }
+      ],
+      "title": "List of row dictionaries",
+      "type": "table"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 41,
+  "tags": [
+    "asyncq",
+    "kdb",
+    "panopticon"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-5m",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "utc",
+  "title": "AsyncQ Panopticon compatibility tests",
+  "uid": "asyncq-pano-compat",
+  "version": 1,
+  "weekStart": ""
+}

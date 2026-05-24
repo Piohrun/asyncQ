@@ -11,3 +11,5 @@ docker compose up -d
 echo "Grafana is starting at http://localhost:3000"
 echo "Login: admin / admin, or use anonymous admin access."
 echo "Dashboard: http://localhost:3000/d/asyncq-kdb-demo/asyncq-kdb-demo"
+echo "Panopticon tests: http://localhost:3000/d/asyncq-pano-compat/asyncq-panopticon-compatibility-tests"
+echo "Async tests: http://localhost:3000/d/asyncq-async-tests/asyncq-async-execution-tests"
