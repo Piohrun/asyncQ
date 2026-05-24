@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -9,6 +10,8 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	kdb "github.com/sv/kdbgo"
 )
+
+var panopticonFormattedMacroPattern = regexp.MustCompile(`\{(TimeWindowStart|TimeWindowEnd|Snapshot|FocusTime|Start|End|From|To):([^{}]+)\}`)
 
 func prepareQueryForExecution(pCtx backend.PluginContext, query backend.DataQuery, model *QueryModel) error {
 	if model.OriginalQueryText == "" {
@@ -34,6 +37,7 @@ func expandPanopticonMacros(input string, pCtx backend.PluginContext, query back
 	if input == "" {
 		return ""
 	}
+	input = expandPanopticonFormattedMacros(input, query)
 	replacer := strings.NewReplacer(panopticonMacroPairs(pCtx, query)...)
 	return replacer.Replace(input)
 }
@@ -41,6 +45,7 @@ func expandPanopticonMacros(input string, pCtx backend.PluginContext, query back
 func panopticonMacroPairs(pCtx backend.PluginContext, query backend.DataQuery) []string {
 	from := query.TimeRange.From
 	to := query.TimeRange.To
+	focus := to
 	intervalNs := int64(query.Interval)
 	intervalMs := int64(query.Interval / time.Millisecond)
 
@@ -61,6 +66,7 @@ func panopticonMacroPairs(pCtx backend.PluginContext, query backend.DataQuery) [
 		"{TimeWindowStart}", qTimestampLiteral(from),
 		"{TimeWindowEnd}", qTimestampLiteral(to),
 		"{Snapshot}", qTimestampLiteral(to),
+		"{FocusTime}", qTimestampLiteral(focus),
 		"{Start}", qTimestampLiteral(from),
 		"{End}", qTimestampLiteral(to),
 		"{From}", qTimestampLiteral(from),
@@ -68,6 +74,7 @@ func panopticonMacroPairs(pCtx backend.PluginContext, query backend.DataQuery) [
 		"{TimeWindowStartText}", qStringLiteral(timeText(from)),
 		"{TimeWindowEndText}", qStringLiteral(timeText(to)),
 		"{SnapshotText}", qStringLiteral(timeText(to)),
+		"{FocusTimeText}", qStringLiteral(timeText(focus)),
 		"{Interval}", qLongLiteral(intervalNs),
 		"{IntervalNs}", qLongLiteral(intervalNs),
 		"{IntervalMs}", qLongLiteral(intervalMs),
@@ -79,7 +86,57 @@ func panopticonMacroPairs(pCtx backend.PluginContext, query backend.DataQuery) [
 		"{UserEmail}", qStringLiteral(userEmail),
 		"{DatasourceName}", qStringLiteral(datasourceName),
 		"{DatasourceUID}", qStringLiteral(datasourceUID),
+		"$TimeWindowStart", qTimestampLiteral(from),
+		"$TimeWindowEnd", qTimestampLiteral(to),
+		"$Snapshot", qTimestampLiteral(to),
+		"$FocusTime", qTimestampLiteral(focus),
 	}
+}
+
+func expandPanopticonFormattedMacros(input string, query backend.DataQuery) string {
+	return panopticonFormattedMacroPattern.ReplaceAllStringFunc(input, func(token string) string {
+		matches := panopticonFormattedMacroPattern.FindStringSubmatch(token)
+		if len(matches) != 3 {
+			return token
+		}
+		t, ok := panopticonTimeMacroValue(matches[1], query)
+		if !ok {
+			return token
+		}
+		if t.IsZero() {
+			return qStringLiteral("")
+		}
+		return qStringLiteral(t.UTC().Format(panopticonDateLayout(matches[2])))
+	})
+}
+
+func panopticonTimeMacroValue(name string, query backend.DataQuery) (time.Time, bool) {
+	switch name {
+	case "TimeWindowStart", "Start", "From":
+		return query.TimeRange.From, true
+	case "TimeWindowEnd", "Snapshot", "FocusTime", "End", "To":
+		return query.TimeRange.To, true
+	default:
+		return time.Time{}, false
+	}
+}
+
+func panopticonDateLayout(format string) string {
+	replacer := strings.NewReplacer(
+		"yyyy", "2006",
+		"YYYY", "2006",
+		"SSSSSSSSS", "000000000",
+		"SSSSSS", "000000",
+		"SSS", "000",
+		"MM", "01",
+		"dd", "02",
+		"DD", "02",
+		"HH", "15",
+		"mm", "04",
+		"ss", "05",
+		"XXX", "Z07:00",
+	)
+	return replacer.Replace(format)
 }
 
 func qTimestampLiteral(t time.Time) string {

@@ -100,18 +100,21 @@ AquaQ mode keeps the original request envelope and parser behavior while exposin
 
 ### Panopticon
 
-Panopticon mode broadens result coercion for table-style panels. In addition to flat tables, it accepts keyed tables, symbol-keyed dictionaries, atoms, vectors, and lists of row dictionaries and converts them into Grafana frames. The request dictionary also includes:
+Panopticon mode broadens result coercion for table-style panels. In addition to flat tables, it accepts keyed tables, symbol-keyed dictionaries, atoms, vectors, and lists of row dictionaries and converts them into Grafana frames. Row dictionaries can arrive with reordered or missing keys; the parser builds the union of columns and leaves missing cells null. The request dictionary also includes:
 
 | Key | Type | Meaning |
 | --- | --- | --- |
-| `Panopticon` | dict | Contains timestamp aliases such as `TimeWindowStart`, `TimeWindowEnd`, `Snapshot`, `Start`, `End`, `From`, and `To`, plus `Interval`, `IntervalMs`, `MaxDataPoints`, `RefID`, `OriginalQuery`, and `CompiledQuery` |
+| `Panopticon` | dict | Contains timestamp aliases such as `TimeWindowStart`, `TimeWindowEnd`, `Snapshot`, `FocusTime`, `Start`, `End`, `From`, and `To`, plus text aliases, `Interval`, `IntervalNs`, `IntervalMs`, `MaxDataPoints`, `RefID`, `OriginalQuery`, and `CompiledQuery` |
+| top-level aliases | mixed | `TimeWindowStart`, `TimeWindowEnd`, `Snapshot`, `FocusTime`, `IntervalMs`, `MaxDataPoints`, and `RefID` are also copied to the top-level request dict for request-function compatibility |
 
 Panopticon query text and Panopticon wrappers expand these q-literal macros:
 
 | Macro | Example output |
 | --- | --- |
-| `{TimeWindowStart}`, `{TimeWindowEnd}`, `{Snapshot}` | `2026.05.24D10:00:00.000000000` |
-| `{TimeWindowStartText}`, `{TimeWindowEndText}`, `{SnapshotText}` | `"2026-05-24T10:00:00Z"` |
+| `{TimeWindowStart}`, `{TimeWindowEnd}`, `{Snapshot}`, `{FocusTime}` | `2026.05.24D10:00:00.000000000` |
+| `$TimeWindowStart`, `$TimeWindowEnd`, `$Snapshot`, `$FocusTime` | `2026.05.24D10:00:00.000000000` |
+| `{TimeWindowStartText}`, `{TimeWindowEndText}`, `{SnapshotText}`, `{FocusTimeText}` | `"2026-05-24T10:00:00Z"` |
+| `{TimeWindowStart:yyyy-MM-dd HH:mm:ss.SSS}` | `"2026-05-24 10:00:00.000"` |
 | `{Interval}`, `{IntervalNs}`, `{IntervalMs}`, `{MaxDataPoints}`, `{OrgID}` | `5000j` |
 | `{RefID}`, `{UserName}`, `{UserLogin}`, `{UserEmail}`, `{DatasourceName}`, `{DatasourceUID}` | `"A"` |
 
@@ -133,7 +136,7 @@ In native and AquaQ compatibility modes, queries must return either:
 - a flat table, kdb+ type 98
 - a grouped table, kdb+ type 99 where key and value are congruent tables
 
-Panopticon compatibility mode also accepts keyed tables, symbol-keyed dictionaries, atoms, vectors, and lists of row dictionaries. Columns must have stable scalar types. String columns and grouped table keys are supported by the inherited parser. If `Use Custom Time Column` is enabled, the named column must exist in every returned frame.
+Panopticon compatibility mode also accepts keyed tables, symbol-keyed dictionaries, atoms, vectors, and lists of row dictionaries. Columns should have stable scalar types; mixed numeric row-dictionary values are widened to float columns, and sparse row dictionaries produce nullable columns. String columns and grouped table keys are supported by the inherited parser. If `Use Custom Time Column` is enabled, the named column must exist in every returned frame.
 
 ## Development
 

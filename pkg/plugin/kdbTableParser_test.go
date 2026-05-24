@@ -153,6 +153,52 @@ func TestParsePanopticonDictionaryListAsRows(t *testing.T) {
 	}
 }
 
+func TestParsePanopticonDictionaryListAllowsMissingAndReorderedKeys(t *testing.T) {
+	res := kdb.NewList(
+		kdb.NewDict(kdb.SymbolV([]string{"sym", "price"}), kdb.NewList(kdb.Symbol("AAPL"), kdb.Float(189.5))),
+		kdb.NewDict(kdb.SymbolV([]string{"venue", "sym"}), kdb.NewList(kdb.Atom(kdb.KC, "XNYS"), kdb.Symbol("MSFT"))),
+		kdb.NewDict(kdb.SymbolV([]string{"price", "sym"}), kdb.NewList(kdb.Int(101), kdb.Symbol("GOOG"))),
+	)
+	frames, err := parseKdbResponseToFrames(res, QueryModel{CompatibilityMode: CompatibilityModePanopticon}, "A")
+	if err != nil {
+		t.Fatalf("parseKdbResponseToFrames returned error: %v", err)
+	}
+	frame := onlyFrame(t, frames)
+
+	assertFieldNames(t, frame, []string{"sym", "price", "venue"})
+	if frame.Fields[0].Len() != 3 || frame.Fields[1].Len() != 3 || frame.Fields[2].Len() != 3 {
+		t.Fatalf("dictionary list should have three rows, got %d/%d/%d", frame.Fields[0].Len(), frame.Fields[1].Len(), frame.Fields[2].Len())
+	}
+	if got := fieldByName(t, frame, "sym").At(2); got != "GOOG" {
+		t.Fatalf("unexpected sym value: %#v", got)
+	}
+	if price := fieldByName(t, frame, "price"); !price.NilAt(1) {
+		t.Fatalf("missing price should be nil, got %#v", price.At(1))
+	}
+	if got := fieldByName(t, frame, "venue").At(1).(*string); got == nil || *got != "XNYS" {
+		t.Fatalf("unexpected venue value: %#v", got)
+	}
+}
+
+func TestParsePanopticonDictionaryListCoercesMixedNumericColumnsToFloat(t *testing.T) {
+	res := kdb.NewList(
+		kdb.NewDict(kdb.SymbolV([]string{"sym", "value"}), kdb.NewList(kdb.Symbol("AAPL"), kdb.Long(2))),
+		kdb.NewDict(kdb.SymbolV([]string{"sym", "value"}), kdb.NewList(kdb.Symbol("MSFT"), kdb.Float(2.5))),
+	)
+	frames, err := parseKdbResponseToFrames(res, QueryModel{CompatibilityMode: CompatibilityModePanopticon}, "A")
+	if err != nil {
+		t.Fatalf("parseKdbResponseToFrames returned error: %v", err)
+	}
+	frame := onlyFrame(t, frames)
+
+	if got := fieldByName(t, frame, "value").At(0); got != float64(2) {
+		t.Fatalf("unexpected coerced first value: %#v", got)
+	}
+	if got := fieldByName(t, frame, "value").At(1); got != float64(2.5) {
+		t.Fatalf("unexpected coerced second value: %#v", got)
+	}
+}
+
 func onlyFrame(t *testing.T, frames []*data.Frame) *data.Frame {
 	t.Helper()
 	if len(frames) != 1 {

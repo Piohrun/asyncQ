@@ -184,32 +184,44 @@ func ParseKdbDictListAsFrame(res *kdb.K) (*data.Frame, error) {
 	if rows[0] == nil || rows[0].Type != kdb.XD {
 		return nil, fmt.Errorf("first item is not a dictionary")
 	}
-	firstDict := rows[0].Data.(kdb.Dict)
-	columnNames, err := dictColumnNames(firstDict.Key)
-	if err != nil {
-		return nil, err
-	}
-	columns := make([][]interface{}, len(columnNames))
-	for i := range columns {
-		columns[i] = make([]interface{}, 0, len(rows))
-	}
+	columnNames := make([]string, 0)
+	seenColumns := map[string]bool{}
+	rowValues := make([]map[string]*kdb.K, len(rows))
 	for rowIndex, row := range rows {
 		if row == nil || row.Type != kdb.XD {
 			return nil, fmt.Errorf("item %d is not a dictionary", rowIndex)
 		}
 		rowDict := row.Data.(kdb.Dict)
-		rowNames, err := dictColumnNames(rowDict.Key)
+		names, err := dictColumnNames(rowDict.Key)
 		if err != nil {
 			return nil, fmt.Errorf("item %d keys: %w", rowIndex, err)
 		}
-		if !sameStringSlice(columnNames, rowNames) {
-			return nil, fmt.Errorf("item %d keys differ from first item", rowIndex)
-		}
-		values, err := dictValues(rowDict.Value, len(columnNames))
+		values, err := dictValues(rowDict.Value, len(names))
 		if err != nil {
 			return nil, fmt.Errorf("item %d values: %w", rowIndex, err)
 		}
-		for colIndex, value := range values {
+		if len(names) != len(values) {
+			return nil, fmt.Errorf("item %d key/value lengths differ", rowIndex)
+		}
+		rowMap := make(map[string]*kdb.K, len(names))
+		for colIndex, name := range names {
+			if !seenColumns[name] {
+				seenColumns[name] = true
+				columnNames = append(columnNames, name)
+			}
+			rowMap[name] = values[colIndex]
+		}
+		rowValues[rowIndex] = rowMap
+	}
+	columns := make([][]interface{}, len(columnNames))
+	for colIndex, name := range columnNames {
+		columns[colIndex] = make([]interface{}, 0, len(rows))
+		for _, row := range rowValues {
+			value, ok := row[name]
+			if !ok {
+				columns[colIndex] = append(columns[colIndex], nil)
+				continue
+			}
 			columns[colIndex] = append(columns[colIndex], kdbCellValue(value))
 		}
 	}
@@ -274,10 +286,13 @@ func typedInterfaceColumn(col []interface{}) interface{} {
 	if len(col) == 0 {
 		return []string{}
 	}
+	if hasNilValue(col) {
+		return nullableInterfaceColumn(col)
+	}
+	if converted, ok := mixedNumericColumn(col); ok {
+		return converted
+	}
 	for _, value := range col {
-		if value == nil {
-			return stringInterfaceColumn(col)
-		}
 		switch value.(type) {
 		case string:
 			return typedStringColumn(col)
@@ -300,6 +315,165 @@ func typedInterfaceColumn(col []interface{}) interface{} {
 		}
 	}
 	return stringInterfaceColumn(col)
+}
+
+func nullableInterfaceColumn(col []interface{}) interface{} {
+	if converted, ok := nullableMixedNumericColumn(col); ok {
+		return converted
+	}
+	for _, value := range col {
+		if value == nil {
+			continue
+		}
+		switch value.(type) {
+		case string:
+			if out, ok := nullableTypedColumn[string](col); ok {
+				return out
+			}
+		case bool:
+			if out, ok := nullableTypedColumn[bool](col); ok {
+				return out
+			}
+		case int16:
+			if out, ok := nullableTypedColumn[int16](col); ok {
+				return out
+			}
+		case int32:
+			if out, ok := nullableTypedColumn[int32](col); ok {
+				return out
+			}
+		case int64:
+			if out, ok := nullableTypedColumn[int64](col); ok {
+				return out
+			}
+		case float32:
+			if out, ok := nullableTypedColumn[float32](col); ok {
+				return out
+			}
+		case float64:
+			if out, ok := nullableTypedColumn[float64](col); ok {
+				return out
+			}
+		case time.Time:
+			if out, ok := nullableTypedColumn[time.Time](col); ok {
+				return out
+			}
+		}
+		return nullableStringColumn(col)
+	}
+	return nullableStringColumn(col)
+}
+
+func nullableTypedColumn[T any](col []interface{}) ([]*T, bool) {
+	out := make([]*T, len(col))
+	for i, value := range col {
+		if value == nil {
+			continue
+		}
+		typed, ok := value.(T)
+		if !ok {
+			return nil, false
+		}
+		out[i] = &typed
+	}
+	return out, true
+}
+
+func nullableStringColumn(col []interface{}) []*string {
+	out := make([]*string, len(col))
+	for i, value := range col {
+		if value == nil {
+			continue
+		}
+		text := fmt.Sprint(value)
+		out[i] = &text
+	}
+	return out
+}
+
+func hasNilValue(col []interface{}) bool {
+	for _, value := range col {
+		if value == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func mixedNumericColumn(col []interface{}) ([]float64, bool) {
+	out := make([]float64, len(col))
+	firstKind := ""
+	mixed := false
+	for i, value := range col {
+		converted, kind, ok := numericCellValue(value)
+		if !ok {
+			return nil, false
+		}
+		if firstKind == "" {
+			firstKind = kind
+		} else if firstKind != kind {
+			mixed = true
+		}
+		out[i] = converted
+	}
+	if !mixed {
+		return nil, false
+	}
+	return out, true
+}
+
+func nullableMixedNumericColumn(col []interface{}) ([]*float64, bool) {
+	out := make([]*float64, len(col))
+	firstKind := ""
+	mixed := false
+	seen := false
+	for i, value := range col {
+		if value == nil {
+			continue
+		}
+		converted, kind, ok := numericCellValue(value)
+		if !ok {
+			return nil, false
+		}
+		if !seen {
+			firstKind = kind
+			seen = true
+		} else if firstKind != kind {
+			mixed = true
+		}
+		out[i] = &converted
+	}
+	if !seen || !mixed {
+		return nil, false
+	}
+	return out, true
+}
+
+func numericCellValue(value interface{}) (float64, string, bool) {
+	switch v := value.(type) {
+	case int8:
+		return float64(v), "int8", true
+	case int16:
+		return float64(v), "int16", true
+	case int32:
+		return float64(v), "int32", true
+	case int64:
+		return float64(v), "int64", true
+	case uint8:
+		return float64(v), "uint8", true
+	case uint16:
+		return float64(v), "uint16", true
+	case uint32:
+		return float64(v), "uint32", true
+	case uint64:
+		return float64(v), "uint64", true
+	case float32:
+		return float64(v), "float32", true
+	case float64:
+		return v, "float64", true
+	default:
+		return 0, "", false
+	}
 }
 
 func typedStringColumn(col []interface{}) interface{} {

@@ -51,7 +51,7 @@ Docker is optional. It is useful when you want a fully disposable Grafana contai
 - To try Panopticon request-function mode, set `Compatibility` to `Panopticon`, set `Pano Fn` to `{[req] .demo.asyncq.panopticonRequest req}`, and run any harmless query text such as `1+1`.
 - `Streaming tick prices` and `Streaming rows` subscribe through Grafana Live. The q timer publishes five new rows every second to active streams.
 - `Demo process counters` shows row, stream, and job counts from the q process.
-- `AsyncQ Panopticon compatibility tests` exercises macro expansion, `Pano Wrapper`, `Pano Fn`, scalar/vector/string returns, keyed tables, and lists of row dictionaries.
+- `AsyncQ Panopticon compatibility tests` exercises macro expansion, `Pano Wrapper`, `Pano Fn`, scalar/vector/string returns, keyed tables, lists of row dictionaries, sparse row dictionaries, and mixed numeric row values.
 - `AsyncQ async execution tests` compares sync, helper async, plugin async, deferred async, streaming, and Panopticon request-function execution.
 
 If you restart the q process while the dashboard is already open, refresh the browser tab so the async and streaming panels create fresh Grafana Live subscriptions.

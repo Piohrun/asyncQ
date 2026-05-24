@@ -93,6 +93,15 @@ Grafana Live demos.
     (`sym`metric`value!(`AAPL;"lastPrice";aapl);`sym`metric`value!(`MSFT;"lastPrice";msft);`sym`metric`value!(`ALL;"rows";"f"$count .demo.asyncq.trade))
   };
 
+.demo.asyncq.panoSparseRows:{
+    aapl:last exec price from .demo.asyncq.trade where sym=`AAPL;
+    (`sym`price!(`AAPL;aapl);`venue`sym!("XNYS";`MSFT);`price`sym!(101f;`GOOG))
+  };
+
+.demo.asyncq.panoMixedNumeric:{
+    (`sym`value!(`AAPL;2);`sym`value!(`MSFT;2.5))
+  };
+
 .demo.asyncq.panoWrap:{[result;start;end;intervalMs]
     ([] timeWindowStart:enlist start; timeWindowEnd:enlist end; intervalMs:enlist intervalMs; resultType:enlist type result; rowCount:enlist count result)
   };
@@ -100,7 +109,7 @@ Grafana Live demos.
 .demo.asyncq.panopticonRequest:{[req]
     qd:req`Query;
     p:req`Panopticon;
-    ([] timeWindowStart:enlist p`TimeWindowStart; timeWindowEnd:enlist p`TimeWindowEnd; refId:enlist qd`RefID; originalQuery:enlist qd`OriginalQuery; compiledQuery:enlist qd`CompiledQuery)
+    ([] timeWindowStart:enlist p`TimeWindowStart; topLevelStart:enlist req`TimeWindowStart; focusTime:enlist req`FocusTime; intervalMs:enlist req`IntervalMs; refId:enlist qd`RefID; originalQuery:enlist qd`OriginalQuery; compiledQuery:enlist qd`CompiledQuery)
   };
 
 .demo.asyncq.counts:{

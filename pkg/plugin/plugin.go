@@ -421,8 +421,8 @@ func buildMasterKdbLists(pCtx backend.PluginContext, query backend.DataQuery, mo
 	datasourceDict := buildDatasourceKdbDict(pCtx.DataSourceInstanceSettings)
 	queryDict := buildQueryKdbDict(query, model)
 	panopticonDict := buildPanopticonKdbDict(query, model)
-	masterKeys := kdb.SymbolV([]string{"AQUAQ_KDB_BACKEND_GRAF_DATASOURCE", "Time", "OrgID", "Datasource", "User", "Query", "Timeout", "ExecutionMode", "CompatibilityMode", "Panopticon"})
-	masterValues := kdb.NewList(
+	masterKeys := []string{"AQUAQ_KDB_BACKEND_GRAF_DATASOURCE", "Time", "OrgID", "Datasource", "User", "Query", "Timeout", "ExecutionMode", "CompatibilityMode", "Panopticon"}
+	masterValues := []*kdb.K{
 		kdb.Float(ADAPTOR_VERSION),
 		kdb.Atom(-kdb.KP, time.Now()),
 		kdb.Long(pCtx.OrgID),
@@ -432,8 +432,12 @@ func buildMasterKdbLists(pCtx backend.PluginContext, query backend.DataQuery, mo
 		kdb.Long(int64(model.Timeout)),
 		kdb.Symbol(model.ExecutionMode),
 		kdb.Symbol(model.CompatibilityMode),
-		panopticonDict)
-	return masterKeys, masterValues
+		panopticonDict,
+	}
+	panopticonKeys, panopticonValues := buildPanopticonContextKdbLists(query)
+	masterKeys = append(masterKeys, panopticonKeys...)
+	masterValues = append(masterValues, panopticonValues...)
+	return kdb.SymbolV(masterKeys), kdb.NewList(masterValues...)
 }
 
 func queryExecutionFunction(model QueryModel) string {
@@ -445,31 +449,50 @@ func queryExecutionFunction(model QueryModel) string {
 }
 
 func buildPanopticonKdbDict(query backend.DataQuery, model QueryModel) *kdb.K {
-	keys := kdb.SymbolV([]string{"TimeWindowStart", "TimeWindowEnd", "Snapshot", "Start", "End", "From", "To", "Interval", "IntervalMs", "MaxDataPoints", "RefID", "Query", "OriginalQuery", "CompiledQuery", "QueryWrapper", "RequestFunction"})
+	contextKeys, contextValues := buildPanopticonContextKdbLists(query)
+	keys := append(contextKeys, "Query", "OriginalQuery", "CompiledQuery", "QueryWrapper", "RequestFunction")
 	originalQuery := model.OriginalQueryText
 	if originalQuery == "" {
 		originalQuery = model.QueryText
 	}
-	intervalMs := int64(query.Interval / time.Millisecond)
-	values := kdb.NewList(
-		kdb.Atom(-kdb.KP, query.TimeRange.From),
-		kdb.Atom(-kdb.KP, query.TimeRange.To),
-		kdb.Atom(-kdb.KP, query.TimeRange.To),
-		kdb.Atom(-kdb.KP, query.TimeRange.From),
-		kdb.Atom(-kdb.KP, query.TimeRange.To),
-		kdb.Atom(-kdb.KP, query.TimeRange.From),
-		kdb.Atom(-kdb.KP, query.TimeRange.To),
-		kdb.Long(int64(query.Interval)),
-		kdb.Long(intervalMs),
-		kdb.Long(query.MaxDataPoints),
-		kdb.Atom(kdb.KC, query.RefID),
+	values := append(contextValues,
 		kdb.Atom(kdb.KC, model.QueryText),
 		kdb.Atom(kdb.KC, originalQuery),
 		kdb.Atom(kdb.KC, model.QueryText),
 		kdb.Atom(kdb.KC, model.PanopticonQueryWrapper),
 		kdb.Atom(kdb.KC, model.PanopticonRequestFunction),
 	)
-	return kdb.NewDict(keys, values)
+	return kdb.NewDict(kdb.SymbolV(keys), kdb.NewList(values...))
+}
+
+func buildPanopticonContextKdbLists(query backend.DataQuery) ([]string, []*kdb.K) {
+	intervalMs := int64(query.Interval / time.Millisecond)
+	keys := []string{
+		"TimeWindowStart", "TimeWindowEnd", "Snapshot", "FocusTime",
+		"Start", "End", "From", "To",
+		"TimeWindowStartText", "TimeWindowEndText", "SnapshotText", "FocusTimeText",
+		"Interval", "IntervalNs", "IntervalMs", "MaxDataPoints", "RefID",
+	}
+	values := []*kdb.K{
+		kdb.Atom(-kdb.KP, query.TimeRange.From),
+		kdb.Atom(-kdb.KP, query.TimeRange.To),
+		kdb.Atom(-kdb.KP, query.TimeRange.To),
+		kdb.Atom(-kdb.KP, query.TimeRange.To),
+		kdb.Atom(-kdb.KP, query.TimeRange.From),
+		kdb.Atom(-kdb.KP, query.TimeRange.To),
+		kdb.Atom(-kdb.KP, query.TimeRange.From),
+		kdb.Atom(-kdb.KP, query.TimeRange.To),
+		kdb.Atom(kdb.KC, timeText(query.TimeRange.From)),
+		kdb.Atom(kdb.KC, timeText(query.TimeRange.To)),
+		kdb.Atom(kdb.KC, timeText(query.TimeRange.To)),
+		kdb.Atom(kdb.KC, timeText(query.TimeRange.To)),
+		kdb.Long(int64(query.Interval)),
+		kdb.Long(int64(query.Interval)),
+		kdb.Long(intervalMs),
+		kdb.Long(query.MaxDataPoints),
+		kdb.Atom(kdb.KC, query.RefID),
+	}
+	return keys, values
 }
 
 func parseKdbResponseToFrames(kdbResponse *kdb.K, model QueryModel, refID string) ([]*data.Frame, error) {
