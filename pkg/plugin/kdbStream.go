@@ -36,12 +36,18 @@ type liveTimeRange struct {
 }
 
 type asyncQStatus struct {
-	ID       string
-	Status   string
-	Message  string
-	Error    string
-	Progress float64
-	Payload  *kdb.K
+	ID         string
+	Status     string
+	Message    string
+	Error      string
+	ErrorClass string
+	StackTrace string
+	Worker     string
+	Started    string
+	Finished   string
+	ResultType string
+	Progress   float64
+	Payload    *kdb.K
 }
 
 func (d *KdbDatasource) SubscribeStream(_ context.Context, req *backend.SubscribeStreamRequest) (*backend.SubscribeStreamResponse, error) {
@@ -132,40 +138,58 @@ func decodeLiveQueryRequest(raw json.RawMessage, mode string, path string) (live
 func (d *KdbDatasource) runAsyncQueryStream(ctx context.Context, req *backend.RunStreamRequest, sender *backend.StreamSender) error {
 	liveReq, query, model, requestID, err := decodeLiveQueryRequest(req.Data, ExecutionModeAsync, req.Path)
 	if err != nil {
+		d.logDiagnosticError("unable to decode async live query", "path", req.Path, "error", err.Error())
 		return err
 	}
 	d.normalizeAsyncQueryModel(liveReq, &model)
+	fields := d.diagnosticQueryFields(req.PluginContext, query, model, requestID)
+	fields = append(fields, "path", req.Path)
+	d.logDiagnostics("async query received", fields...)
 	switch model.ExecutionMode {
 	case ExecutionModePluginAsync:
 		if err := prepareQueryForExecution(req.PluginContext, query, &model); err != nil {
+			d.logDiagnosticError("plugin async query preparation failed", appendDiagnosticError(fields, err)...)
 			_ = sendControlFrame(sender, liveReq.RefID, model.ExecutionMode, "error", requestID, "", err.Error(), 0, true)
 			return nil
 		}
+		fields = append(d.diagnosticQueryFields(req.PluginContext, query, model, requestID), "path", req.Path)
+		d.logDiagnostics("plugin async query prepared", fields...)
 		return d.runPluginManagedAsyncQueryStream(ctx, req.PluginContext, liveReq, query, model, requestID, sender)
 	case ExecutionModeDeferredAsync:
 		model.OriginalQueryText = model.QueryText
 		wrappedQuery, err := applyDeferredQueryWrapper(model.QueryText, model.DeferredQueryWrapper)
 		if err != nil {
+			d.logDiagnosticError("deferred async wrapper failed", appendDiagnosticError(fields, err)...)
 			_ = sendControlFrame(sender, liveReq.RefID, model.ExecutionMode, "error", requestID, "", err.Error(), 0, true)
 			return nil
 		}
 		model.QueryText = wrappedQuery
 		if err := prepareQueryForExecution(req.PluginContext, query, &model); err != nil {
+			fields = append(d.diagnosticQueryFields(req.PluginContext, query, model, requestID), "path", req.Path)
+			d.logDiagnosticError("deferred async query preparation failed", appendDiagnosticError(fields, err)...)
 			_ = sendControlFrame(sender, liveReq.RefID, model.ExecutionMode, "error", requestID, "", err.Error(), 0, true)
 			return nil
 		}
+		fields = append(d.diagnosticQueryFields(req.PluginContext, query, model, requestID), "path", req.Path)
+		d.logDiagnostics("deferred async query prepared", fields...)
 		return d.runPluginManagedAsyncQueryStream(ctx, req.PluginContext, liveReq, query, model, requestID, sender)
 	case ExecutionModeAsync, "":
 	default:
-		return fmt.Errorf("unsupported async execution mode: %s", model.ExecutionMode)
+		err := fmt.Errorf("unsupported async execution mode: %s", model.ExecutionMode)
+		d.logDiagnosticError("async query rejected", appendDiagnosticError(fields, err)...)
+		return err
 	}
 	if err := prepareQueryForExecution(req.PluginContext, query, &model); err != nil {
+		d.logDiagnosticError("helper async query preparation failed", appendDiagnosticError(fields, err)...)
 		_ = sendControlFrame(sender, liveReq.RefID, model.ExecutionMode, "error", requestID, "", err.Error(), 0, true)
 		return nil
 	}
+	fields = append(d.diagnosticQueryFields(req.PluginContext, query, model, requestID), "path", req.Path)
+	d.logDiagnostics("helper async query prepared", fields...)
 
 	conn, err := d.newConnection()
 	if err != nil {
+		d.logDiagnosticError("helper async connection failed", appendDiagnosticError(fields, err)...)
 		return err
 	}
 	defer conn.Close()
@@ -173,61 +197,91 @@ func (d *KdbDatasource) runAsyncQueryStream(ctx context.Context, req *backend.Ru
 	helperReq := buildHelperRequest(req.PluginContext, query, model, requestID, "")
 	submitRes, err := callKdbFunction(conn, asyncSubmitFn, helperReq)
 	if err != nil {
-		return fmt.Errorf("%s: %w", asyncQHelperUnavailable, err)
+		err = fmt.Errorf("%s: %w", asyncQHelperUnavailable, err)
+		d.logDiagnosticError("helper async submit failed", appendDiagnosticError(fields, err)...)
+		return err
 	}
 	status := parseAsyncQStatus(submitRes, requestID)
 	jobID := status.ID
 	if jobID == "" {
 		jobID = requestID
 	}
+	jobFields := append(append([]interface{}{}, fields...), "jobID", jobID)
+	submitStatus := status
+	submitStatus.Status = statusWithDefault(submitStatus.Status, "queued")
+	d.logDiagnostics("helper async submitted", d.appendDiagnosticAsyncStatus(append([]interface{}{}, jobFields...), submitStatus)...)
 	if err := sendControlFrame(sender, liveReq.RefID, ExecutionModeAsync, statusWithDefault(status.Status, "queued"), jobID, status.Message, status.Error, status.Progress, false); err != nil {
+		d.logDiagnosticError("helper async status send failed", appendDiagnosticError(jobFields, err)...)
 		return err
 	}
 
 	ticker := time.NewTicker(time.Duration(model.PollIntervalMs) * time.Millisecond)
 	defer ticker.Stop()
+	start := time.Now()
+	lastState := strings.ToLower(statusWithDefault(status.Status, "queued"))
 
 	for {
 		select {
 		case <-ctx.Done():
 			_, _ = callKdbFunction(conn, asyncCancelFn, kdb.Atom(kdb.KC, jobID))
+			d.logDiagnostics("helper async cancelled", append(jobFields, "durationMs", time.Since(start).Milliseconds(), "error", ctx.Err().Error())...)
 			return ctx.Err()
 		case <-ticker.C:
 			statusRes, err := callKdbFunction(conn, asyncStatusFn, kdb.Atom(kdb.KC, jobID))
 			if err != nil {
+				d.logDiagnosticError("helper async status failed", appendDiagnosticError(jobFields, err)...)
 				_ = sendControlFrame(sender, liveReq.RefID, ExecutionModeAsync, "error", jobID, "", err.Error(), 0, true)
 				return nil
 			}
 			status = parseAsyncQStatus(statusRes, jobID)
 			state := strings.ToLower(statusWithDefault(status.Status, "running"))
+			if state != lastState {
+				status.Status = state
+				d.logDiagnostics("helper async status changed", d.appendDiagnosticAsyncStatus(append([]interface{}{}, jobFields...), status)...)
+				lastState = state
+			}
 			if state == "error" {
+				err := fmt.Errorf("%s", status.Error)
+				d.logDiagnosticError("helper async returned error", appendDiagnosticError(d.appendDiagnosticAsyncStatus(append([]interface{}{}, jobFields...), status), err)...)
 				_ = sendControlFrame(sender, liveReq.RefID, ExecutionModeAsync, "error", jobID, status.Message, status.Error, status.Progress, true)
 				return nil
 			}
 			if state == "cancelled" || state == "canceled" {
+				status.Status = state
+				d.logDiagnostics("helper async cancelled by q", append(d.appendDiagnosticAsyncStatus(append([]interface{}{}, jobFields...), status), "durationMs", time.Since(start).Milliseconds())...)
 				_ = sendControlFrame(sender, liveReq.RefID, ExecutionModeAsync, "cancelled", jobID, status.Message, status.Error, status.Progress, true)
 				return nil
 			}
 			if state == "done" || state == "complete" || state == "completed" {
 				result, err := callKdbFunction(conn, asyncResultFn, kdb.Atom(kdb.KC, jobID))
 				if err != nil {
+					d.logDiagnosticError("helper async result failed", appendDiagnosticError(jobFields, err)...)
 					_ = sendControlFrame(sender, liveReq.RefID, ExecutionModeAsync, "error", jobID, "", err.Error(), status.Progress, true)
 					return nil
 				}
+				resultFields := appendDiagnosticKdbObject(append([]interface{}{}, jobFields...), "kdbResponse", result)
 				frames, err := parseKdbResponseToFrames(result, model, liveReq.RefID)
 				if err != nil {
+					d.logDiagnosticError("helper async result parse failed", appendDiagnosticError(resultFields, err)...)
 					_ = sendControlFrame(sender, liveReq.RefID, ExecutionModeAsync, "error", jobID, "", err.Error(), status.Progress, true)
 					return nil
 				}
 				for _, frame := range frames {
 					markFrame(frame, ExecutionModeAsync, "data", jobID, false, false)
 					if err := sender.SendFrame(frame, data.IncludeAll); err != nil {
+						d.logDiagnosticError("helper async data send failed", appendDiagnosticError(resultFields, err)...)
 						return err
 					}
 				}
+				resultFields = appendDiagnosticFrames(resultFields, frames)
+				status.Status = "done"
+				resultFields = d.appendDiagnosticAsyncStatus(resultFields, status)
+				resultFields = append(resultFields, "durationMs", time.Since(start).Milliseconds())
+				d.logDiagnostics("helper async completed", resultFields...)
 				return sendControlFrame(sender, liveReq.RefID, ExecutionModeAsync, "done", jobID, status.Message, "", 1, true)
 			}
 			if err := sendControlFrame(sender, liveReq.RefID, ExecutionModeAsync, state, jobID, status.Message, status.Error, status.Progress, false); err != nil {
+				d.logDiagnosticError("helper async status send failed", appendDiagnosticError(jobFields, err)...)
 				return err
 			}
 		}
@@ -245,22 +299,29 @@ func (d *KdbDatasource) normalizeAsyncQueryModel(liveReq liveQueryRequest, model
 }
 
 func (d *KdbDatasource) runPluginManagedAsyncQueryStream(ctx context.Context, pCtx backend.PluginContext, liveReq liveQueryRequest, query backend.DataQuery, model QueryModel, requestID string, sender *backend.StreamSender) error {
+	fields := d.diagnosticQueryFields(pCtx, query, model, requestID)
+	start := time.Now()
 	if err := d.acquireAsyncSlot(ctx); err != nil {
+		d.logDiagnosticError("plugin async slot unavailable", appendDiagnosticError(fields, err)...)
 		_ = sendControlFrame(sender, liveReq.RefID, model.ExecutionMode, "error", requestID, "", err.Error(), 0, true)
 		return nil
 	}
 	defer d.releaseAsyncSlot()
 
+	d.logDiagnostics("plugin async queued", fields...)
 	if err := sendControlFrame(sender, liveReq.RefID, model.ExecutionMode, "queued", requestID, "", "", 0, false); err != nil {
+		d.logDiagnosticError("plugin async queued status send failed", appendDiagnosticError(fields, err)...)
 		return err
 	}
 
 	conn, err := d.newConnection()
 	if err != nil {
+		d.logDiagnosticError("plugin async connection failed", appendDiagnosticError(fields, err)...)
 		_ = sendControlFrame(sender, liveReq.RefID, model.ExecutionMode, "error", requestID, "", err.Error(), 0, true)
 		return nil
 	}
 	defer conn.Close()
+	d.logDiagnostics("plugin async started", fields...)
 
 	resultCh := make(chan *kdb.K, 1)
 	errCh := make(chan error, 1)
@@ -280,27 +341,36 @@ func (d *KdbDatasource) runPluginManagedAsyncQueryStream(ctx context.Context, pC
 		select {
 		case <-ctx.Done():
 			_ = conn.Close()
+			d.logDiagnostics("plugin async cancelled", append(fields, "durationMs", time.Since(start).Milliseconds(), "error", ctx.Err().Error())...)
 			_ = sendControlFrame(sender, liveReq.RefID, model.ExecutionMode, "cancelled", requestID, "", ctx.Err().Error(), 1, true)
 			return nil
 		case err := <-errCh:
+			d.logDiagnosticError("plugin async query failed", appendDiagnosticError(fields, err)...)
 			_ = sendControlFrame(sender, liveReq.RefID, model.ExecutionMode, "error", requestID, "", err.Error(), 1, true)
 			return nil
 		case result := <-resultCh:
+			resultFields := appendDiagnosticKdbObject(append([]interface{}{}, fields...), "kdbResponse", result)
 			frames, err := parseKdbResponseToFrames(result, model, liveReq.RefID)
 			if err != nil {
+				d.logDiagnosticError("plugin async result parse failed", appendDiagnosticError(resultFields, err)...)
 				_ = sendControlFrame(sender, liveReq.RefID, model.ExecutionMode, "error", requestID, "", err.Error(), 1, true)
 				return nil
 			}
 			for _, frame := range frames {
 				markFrame(frame, model.ExecutionMode, "data", requestID, false, false)
 				if err := sender.SendFrame(frame, data.IncludeAll); err != nil {
+					d.logDiagnosticError("plugin async data send failed", appendDiagnosticError(resultFields, err)...)
 					return err
 				}
 			}
+			resultFields = appendDiagnosticFrames(resultFields, frames)
+			resultFields = append(resultFields, "durationMs", time.Since(start).Milliseconds())
+			d.logDiagnostics("plugin async completed", resultFields...)
 			return sendControlFrame(sender, liveReq.RefID, model.ExecutionMode, "done", requestID, "", "", 1, true)
 		case <-ticker.C:
 			if err := sendControlFrame(sender, liveReq.RefID, model.ExecutionMode, "running", requestID, "", "", 0.5, false); err != nil {
 				_ = conn.Close()
+				d.logDiagnosticError("plugin async running status send failed", appendDiagnosticError(fields, err)...)
 				return err
 			}
 		}
@@ -329,15 +399,23 @@ func (d *KdbDatasource) releaseAsyncSlot() {
 func (d *KdbDatasource) runKdbPushStream(ctx context.Context, req *backend.RunStreamRequest, sender *backend.StreamSender) error {
 	liveReq, query, model, streamID, err := decodeLiveQueryRequest(req.Data, ExecutionModeStream, req.Path)
 	if err != nil {
+		d.logDiagnosticError("unable to decode stream query", "path", req.Path, "error", err.Error())
 		return err
 	}
 	d.normalizeQueryModel(&model)
 	model.ExecutionMode = ExecutionModeStream
+	fields := d.diagnosticQueryFields(req.PluginContext, query, model, streamID)
+	fields = append(fields, "path", req.Path, "streamID", streamID)
+	d.logDiagnostics("stream query received", fields...)
 	if err := prepareQueryForExecution(req.PluginContext, query, &model); err != nil {
+		d.logDiagnosticError("stream query preparation failed", appendDiagnosticError(fields, err)...)
 		return err
 	}
+	fields = append(d.diagnosticQueryFields(req.PluginContext, query, model, streamID), "path", req.Path, "streamID", streamID)
+	d.logDiagnostics("stream query prepared", fields...)
 	conn, err := d.newConnection()
 	if err != nil {
+		d.logDiagnosticError("stream connection failed", appendDiagnosticError(fields, err)...)
 		return err
 	}
 	defer conn.Close()
@@ -345,10 +423,15 @@ func (d *KdbDatasource) runKdbPushStream(ctx context.Context, req *backend.RunSt
 	helperReq := buildHelperRequest(req.PluginContext, query, model, streamID, streamID)
 	startRes, err := callKdbFunction(conn, streamStartFn, helperReq)
 	if err != nil {
-		return fmt.Errorf("%s: %w", asyncQHelperUnavailable, err)
+		err = fmt.Errorf("%s: %w", asyncQHelperUnavailable, err)
+		d.logDiagnosticError("stream start failed", appendDiagnosticError(fields, err)...)
+		return err
 	}
 	status := parseAsyncQStatus(startRes, streamID)
+	status.Status = statusWithDefault(status.Status, "running")
+	d.logDiagnostics("stream started", d.appendDiagnosticAsyncStatus(append([]interface{}{}, fields...), status)...)
 	if err := sendControlFrame(sender, liveReq.RefID, ExecutionModeStream, statusWithDefault(status.Status, "running"), streamID, status.Message, status.Error, status.Progress, false); err != nil {
+		d.logDiagnosticError("stream start status send failed", appendDiagnosticError(fields, err)...)
 		return err
 	}
 	stopOnContextCancel := make(chan struct{})
@@ -366,6 +449,7 @@ func (d *KdbDatasource) runKdbPushStream(ctx context.Context, req *backend.RunSt
 		select {
 		case <-ctx.Done():
 			d.stopKdbStream(streamID)
+			d.logDiagnostics("stream cancelled", append(fields, "error", ctx.Err().Error())...)
 			return nil
 		default:
 		}
@@ -375,17 +459,22 @@ func (d *KdbDatasource) runKdbPushStream(ctx context.Context, req *backend.RunSt
 			if ctx.Err() != nil {
 				return nil
 			}
-			log.DefaultLogger.Info("stream read stopped", "streamID", streamID, "error", err)
+			d.logDiagnosticError("stream read stopped", appendDiagnosticError(fields, err)...)
 			d.stopKdbStream(streamID)
 			return nil
 		}
 		status := parseAsyncQStatus(msg, streamID)
 		state := strings.ToLower(statusWithDefault(status.Status, "data"))
 		if state == "error" {
+			err := fmt.Errorf("%s", status.Error)
+			status.Status = state
+			d.logDiagnosticError("stream returned error", appendDiagnosticError(d.appendDiagnosticAsyncStatus(append([]interface{}{}, fields...), status), err)...)
 			_ = sendControlFrame(sender, liveReq.RefID, ExecutionModeStream, "error", streamID, status.Message, status.Error, status.Progress, true)
 			return nil
 		}
 		if state == "done" || state == "complete" || state == "completed" {
+			status.Status = state
+			d.logDiagnostics("stream completed", d.appendDiagnosticAsyncStatus(append([]interface{}{}, fields...), status)...)
 			return sendControlFrame(sender, liveReq.RefID, ExecutionModeStream, "done", streamID, status.Message, "", status.Progress, true)
 		}
 		payload := status.Payload
@@ -393,22 +482,30 @@ func (d *KdbDatasource) runKdbPushStream(ctx context.Context, req *backend.RunSt
 			payload = msg
 		}
 		if payload == nil {
+			status.Status = state
+			d.logDiagnostics("stream status received", d.appendDiagnosticAsyncStatus(append([]interface{}{}, fields...), status)...)
 			if err := sendControlFrame(sender, liveReq.RefID, ExecutionModeStream, state, streamID, status.Message, status.Error, status.Progress, false); err != nil {
+				d.logDiagnosticError("stream status send failed", appendDiagnosticError(fields, err)...)
 				return err
 			}
 			continue
 		}
+		payloadFields := appendDiagnosticKdbObject(append([]interface{}{}, fields...), "kdbResponse", payload)
 		frames, err := parseKdbResponseToFrames(payload, model, liveReq.RefID)
 		if err != nil {
+			d.logDiagnosticError("stream payload parse failed", appendDiagnosticError(payloadFields, err)...)
 			_ = sendControlFrame(sender, liveReq.RefID, ExecutionModeStream, "error", streamID, "", err.Error(), 0, true)
 			return nil
 		}
 		for _, frame := range frames {
 			markFrame(frame, ExecutionModeStream, "data", streamID, false, false)
 			if err := sender.SendFrame(frame, data.IncludeAll); err != nil {
+				d.logDiagnosticError("stream data send failed", appendDiagnosticError(payloadFields, err)...)
 				return err
 			}
 		}
+		payloadFields = appendDiagnosticFrames(payloadFields, frames)
+		d.logDiagnostics("stream payload sent", payloadFields...)
 	}
 }
 
@@ -438,12 +535,13 @@ func callKdbFunction(conn *kdb.KDBConn, fn string, args ...*kdb.K) (*kdb.K, erro
 func buildHelperRequest(pCtx backend.PluginContext, query backend.DataQuery, model QueryModel, requestID string, streamID string) *kdb.K {
 	baseKeys, baseValues := buildMasterKdbLists(pCtx, query, model)
 	keys := append(append([]string{}, baseKeys.Data.([]string)...),
-		"RequestID", "StreamID", "PollIntervalMs", "MaxStreamRows")
+		"RequestID", "StreamID", "PollIntervalMs", "MaxStreamRows", "StreamRetentionMs")
 	values := append(append([]*kdb.K{}, baseValues.Data.([]*kdb.K)...),
 		kdb.Atom(kdb.KC, requestID),
 		kdb.Atom(kdb.KC, streamID),
 		kdb.Long(int64(model.PollIntervalMs)),
-		kdb.Long(int64(model.MaxStreamRows)))
+		kdb.Long(int64(model.MaxStreamRows)),
+		kdb.Long(int64(model.StreamRetentionMs)))
 	return kdb.NewDict(kdb.SymbolV(keys), kdb.NewList(values...))
 }
 
@@ -470,6 +568,24 @@ func parseAsyncQStatus(k *kdb.K, fallbackID string) asyncQStatus {
 	}
 	if v, ok := dictLookup(k, "Error"); ok {
 		status.Error = kdbString(v)
+	}
+	if v, ok := dictLookup(k, "ErrorClass", "Class"); ok {
+		status.ErrorClass = kdbString(v)
+	}
+	if v, ok := dictLookup(k, "StackTrace", "Backtrace", "Trace"); ok {
+		status.StackTrace = kdbString(v)
+	}
+	if v, ok := dictLookup(k, "Worker", "WorkerID", "WorkerId"); ok {
+		status.Worker = kdbString(v)
+	}
+	if v, ok := dictLookup(k, "Started", "StartTime"); ok {
+		status.Started = kdbString(v)
+	}
+	if v, ok := dictLookup(k, "Finished", "FinishTime", "EndTime"); ok {
+		status.Finished = kdbString(v)
+	}
+	if v, ok := dictLookup(k, "ResultType", "PayloadType"); ok {
+		status.ResultType = kdbString(v)
 	}
 	if v, ok := dictLookup(k, "Progress"); ok {
 		status.Progress = kdbFloat(v)

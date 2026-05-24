@@ -15,7 +15,7 @@ Grafana Live demos.
 .demo.asyncq.SYMS:`AAPL`MSFT`GOOG`AMZN`KX;
 .demo.asyncq.MAXROWS:5000;
 .demo.asyncq.JOBDELAY:0D00:00:03.000000000;
-.demo.asyncq.JOBS:([] jobId:(); status:(); progress:`float$(); query:(); request:(); result:(); error:(); submitted:`timestamp$(); due:`timestamp$(); finished:`timestamp$());
+.demo.asyncq.JOBS:([] jobId:(); status:(); progress:`float$(); query:(); request:(); result:(); error:(); message:(); errorClass:(); stackTrace:(); submitted:`timestamp$(); due:`timestamp$(); finished:`timestamp$(); worker:(); resultType:());
 
 .demo.asyncq.text:{[cell]
     $[0=type cell; $[0=count cell; ""; .demo.asyncq.text first cell]; cell]
@@ -34,7 +34,11 @@ Grafana Live demos.
   };
 
 .demo.asyncq.statusDict:{[jobId;status;progress;err]
-    `JobID`Status`Progress`Error!(.demo.asyncq.text jobId;.demo.asyncq.text status;progress;.demo.asyncq.text err)
+    .grafana.asyncq.util.statusDict `JobID`Status`Progress`Error`Message`ErrorClass`StackTrace`Worker`Started`Finished`ResultType!(jobId; status; progress; err; err; ""; ""; .grafana.asyncq.util.worker[]; 0Np; 0Np; "")
+  };
+
+.demo.asyncq.statusFromRow:{[row;status;progress]
+    .grafana.asyncq.util.statusDict `JobID`Status`Progress`Error`Message`ErrorClass`StackTrace`Worker`Started`Finished`ResultType!(row`jobId; status; progress; row`error; row`message; row`errorClass; row`stackTrace; row`worker; row`submitted; row`finished; row`resultType)
   };
 
 .demo.asyncq.seed:{[n]
@@ -120,10 +124,11 @@ Grafana Live demos.
     jobId:.demo.asyncq.get[req;`RequestID;string .z.p];
     query:req[`Query;`Query];
     now:.z.p;
+    worker:.grafana.asyncq.util.worker[];
     rows:.demo.asyncq.byJobId jobId;
     .demo.asyncq.JOBS::delete from .demo.asyncq.JOBS where i in rows;
-    .demo.asyncq.JOBS::.demo.asyncq.JOBS,enlist `jobId`status`progress`query`request`result`error`submitted`due`finished!(enlist jobId;enlist "queued";0f;enlist query;enlist req;(::);enlist "";now;now+.demo.asyncq.JOBDELAY;0Np);
-    .demo.asyncq.statusDict[jobId;"queued";0f;""]
+    .demo.asyncq.JOBS::.demo.asyncq.JOBS,enlist `jobId`status`progress`query`request`result`error`message`errorClass`stackTrace`submitted`due`finished`worker`resultType!(enlist jobId;enlist "queued";0f;enlist query;enlist req;(::);enlist "";enlist "";enlist "";enlist "";now;now+.demo.asyncq.JOBDELAY;0Np;enlist worker;enlist "");
+    .grafana.asyncq.util.statusDict `JobID`Status`Progress`Error`Message`ErrorClass`StackTrace`Worker`Started`Finished`ResultType!(jobId; "queued"; 0f; ""; ""; ""; ""; worker; now; 0Np; "")
   };
 
 .demo.asyncq.status:{[jobId]
@@ -132,7 +137,7 @@ Grafana Live demos.
     row:first select from .demo.asyncq.JOBS where i=first rows;
     status:.demo.asyncq.text row`status;
     progress:$[status in ("queued";"running");0.5;row`progress];
-    .demo.asyncq.statusDict[row`jobId;status;progress;row`error]
+    .demo.asyncq.statusFromRow[row;status;progress]
   };
 
 .demo.asyncq.result:{[jobId]
@@ -146,19 +151,19 @@ Grafana Live demos.
 .demo.asyncq.cancel:{[jobId]
     rows:.demo.asyncq.byJobId jobId;
     if[0=count rows; :.demo.asyncq.statusDict[jobId;"missing";0f;"job not found"]];
-    .demo.asyncq.JOBS::update status:enlist "cancelled", progress:1f, finished:.z.p from .demo.asyncq.JOBS where i=first rows;
+    .demo.asyncq.JOBS::update status:enlist "cancelled", progress:1f, message:enlist "cancelled by client", finished:.z.p from .demo.asyncq.JOBS where i=first rows;
     .demo.asyncq.status jobId
   };
 
 .demo.asyncq.completeJob:{[idx]
     row:first select from .demo.asyncq.JOBS where i=idx;
     req:row`request;
-    trapped:@[{(1b; .grafana.asyncq.util.evalQuery x)}; req; {(0b; x)}];
+    trapped:.grafana.asyncq.util.trapEval req;
     ok:first trapped;
     payload:last trapped;
     $[ok;
-        .demo.asyncq.JOBS::update status:enlist "done", progress:1f, result:enlist payload, error:enlist "", finished:.z.p from .demo.asyncq.JOBS where i=idx;
-        .demo.asyncq.JOBS::update status:enlist "error", progress:1f, result:enlist (::), error:enlist payload, finished:.z.p from .demo.asyncq.JOBS where i=idx
+        .demo.asyncq.JOBS::update status:enlist "done", progress:1f, result:enlist payload, error:enlist "", message:enlist "", errorClass:enlist "", stackTrace:enlist "", finished:.z.p, resultType:enlist .grafana.asyncq.util.describe payload from .demo.asyncq.JOBS where i=idx;
+        .demo.asyncq.JOBS::update status:enlist "error", progress:1f, result:enlist (::), error:enlist payload`Error, message:enlist payload`Message, errorClass:enlist payload`ErrorClass, stackTrace:enlist payload`StackTrace, finished:.z.p, resultType:enlist "" from .demo.asyncq.JOBS where i=idx
       ];
   };
 

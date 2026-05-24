@@ -15,6 +15,7 @@ func TestDecodeLiveQueryRequestNormalizesModel(t *testing.T) {
 		"queryText": "select from trade",
 		"pollIntervalMs": 250,
 		"maxStreamRows": 42,
+		"streamRetentionMs": 60000,
 		"maxDataPoints": 500,
 		"intervalMs": 1000,
 		"timeRange": {
@@ -45,6 +46,9 @@ func TestDecodeLiveQueryRequestNormalizesModel(t *testing.T) {
 	}
 	if model.MaxStreamRows != 42 {
 		t.Fatalf("max rows not preserved: %d", model.MaxStreamRows)
+	}
+	if model.StreamRetentionMs != 60000 {
+		t.Fatalf("stream retention not preserved: %d", model.StreamRetentionMs)
 	}
 	if query.Interval != time.Second {
 		t.Fatalf("unexpected query interval: %v", query.Interval)
@@ -134,7 +138,7 @@ func TestBuildHelperRequestUsesUniqueKeys(t *testing.T) {
 		}
 		seen[key] = true
 	}
-	for _, key := range []string{"ExecutionMode", "CompatibilityMode", "Panopticon", "RequestID", "StreamID", "PollIntervalMs", "MaxStreamRows"} {
+	for _, key := range []string{"ExecutionMode", "CompatibilityMode", "Panopticon", "RequestID", "StreamID", "PollIntervalMs", "MaxStreamRows", "StreamRetentionMs"} {
 		if !seen[key] {
 			t.Fatalf("missing helper request key: %s", key)
 		}
@@ -143,12 +147,17 @@ func TestBuildHelperRequestUsesUniqueKeys(t *testing.T) {
 
 func TestParseAsyncQStatusFromHelperDict(t *testing.T) {
 	statusK := kdb.NewDict(
-		kdb.SymbolV([]string{"JobID", "Status", "Progress", "Error"}),
+		kdb.SymbolV([]string{"JobID", "Status", "Progress", "Error", "Message", "ErrorClass", "StackTrace", "Worker", "ResultType"}),
 		kdb.NewList(
 			kdb.Atom(kdb.KC, "job-7"),
 			kdb.Atom(kdb.KC, "running"),
 			kdb.Float(0.75),
 			kdb.Atom(kdb.KC, ""),
+			kdb.Atom(kdb.KC, "still running"),
+			kdb.Atom(kdb.KC, ""),
+			kdb.Atom(kdb.KC, ""),
+			kdb.Atom(kdb.KC, "worker-1"),
+			kdb.Atom(kdb.KC, "type=98;count=2"),
 		),
 	)
 
@@ -164,6 +173,9 @@ func TestParseAsyncQStatusFromHelperDict(t *testing.T) {
 	}
 	if status.Error != "" {
 		t.Fatalf("unexpected error: %q", status.Error)
+	}
+	if status.Message != "still running" || status.Worker != "worker-1" || status.ResultType != "type=98;count=2" {
+		t.Fatalf("unexpected diagnostic fields: %#v", status)
 	}
 }
 

@@ -67,12 +67,19 @@ export class QueryEditor extends PureComponent<Props> {
             onChange({ ...query, maxStreamRows: parseInt(event.target.value, 10) });
         }
     };
+    onStreamRetentionSecondsChange = (event: ChangeEvent<HTMLInputElement>) => {
+        if((/^\d+$/.test(event.target.value) || event.target.value==="")){
+            const { onChange, query } = this.props;
+            onChange({ ...query, streamRetentionMs: event.target.value === '' ? undefined : parseInt(event.target.value, 10) * 1000 });
+        }
+    };
 
     render() {
         const query = this.props.query;
-        const { queryText, timeOut, useTimeColumn, includeKeyColumns, timeColumn, executionMode, compatibilityMode, deferredQueryWrapper, panopticonQueryWrapper, panopticonRequestFunction, streamName, pollIntervalMs, maxStreamRows } = query;
+        const { queryText, timeOut, useTimeColumn, includeKeyColumns, timeColumn, executionMode, compatibilityMode, deferredQueryWrapper, panopticonQueryWrapper, panopticonRequestFunction, streamName, pollIntervalMs, maxStreamRows, streamRetentionMs } = query;
         const mode = executionMode || 'sync';
         const compat = compatibilityMode || 'native';
+        const streamRetentionSeconds = streamRetentionMs ? Math.round(streamRetentionMs / 1000) : '';
         return (
             <>
                 <div className="gf-form" style={{paddingBottom: 4}}>
@@ -174,6 +181,17 @@ export class QueryEditor extends PureComponent<Props> {
                     onChange={this.onMaxStreamRowsChange}
                     label="Max Rows"
                     tooltip="Maximum rows retained in the browser for each streaming frame."
+                />
+                </div>
+                <div style={{paddingBottom: 4}}>
+                <FormField
+                    name="StreamRetentionInputField"
+                    inputWidth={15}
+                    labelWidth={13}
+                    value={streamRetentionSeconds}
+                    onChange={this.onStreamRetentionSecondsChange}
+                    label="Retention (s)"
+                    tooltip="Optional browser-side streaming time window. Leave empty or 0 to retain by Max Rows only."
                 />
                 </div>
                 </>}

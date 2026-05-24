@@ -17,6 +17,7 @@ export interface MyQuery extends DataQuery {
   streamName?: string;
   pollIntervalMs?: number;
   maxStreamRows?: number;
+  streamRetentionMs?: number;
 }
 
 /**
@@ -37,6 +38,8 @@ export interface MyDataSourceOptions extends DataSourceJsonData {
   panopticonQueryWrapper?: string;
   panopticonRequestFunction?: string;
   asyncMaxJobs?: number;
+  diagnosticsEnabled?: boolean;
+  diagnosticsLogQueryText?: boolean;
 }
 
 export const defaultConfig: Partial<MyDataSourceOptions> = {
@@ -47,6 +50,8 @@ export const defaultConfig: Partial<MyDataSourceOptions> = {
   enableStreaming: true,
   executionMode: 'sync',
   compatibilityMode: 'native',
+  diagnosticsEnabled: false,
+  diagnosticsLogQueryText: false,
 };
 
 /**

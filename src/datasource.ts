@@ -3,6 +3,7 @@ import {
   DataQueryRequest,
   DataQueryResponse,
   DataSourceInstanceSettings,
+  FieldType,
   LiveChannelScope,
   LoadingState,
   ScopedVars,
@@ -19,6 +20,7 @@ const defaultMode = 'sync';
 interface StreamSession {
   framesByKey: Map<string, DataFrame>;
   maxRows: number;
+  retentionMs: number;
   response: Observable<DataQueryResponse>;
   state: LoadingState;
 }
@@ -92,11 +94,13 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
     const path = `${mode}/${liveID}`;
     const cacheKey = this.liveCacheKey(this.cacheIdentityQuery(target, query), mode, path, request);
     const maxRows = query.maxStreamRows || request.maxDataPoints || 1000;
+    const retentionMs = query.streamRetentionMs || 0;
 
     if (mode === 'stream') {
-      const session = this.getOrCreateStreamSession(live, cacheKey, query, request, path, liveID, maxRows);
+      const session = this.getOrCreateStreamSession(live, cacheKey, query, request, path, liveID, maxRows, retentionMs);
       session.maxRows = Math.max(session.maxRows, maxRows);
-      const snapshot = this.snapshotFrames(session.framesByKey, maxRows);
+      session.retentionMs = retentionMs;
+      const snapshot = this.snapshotFrames(session.framesByKey, maxRows, retentionMs);
       if (snapshot.length > 0) {
         return merge(of({ data: snapshot, state: session.state, key: liveID }), session.response);
       }
@@ -218,6 +222,7 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
       query.timeColumn || '',
       query.useTimeColumn ? 'time' : 'notime',
       query.includeKeyColumns ? 'keys' : 'nokeys',
+      String(query.streamRetentionMs || 0),
     ].join('|');
   }
 
@@ -238,7 +243,8 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
     request: DataQueryRequest<MyQuery>,
     path: string,
     liveID: string,
-    maxRows: number
+    maxRows: number,
+    retentionMs: number
   ): StreamSession {
     const existing = streamSessions.get(cacheKey);
     if (existing) {
@@ -248,6 +254,7 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
     const session: StreamSession = {
       framesByKey: new Map<string, DataFrame>(),
       maxRows,
+      retentionMs,
       response: of({ data: [], state: LoadingState.Streaming, key: liveID }),
       state: LoadingState.Streaming,
     };
@@ -271,7 +278,7 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
       .pipe(
         map((event: any) => {
           if (!event?.message) {
-            return { data: this.snapshotFrames(session.framesByKey, session.maxRows), state: session.state, key: liveID };
+            return { data: this.snapshotFrames(session.framesByKey, session.maxRows, session.retentionMs), state: session.state, key: liveID };
           }
 
           const frame = dataFrameFromJSON(event.message);
@@ -284,13 +291,13 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
             } else {
               session.state = LoadingState.Streaming;
             }
-            return { data: this.snapshotFrames(session.framesByKey, session.maxRows), state: session.state, key: liveID };
+            return { data: this.snapshotFrames(session.framesByKey, session.maxRows, session.retentionMs), state: session.state, key: liveID };
           }
 
           const frameKey = `${frame.refId || query.refId || 'A'}/${frame.name || 'response'}`;
-          session.framesByKey.set(frameKey, this.appendFrame(session.framesByKey.get(frameKey), frame, session.maxRows));
+          session.framesByKey.set(frameKey, this.appendFrame(session.framesByKey.get(frameKey), frame, session.maxRows, session.retentionMs));
           session.state = LoadingState.Streaming;
-          return { data: this.snapshotFrames(session.framesByKey, session.maxRows), state: session.state, key: liveID };
+          return { data: this.snapshotFrames(session.framesByKey, session.maxRows, session.retentionMs), state: session.state, key: liveID };
         }),
         takeWhile((response) => response.state !== LoadingState.Done && response.state !== LoadingState.Error, true),
         shareReplay({ bufferSize: 1, refCount: false })
@@ -324,16 +331,17 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
     return session;
   }
 
-  private snapshotFrames(framesByKey: Map<string, DataFrame>, maxRows: number): DataFrame[] {
-    return Array.from(framesByKey.values()).map((frame) => this.cloneFrame(frame, maxRows));
+  private snapshotFrames(framesByKey: Map<string, DataFrame>, maxRows: number, retentionMs = 0): DataFrame[] {
+    return Array.from(framesByKey.values()).map((frame) => this.cloneFrame(frame, maxRows, retentionMs));
   }
 
-  private cloneFrame(frame: DataFrame, maxRows: number): DataFrame {
+  private cloneFrame(frame: DataFrame, maxRows: number, retentionMs = 0): DataFrame {
+    const startIndex = this.retentionStartIndex(frame, maxRows, retentionMs);
     return {
       ...frame,
       fields: frame.fields.map((field) => ({
         ...field,
-        values: this.valuesToArray(field.values).slice(-maxRows),
+        values: this.valuesToArray(field.values).slice(startIndex),
       })),
     };
   }
@@ -346,25 +354,53 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
     return Math.abs(hash).toString(36);
   }
 
-  private appendFrame(existing: DataFrame | undefined, incoming: DataFrame, maxRows: number): DataFrame {
+  private appendFrame(existing: DataFrame | undefined, incoming: DataFrame, maxRows: number, retentionMs = 0): DataFrame {
     if (!existing || !this.sameSchema(existing, incoming)) {
-      return this.trimFrame(incoming, maxRows);
+      return this.trimFrame(incoming, maxRows, retentionMs);
     }
 
     for (let i = 0; i < incoming.fields.length; i++) {
       const oldValues = this.valuesToArray(existing.fields[i].values);
       const newValues = this.valuesToArray(incoming.fields[i].values);
-      (incoming.fields[i] as any).values = oldValues.concat(newValues).slice(-maxRows);
+      (incoming.fields[i] as any).values = oldValues.concat(newValues);
     }
-    return incoming;
+    return this.trimFrame(incoming, maxRows, retentionMs);
   }
 
-  private trimFrame(frame: DataFrame, maxRows: number): DataFrame {
+  private trimFrame(frame: DataFrame, maxRows: number, retentionMs = 0): DataFrame {
+    const startIndex = this.retentionStartIndex(frame, maxRows, retentionMs);
     for (const field of frame.fields) {
       const values = this.valuesToArray(field.values);
-      (field as any).values = values.slice(-maxRows);
+      (field as any).values = values.slice(startIndex);
     }
     return frame;
+  }
+
+  private retentionStartIndex(frame: DataFrame, maxRows: number, retentionMs: number): number {
+    const rowCount = frame.fields[0] ? this.valuesToArray(frame.fields[0].values).length : 0;
+    let startIndex = Math.max(0, rowCount - maxRows);
+    if (retentionMs <= 0 || rowCount === 0) {
+      return startIndex;
+    }
+
+    const timeField = frame.fields.find((field) => field.type === FieldType.time || field.name.toLowerCase() === 'time');
+    if (!timeField) {
+      return startIndex;
+    }
+    const times = this.valuesToArray(timeField.values);
+    const latest = this.toMillis(times[times.length - 1]);
+    if (latest === undefined) {
+      return startIndex;
+    }
+    const cutoff = latest - retentionMs;
+    const retentionIndex = times.findIndex((value) => {
+      const millis = this.toMillis(value);
+      return millis !== undefined && millis >= cutoff;
+    });
+    if (retentionIndex >= 0) {
+      startIndex = Math.max(startIndex, retentionIndex);
+    }
+    return startIndex;
   }
 
   private sameSchema(a: DataFrame, b: DataFrame): boolean {
@@ -382,6 +418,20 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
       return values.toArray();
     }
     return [];
+  }
+
+  private toMillis(value: any): number | undefined {
+    if (value instanceof Date) {
+      return value.getTime();
+    }
+    if (typeof value === 'number') {
+      return value;
+    }
+    if (typeof value === 'string') {
+      const parsed = Date.parse(value);
+      return Number.isNaN(parsed) ? undefined : parsed;
+    }
+    return undefined;
   }
 
   async metricFindQuery(query: MyVariableQuery, options?: any): Promise<any> {

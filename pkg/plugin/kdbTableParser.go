@@ -135,6 +135,7 @@ func ParseKeyedKdbTableAsFrame(res *kdb.K) (*data.Frame, error) {
 	frame := data.NewFrame("response")
 	frame.Fields = append(frame.Fields, keyFrame.Fields...)
 	frame.Fields = append(frame.Fields, valueFrame.Fields...)
+	makeFrameFieldNamesUnique(frame)
 	return frame, nil
 }
 
@@ -249,6 +250,18 @@ func dictColumnNames(keys *kdb.K) ([]string, error) {
 		return names, nil
 	default:
 		return nil, fmt.Errorf("unsupported dictionary key type %v", keys.Type)
+	}
+}
+
+func makeFrameFieldNamesUnique(frame *data.Frame) {
+	seen := map[string]int{}
+	for _, field := range frame.Fields {
+		count := seen[field.Name]
+		seen[field.Name] = count + 1
+		if count == 0 {
+			continue
+		}
+		field.Name = fmt.Sprintf("%s_%d", field.Name, count+1)
 	}
 }
 

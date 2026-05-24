@@ -32,6 +32,8 @@ Grafana is configured with anonymous admin access for the demo. The explicit log
 
 The local starter downloads Grafana OSS `13.0.1` into `demo/runtime/` on first run and keeps all Grafana data, logs, generated provisioning, and plugin symlinks under that ignored runtime directory.
 
+The demo datasource enables safe backend diagnostics by default. Grafana logs include request IDs, ref IDs, query hashes, q worker/result metadata, frame schemas, async job or stream IDs, and errors. Raw query text and q stack trace logging stays disabled.
+
 ## Start with Docker
 
 Docker is optional. It is useful when you want a fully disposable Grafana container:
@@ -49,7 +51,7 @@ Docker is optional. It is useful when you want a fully disposable Grafana contai
 - `Deferred wrapper aggregate` runs `.demo.asyncq.deferred[{Query}]` around `.demo.asyncq.slowAgg[]` to demonstrate wrapper expansion.
 - `Panopticon dict result` enables Panopticon compatibility mode and displays a symbol-keyed q dictionary from `.demo.asyncq.panopticonSummary[]`.
 - To try Panopticon request-function mode, set `Compatibility` to `Panopticon`, set `Pano Fn` to `{[req] .demo.asyncq.panopticonRequest req}`, and run any harmless query text such as `1+1`.
-- `Streaming tick prices` and `Streaming rows` subscribe through Grafana Live. The q timer publishes five new rows every second to active streams.
+- `Streaming tick prices` and `Streaming rows` subscribe through Grafana Live. The q timer publishes five new rows every second to active streams. The tick chart uses a 10-minute `Retention (s)` window plus a row cap.
 - `Demo process counters` shows row, stream, and job counts from the q process.
 - `AsyncQ Panopticon compatibility tests` exercises macro expansion, `Pano Wrapper`, `Pano Fn`, scalar/vector/string returns, keyed tables, lists of row dictionaries, sparse row dictionaries, and mixed numeric row values.
 - `AsyncQ async execution tests` compares sync, helper async, plugin async, deferred async, streaming, and Panopticon request-function execution.

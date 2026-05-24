@@ -21,3 +21,5 @@ datasources:
       panopticonQueryWrapper: ""
       panopticonRequestFunction: ""
       asyncMaxJobs: 16
+      diagnosticsEnabled: true
+      diagnosticsLogQueryText: false

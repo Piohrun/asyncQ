@@ -58,6 +58,7 @@ type QueryModel struct {
 	StreamName                string `json:"streamName,omitempty"`
 	PollIntervalMs            int    `json:"pollIntervalMs,omitempty"`
 	MaxStreamRows             int    `json:"maxStreamRows,omitempty"`
+	StreamRetentionMs         int    `json:"streamRetentionMs,omitempty"`
 	OriginalQueryText         string `json:"-"`
 }
 
@@ -94,6 +95,8 @@ type KdbDatasource struct {
 	PanopticonQueryWrapper    string `json:"panopticonQueryWrapper,omitempty"`
 	PanopticonRequestFunction string `json:"panopticonRequestFunction,omitempty"`
 	AsyncMaxJobs              int    `json:"asyncMaxJobs,omitempty"`
+	DiagnosticsEnabled        bool   `json:"diagnosticsEnabled,omitempty"`
+	DiagnosticsLogQueryText   bool   `json:"diagnosticsLogQueryText,omitempty"`
 	asyncConfigured           bool
 	streamConfigured          bool
 
@@ -329,44 +332,57 @@ func (d *KdbDatasource) closeConnection() error {
 func (d *KdbDatasource) QueryData(ctx context.Context, req *backend.QueryDataRequest) (*backend.QueryDataResponse, error) {
 	response := backend.NewQueryDataResponse()
 
-	for _, q := range req.Queries {
-		res := d.query(ctx, req.PluginContext, q)
+	for index, q := range req.Queries {
+		res := d.query(ctx, req.PluginContext, q, syncDiagnosticRequestID(req, q, index))
 		response.Responses[q.RefID] = res
 	}
 	return response, nil
 }
 
-func (d *KdbDatasource) query(_ context.Context, pCtx backend.PluginContext, query backend.DataQuery) backend.DataResponse {
+func (d *KdbDatasource) query(_ context.Context, pCtx backend.PluginContext, query backend.DataQuery, requestID string) backend.DataResponse {
 	var model QueryModel
 	response := backend.DataResponse{}
 	err := json.Unmarshal(query.JSON, &model)
 	if err != nil {
-		log.DefaultLogger.Error("Error decoding query and field", "error", err)
+		d.logDiagnosticError("unable to decode query JSON", "requestID", requestID, "refID", query.RefID, "error", err.Error())
 		response.Error = err
 		return response
 	}
 	d.normalizeQueryModel(&model)
+	fields := d.diagnosticQueryFields(pCtx, query, model, requestID)
+	start := time.Now()
+	d.logDiagnostics("sync query received", fields...)
 	if model.ExecutionMode != ExecutionModeSync {
 		response.Error = fmt.Errorf("%s mode is served through Grafana Live, not the standard query endpoint", model.ExecutionMode)
+		d.logDiagnosticError("sync query rejected", appendDiagnosticError(fields, response.Error)...)
 		return response
 	}
 	if err := prepareQueryForExecution(pCtx, query, &model); err != nil {
+		d.logDiagnosticError("query preparation failed", appendDiagnosticError(fields, err)...)
 		response.Error = err
 		return response
 	}
+	fields = d.diagnosticQueryFields(pCtx, query, model, requestID)
+	d.logDiagnostics("sync query prepared", fields...)
 
 	kdbResponse, err := d.RunKdbQuerySync(buildSyncQueryPayload(pCtx, query, model), time.Duration(model.Timeout)*time.Millisecond)
 	if err != nil {
+		d.logDiagnosticError("sync query failed", appendDiagnosticError(fields, err)...)
 		response.Error = err
 		return response
 	}
+	fields = appendDiagnosticKdbObject(fields, "kdbResponse", kdbResponse)
 
 	frames, err := parseKdbResponseToFrames(kdbResponse, model, query.RefID)
 	if err != nil {
+		d.logDiagnosticError("sync result parse failed", appendDiagnosticError(fields, err)...)
 		response.Error = err
 		return response
 	}
 	response.Frames = append(response.Frames, frames...)
+	fields = appendDiagnosticFrames(fields, frames)
+	fields = append(fields, "durationMs", time.Since(start).Milliseconds())
+	d.logDiagnostics("sync query completed", fields...)
 	return response
 }
 
@@ -403,6 +419,9 @@ func normalizeQueryModelWithDefaults(model *QueryModel, executionMode string, co
 	}
 	if model.MaxStreamRows < 1 {
 		model.MaxStreamRows = defaultMaxStreamRows
+	}
+	if model.StreamRetentionMs < 0 {
+		model.StreamRetentionMs = 0
 	}
 }
 
@@ -599,6 +618,19 @@ func (d *KdbDatasource) CheckHealth(_ context.Context, req *backend.CheckHealthR
 	if req != nil {
 		pCtx = req.PluginContext
 	}
+	healthFields := []interface{}{
+		"host", d.Host,
+		"port", d.Port,
+		"withTLS", d.WithTls,
+		"timeoutMs", int64(d.DialTimeout / time.Millisecond),
+	}
+	if pCtx.DataSourceInstanceSettings != nil {
+		healthFields = append(healthFields,
+			"datasourceUID", pCtx.DataSourceInstanceSettings.UID,
+			"datasourceName", pCtx.DataSourceInstanceSettings.Name,
+		)
+	}
+	d.logDiagnostics("health check started", healthFields...)
 	userDict := buildUserKdbDict(pCtx.User)
 	datasourceDict := buildDatasourceKdbDict(pCtx.DataSourceInstanceSettings)
 	k := kdb.SymbolV([]string{"AQUAQ_KDB_BACKEND_GRAF_DATASOURCE", "Time", "OrgID", "Datasource", "User", "Query", "Timeout"})
@@ -613,7 +645,7 @@ func (d *KdbDatasource) CheckHealth(_ context.Context, req *backend.CheckHealthR
 
 	test, err := d.RunKdbQuerySync(kdb.NewList(kdb.Atom(kdb.KC, "{[x] value x[`Query;`Query]}"), kdb.NewDict(k, v)), d.DialTimeout)
 	if err != nil {
-		log.DefaultLogger.Error("CheckHealth error", "error", err)
+		d.logDiagnosticError("health check failed", appendDiagnosticError(healthFields, err)...)
 		emsg := fmt.Sprintf("Error querying kdb+ process: %v", err)
 		if err == io.EOF {
 			emsg += " (hint: potential authentication error)"
@@ -626,7 +658,7 @@ func (d *KdbDatasource) CheckHealth(_ context.Context, req *backend.CheckHealthR
 	if test.Type != -kdb.KJ {
 		status = backend.HealthStatusError
 		message = fmt.Sprintf("kdb+ result not of expected type; received type %v", test.Type)
-		log.DefaultLogger.Info("Response from kdb+ incorrect type", "object", test.Data)
+		d.logDiagnosticError("health check returned unexpected type", append(healthFields, "kdbResponse", describeKdbObject(test))...)
 		return &backend.CheckHealthResult{
 			Status:  status,
 			Message: message,
@@ -641,6 +673,7 @@ func (d *KdbDatasource) CheckHealth(_ context.Context, req *backend.CheckHealthR
 		status = backend.HealthStatusError
 		message = fmt.Sprintf("kdb+ response to \"1+1\" was correct type but incorrect value (returned %v)", val)
 	}
+	d.logDiagnostics("health check completed", append(healthFields, "status", status.String(), "value", val)...)
 
 	return &backend.CheckHealthResult{
 		Status:  status,

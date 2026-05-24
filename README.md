@@ -40,6 +40,12 @@ The q side should return status dictionaries with these keys:
 | `Status` | char list | `queued`, `running`, `done`, `error`, or `cancelled` |
 | `Progress` | float | Optional 0-1 progress value |
 | `Error` | char list | Error text for failed jobs |
+| `Message` | char list | Optional user-facing status or error message |
+| `ErrorClass` | char list | Optional q/gateway error class such as `q`, `timeout`, `permission`, or `worker` |
+| `StackTrace` | char list | Optional q-side stack trace; backend diagnostics log only a hash unless raw query text logging is enabled |
+| `Worker` | char list | Optional worker or gateway identifier |
+| `Started`, `Finished` | timestamp | Optional q-side lifecycle timestamps |
+| `ResultType` | char list | Optional result description, for example `type=98;count=5` |
 
 When the job reaches `done`, `.grafana.asyncq.async.result` must return a flat table or grouped table accepted by the existing parser.
 
@@ -77,6 +83,8 @@ The reference helper stores the current IPC handle. q code can then push data to
 ```
 
 Each published payload must be a flat table or grouped table. The frontend appends streaming rows in memory up to the query's `Max Rows` setting.
+
+Streaming panels also support an optional `Retention (s)` query setting. When set, the browser keeps only rows inside that trailing time window, still bounded by `Max Rows` as a safety cap. Leave it blank or `0` to retain by row count only.
 
 ## q helper
 
@@ -133,6 +141,15 @@ This repo includes a Codex-style skill for LLM-assisted Panopticon migrations:
 - [skills/panopticon-grafana-migration/references/asyncq-migration.md](skills/panopticon-grafana-migration/references/asyncq-migration.md)
 
 Use it as the instruction bundle when asking an LLM to translate Panopticon q-backed table panels into Grafana panels that use this datasource.
+
+## Diagnostics
+
+Datasource config includes two diagnostic switches:
+
+- `Diagnostics` writes structured backend logs for query receipt, preparation, q execution, result parsing, frame send, cancellation, and completion across sync, helper async, plugin async, deferred async, and stream paths.
+- `Log Query Text` additionally writes raw query and wrapper text to backend logs. It is disabled by default because q text can contain sensitive table names, filters, identifiers, or credentials.
+
+Safe diagnostics logs include request IDs, Grafana ref IDs, execution and compatibility modes, time-range metadata, query and wrapper SHA-256 hashes, kdb+ object descriptions, Grafana frame schemas, durations, job IDs, stream IDs, q worker IDs, q result metadata, status changes, and errors. q stack traces are hashed by default and logged verbatim only with `Log Query Text`. The local demo provisions `diagnosticsEnabled: true` and `diagnosticsLogQueryText: false` so you can inspect behavior without exposing raw q text.
 
 ## Security
 

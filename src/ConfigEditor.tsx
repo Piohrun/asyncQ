@@ -153,6 +153,26 @@ export class ConfigEditor extends PureComponent<Props, State> {
     onOptionsChange({ ...options, jsonData });
   };
 
+  onDiagnosticsToggle = (e: SyntheticEvent) => {
+    const { onOptionsChange, options } = this.props;
+    const nextEnabled = !options.jsonData.diagnosticsEnabled;
+    const jsonData = {
+      ...options.jsonData,
+      diagnosticsEnabled: nextEnabled,
+      diagnosticsLogQueryText: nextEnabled ? options.jsonData.diagnosticsLogQueryText : false,
+    };
+    onOptionsChange({ ...options, jsonData });
+  };
+
+  onDiagnosticsLogQueryTextToggle = (e: SyntheticEvent) => {
+    const { onOptionsChange, options } = this.props;
+    const jsonData = {
+      ...options.jsonData,
+      diagnosticsLogQueryText: !options.jsonData.diagnosticsLogQueryText
+    };
+    onOptionsChange({ ...options, jsonData });
+  };
+
   onDefaultExecutionModeChange = (event: ChangeEvent<HTMLSelectElement>) => {
     const { onOptionsChange, options } = this.props;
     const jsonData = {
@@ -542,6 +562,27 @@ export class ConfigEditor extends PureComponent<Props, State> {
               placeholder="16"
               tooltip="Maximum plugin-managed async jobs for this datasource instance."
             />
+          </div>
+          <div className="gf-form">
+            <InlineField
+              label="Diagnostics"
+              labelWidth={14}
+              tooltip="Writes structured backend logs with request IDs, ref IDs, execution modes, query hashes, kdb+ result shapes, frame schemas, and errors. Query text is not logged unless enabled separately."
+            >
+              <InlineSwitch checked={!!options.jsonData.diagnosticsEnabled} onChange={this.onDiagnosticsToggle} />
+            </InlineField>
+            <InlineField
+              label="Log Query Text"
+              labelWidth={14}
+              tooltip="Writes raw query text and wrapper text to backend logs. Enable only in trusted environments where query text does not contain sensitive data."
+              disabled={!options.jsonData.diagnosticsEnabled}
+            >
+              <InlineSwitch
+                checked={!!options.jsonData.diagnosticsLogQueryText}
+                disabled={!options.jsonData.diagnosticsEnabled}
+                onChange={this.onDiagnosticsLogQueryTextToggle}
+              />
+            </InlineField>
           </div>
         </div>
     );
