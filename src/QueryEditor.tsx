@@ -1,5 +1,5 @@
-import React, { ChangeEvent, PureComponent, SyntheticEvent } from 'react';
-import { InlineFieldRow, InlineField, LegacyForms, Input, InlineSwitch } from '@grafana/ui';
+import React, { ChangeEvent, FormEvent, PureComponent, ReactNode, SyntheticEvent } from 'react';
+import { InlineFieldRow, InlineField, LegacyForms, Input, InlineSwitch, TextArea } from '@grafana/ui';
 import { QueryEditorProps } from '@grafana/data';
 import { DataSource } from './datasource';
 import { MyDataSourceOptions, MyQuery } from './types';
@@ -7,237 +7,307 @@ const { FormField } = LegacyForms;
 
 type Props = QueryEditorProps<DataSource, MyQuery, MyDataSourceOptions>;
 
+const sectionStyle: React.CSSProperties = { marginTop: 12 };
+const headingStyle: React.CSSProperties = { fontWeight: 500, marginBottom: 4 };
+const blockStyle: React.CSSProperties = { paddingBottom: 4 };
+
+function QuerySection({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <div style={sectionStyle}>
+      <div style={headingStyle}>{title}</div>
+      {children}
+    </div>
+  );
+}
+
 export class QueryEditor extends PureComponent<Props> {
-    onQueryTextChange = (event: ChangeEvent<HTMLInputElement>) => {
-        const { onChange, query } = this.props;
-        onChange({ ...query, queryText: event.target.value });
-    };
+  onQueryTextChange = (event: FormEvent<HTMLTextAreaElement>) => {
+    const { onChange, query } = this.props;
+    onChange({ ...query, queryText: event.currentTarget.value });
+  };
 
-    onTimeOutChange = (event: ChangeEvent<HTMLInputElement>) => {
-        if((/^\d+$/.test(event.target.value) || event.target.value==="")){
-            const { onChange, query } = this.props;
-            onChange({ ...query, timeOut: parseInt(event.target.value, 10) });
-        }
-    };
-    onUseTimeColumnToggle = (event: SyntheticEvent<HTMLInputElement, Event>) => {
-        const { onChange, query } = this.props;
-        onChange({ ...query, useTimeColumn: !query.useTimeColumn });
-    };
-    onTimeColumnChange = (event: ChangeEvent<HTMLInputElement>) => {
-        const { onChange, query } = this.props;
-        onChange({ ...query, timeColumn: event.target.value });
-    };
-    onIncludeKeyColumnsToggle = (event: SyntheticEvent<HTMLInputElement, Event>) => {
-        const { onChange, query } = this.props;
-        onChange({ ...query, includeKeyColumns: !query.includeKeyColumns });
-    };
-    onExecutionModeChange = (event: ChangeEvent<HTMLSelectElement>) => {
-        const { onChange, query } = this.props;
-        onChange({ ...query, executionMode: event.target.value as MyQuery['executionMode'] });
-    };
-    onCompatibilityModeChange = (event: ChangeEvent<HTMLSelectElement>) => {
-        const { onChange, query } = this.props;
-        onChange({ ...query, compatibilityMode: event.target.value as MyQuery['compatibilityMode'] });
-    };
-    onDeferredWrapperChange = (event: ChangeEvent<HTMLInputElement>) => {
-        const { onChange, query } = this.props;
-        onChange({ ...query, deferredQueryWrapper: event.target.value });
-    };
-    onPanopticonQueryWrapperChange = (event: ChangeEvent<HTMLInputElement>) => {
-        const { onChange, query } = this.props;
-        onChange({ ...query, panopticonQueryWrapper: event.target.value });
-    };
-    onPanopticonRequestFunctionChange = (event: ChangeEvent<HTMLInputElement>) => {
-        const { onChange, query } = this.props;
-        onChange({ ...query, panopticonRequestFunction: event.target.value });
-    };
-    onStreamNameChange = (event: ChangeEvent<HTMLInputElement>) => {
-        const { onChange, query } = this.props;
-        onChange({ ...query, streamName: event.target.value });
-    };
-    onPollIntervalChange = (event: ChangeEvent<HTMLInputElement>) => {
-        if((/^\d+$/.test(event.target.value) || event.target.value==="")){
-            const { onChange, query } = this.props;
-            onChange({ ...query, pollIntervalMs: parseInt(event.target.value, 10) });
-        }
-    };
-    onMaxStreamRowsChange = (event: ChangeEvent<HTMLInputElement>) => {
-        if((/^\d+$/.test(event.target.value) || event.target.value==="")){
-            const { onChange, query } = this.props;
-            onChange({ ...query, maxStreamRows: parseInt(event.target.value, 10) });
-        }
-    };
-    onStreamRetentionSecondsChange = (event: ChangeEvent<HTMLInputElement>) => {
-        if((/^\d+$/.test(event.target.value) || event.target.value==="")){
-            const { onChange, query } = this.props;
-            onChange({ ...query, streamRetentionMs: event.target.value === '' ? undefined : parseInt(event.target.value, 10) * 1000 });
-        }
-    };
-
-    render() {
-        const query = this.props.query;
-        const { queryText, timeOut, useTimeColumn, includeKeyColumns, timeColumn, executionMode, compatibilityMode, deferredQueryWrapper, panopticonQueryWrapper, panopticonRequestFunction, streamName, pollIntervalMs, maxStreamRows, streamRetentionMs } = query;
-        const mode = executionMode || 'sync';
-        const compat = compatibilityMode || 'native';
-        const streamRetentionSeconds = streamRetentionMs ? Math.round(streamRetentionMs / 1000) : '';
-        return (
-            <>
-                <div className="gf-form" style={{paddingBottom: 4}}>
-                    <span className="gf-form-label width-13">Mode</span>
-                    <select className="gf-form-input width-15" value={mode} onChange={this.onExecutionModeChange}>
-                        <option value="sync">Sync</option>
-                        <option value="async">Helper Async</option>
-                        <option value="pluginAsync">Plugin Async</option>
-                        <option value="deferredAsync">Deferred Async</option>
-                        <option value="stream">Stream</option>
-                    </select>
-                </div>
-                <div className="gf-form" style={{paddingBottom: 4}}>
-                    <span className="gf-form-label width-13">Compatibility</span>
-                    <select className="gf-form-input width-15" value={compat} onChange={this.onCompatibilityModeChange}>
-                        <option value="native">Native AsyncQ</option>
-                        <option value="aquaq">AquaQ</option>
-                        <option value="panopticon">Panopticon</option>
-                    </select>
-                </div>
-                <div style={{paddingBottom: 4}}>
-                <FormField
-                    name="QueryTextInputField"
-                    inputWidth={40}
-                    labelWidth={13}
-                    value={queryText || ''}
-                    onChange={this.onQueryTextChange}
-                    label="KDB Query"
-                    tooltip="Please enter a KDB Query"
-                />
-                </div>
-                {mode === 'deferredAsync' && <div style={{paddingBottom: 4}}>
-                <FormField
-                    name="DeferredWrapperInputField"
-                    inputWidth={40}
-                    labelWidth={13}
-                    value={deferredQueryWrapper || ''}
-                    onChange={this.onDeferredWrapperChange}
-                    label="Wrapper"
-                    tooltip="Deferred async wrapper containing exactly one {Query} placeholder."
-                    placeholder=".gateway.defer[{Query}]"
-                />
-                </div>}
-                {compat === 'panopticon' && <>
-                <div style={{paddingBottom: 4}}>
-                <FormField
-                    name="PanopticonWrapperInputField"
-                    inputWidth={40}
-                    labelWidth={13}
-                    value={panopticonQueryWrapper || ''}
-                    onChange={this.onPanopticonQueryWrapperChange}
-                    label="Pano Wrapper"
-                    tooltip="Optional Panopticon wrapper expression. Use exactly one {Query}; supported macros include {TimeWindowStart}, {TimeWindowEnd}, {Snapshot}, {IntervalMs}, and {MaxDataPoints}."
-                    placeholder=".pano.run[{Query};{TimeWindowStart};{TimeWindowEnd}]"
-                />
-                </div>
-                <div style={{paddingBottom: 4}}>
-                <FormField
-                    name="PanopticonRequestFunctionInputField"
-                    inputWidth={40}
-                    labelWidth={13}
-                    value={panopticonRequestFunction || ''}
-                    onChange={this.onPanopticonRequestFunctionChange}
-                    label="Pano Fn"
-                    tooltip="Optional q function or lambda that accepts the full request dictionary. When set, the backend calls it instead of evaluating Query text directly."
-                    placeholder="{[req] .pano.run req}"
-                />
-                </div>
-                </>}
-                {mode !== 'sync' && <div style={{paddingBottom: 4}}>
-                <FormField
-                    name="PollIntervalInputField"
-                    inputWidth={15}
-                    labelWidth={13}
-                    value={pollIntervalMs || ''}
-                    onChange={this.onPollIntervalChange}
-                    label="Poll (ms)"
-                    tooltip="For async mode this controls status polling. Streaming mode passes it as q-side metadata."
-                />
-                </div>}
-                {mode === 'stream' && <>
-                <div style={{paddingBottom: 4}}>
-                <FormField
-                    name="StreamNameInputField"
-                    inputWidth={30}
-                    labelWidth={13}
-                    value={streamName || ''}
-                    onChange={this.onStreamNameChange}
-                    label="Stream Name"
-                    tooltip="Optional stable stream channel name. Leave empty to create a unique stream per query run."
-                />
-                </div>
-                <div style={{paddingBottom: 4}}>
-                <FormField
-                    name="MaxStreamRowsInputField"
-                    inputWidth={15}
-                    labelWidth={13}
-                    value={maxStreamRows || ''}
-                    onChange={this.onMaxStreamRowsChange}
-                    label="Max Rows"
-                    tooltip="Maximum rows retained in the browser for each streaming frame."
-                />
-                </div>
-                <div style={{paddingBottom: 4}}>
-                <FormField
-                    name="StreamRetentionInputField"
-                    inputWidth={15}
-                    labelWidth={13}
-                    value={streamRetentionSeconds}
-                    onChange={this.onStreamRetentionSecondsChange}
-                    label="Retention (s)"
-                    tooltip="Optional browser-side streaming time window. Leave empty or 0 to retain by Max Rows only."
-                />
-                </div>
-                </>}
-                <div style={{paddingBottom: 4}}>
-                <FormField
-                    name="TimeoutTextInputField"
-                    inputWidth={15}
-                    labelWidth={13}
-                    value={timeOut || ''}
-                    onChange={this.onTimeOutChange}
-                    label="Timeout (ms)"
-                    tooltip="Please enter a Timeout in ms, default is 10,000 ms"
-                />
-                </div>
-                <div style={{paddingBottom: 4}}>
-                <InlineFieldRow>
-                    <InlineField
-                        label="Use Custom Time Column"
-                        labelWidth={26}
-                        tooltip="Grafana will default to using the left-most temporal column as the time axis. Select this to use a different temporal column as the time axis"
-                        >
-                        <InlineSwitch checked={useTimeColumn} label="Use Custom Time Column" onChange={this.onUseTimeColumnToggle}/>
-                    </InlineField>
-                    <InlineField
-                        hidden={!useTimeColumn}
-                        label="Time Column"
-                        labelWidth={26}
-                        tooltip="Name of temporal column to use as the time axis"
-                        >
-                        <Input
-                            hidden={!useTimeColumn}
-                            className="TimeColumnInputField"
-                            width={30}
-                            value={timeColumn || ''}
-                            onChange={this.onTimeColumnChange}
-                        />
-                    </InlineField>
-                </InlineFieldRow>
-                <InlineField
-                    label="Include Keys In Output"
-                    labelWidth={26}
-                    tooltip="If enabled, key columns will be projected and included in the output for grouped-series results">
-                    <InlineSwitch checked={includeKeyColumns} onChange={this.onIncludeKeyColumnsToggle} />
-                </InlineField>
-                </div>
-                </>
-        );
+  onTimeOutChange = (event: ChangeEvent<HTMLInputElement>) => {
+    if (/^\d+$/.test(event.target.value) || event.target.value === '') {
+      const { onChange, query } = this.props;
+      onChange({ ...query, timeOut: event.target.value === '' ? undefined : parseInt(event.target.value, 10) });
     }
+  };
+
+  onUseTimeColumnToggle = (event: SyntheticEvent<HTMLInputElement, Event>) => {
+    const { onChange, query } = this.props;
+    onChange({ ...query, useTimeColumn: !query.useTimeColumn });
+  };
+
+  onTimeColumnChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const { onChange, query } = this.props;
+    onChange({ ...query, timeColumn: event.target.value });
+  };
+
+  onIncludeKeyColumnsToggle = (event: SyntheticEvent<HTMLInputElement, Event>) => {
+    const { onChange, query } = this.props;
+    onChange({ ...query, includeKeyColumns: !query.includeKeyColumns });
+  };
+
+  onExecutionModeChange = (event: ChangeEvent<HTMLSelectElement>) => {
+    const { onChange, query } = this.props;
+    onChange({ ...query, executionMode: event.target.value as MyQuery['executionMode'] });
+  };
+
+  onCompatibilityModeChange = (event: ChangeEvent<HTMLSelectElement>) => {
+    const { onChange, query } = this.props;
+    onChange({ ...query, compatibilityMode: event.target.value as MyQuery['compatibilityMode'] });
+  };
+
+  onDeferredWrapperChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const { onChange, query } = this.props;
+    onChange({ ...query, deferredQueryWrapper: event.target.value });
+  };
+
+  onPanopticonQueryWrapperChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const { onChange, query } = this.props;
+    onChange({ ...query, panopticonQueryWrapper: event.target.value });
+  };
+
+  onPanopticonRequestFunctionChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const { onChange, query } = this.props;
+    onChange({ ...query, panopticonRequestFunction: event.target.value });
+  };
+
+  onStreamNameChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const { onChange, query } = this.props;
+    onChange({ ...query, streamName: event.target.value });
+  };
+
+  onPollIntervalChange = (event: ChangeEvent<HTMLInputElement>) => {
+    if (/^\d+$/.test(event.target.value) || event.target.value === '') {
+      const { onChange, query } = this.props;
+      onChange({ ...query, pollIntervalMs: event.target.value === '' ? undefined : parseInt(event.target.value, 10) });
+    }
+  };
+
+  onMaxStreamRowsChange = (event: ChangeEvent<HTMLInputElement>) => {
+    if (/^\d+$/.test(event.target.value) || event.target.value === '') {
+      const { onChange, query } = this.props;
+      onChange({ ...query, maxStreamRows: event.target.value === '' ? undefined : parseInt(event.target.value, 10) });
+    }
+  };
+
+  onStreamRetentionSecondsChange = (event: ChangeEvent<HTMLInputElement>) => {
+    if (/^\d+$/.test(event.target.value) || event.target.value === '') {
+      const { onChange, query } = this.props;
+      onChange({ ...query, streamRetentionMs: event.target.value === '' ? undefined : parseInt(event.target.value, 10) * 1000 });
+    }
+  };
+
+  renderExecutionFields(mode: MyQuery['executionMode'], compat: MyQuery['compatibilityMode']) {
+    return (
+      <QuerySection title="Execution">
+        <div className="gf-form" style={blockStyle}>
+          <span className="gf-form-label width-13">Mode</span>
+          <select className="gf-form-input width-18" value={mode || 'sync'} onChange={this.onExecutionModeChange}>
+            <option value="sync">Sync</option>
+            <option value="async">Helper Async</option>
+            <option value="pluginAsync">Plugin Async</option>
+            <option value="deferredAsync">Deferred Async</option>
+            <option value="stream">Stream</option>
+          </select>
+          <span className="gf-form-label width-13">Compatibility</span>
+          <select className="gf-form-input width-18" value={compat || 'native'} onChange={this.onCompatibilityModeChange}>
+            <option value="native">Native AsyncQ</option>
+            <option value="aquaq">AquaQ</option>
+            <option value="panopticon">Panopticon</option>
+          </select>
+        </div>
+      </QuerySection>
+    );
+  }
+
+  renderQueryText(queryText?: string) {
+    return (
+      <QuerySection title="Query">
+        <InlineField label="KDB Query" labelWidth={13} grow tooltip="q expression or function call sent to kdb+">
+          <TextArea
+            name="QueryTextInputField"
+            rows={4}
+            value={queryText || ''}
+            onChange={this.onQueryTextChange}
+            placeholder=".my.gateway.query[]"
+          />
+        </InlineField>
+      </QuerySection>
+    );
+  }
+
+  renderAsyncFields(mode: MyQuery['executionMode'], pollIntervalMs?: number) {
+    if (mode === 'sync') {
+      return null;
+    }
+    return (
+      <QuerySection title={mode === 'stream' ? 'Stream Status' : 'Async Status'}>
+        <div style={blockStyle}>
+          <FormField
+            name="PollIntervalInputField"
+            inputWidth={15}
+            labelWidth={13}
+            value={pollIntervalMs || ''}
+            onChange={this.onPollIntervalChange}
+            label="Poll (ms)"
+            placeholder="1000"
+            tooltip="Async status polling interval. In Stream mode this is also passed to q as request metadata."
+          />
+        </div>
+      </QuerySection>
+    );
+  }
+
+  renderDeferredFields(mode: MyQuery['executionMode'], deferredQueryWrapper?: string) {
+    if (mode !== 'deferredAsync') {
+      return null;
+    }
+    return (
+      <QuerySection title="Deferred Async">
+        <div style={blockStyle}>
+          <FormField
+            name="DeferredWrapperInputField"
+            inputWidth={48}
+            labelWidth={13}
+            value={deferredQueryWrapper || ''}
+            onChange={this.onDeferredWrapperChange}
+            label="Wrapper"
+            tooltip="Deferred async wrapper containing exactly one {Query} placeholder."
+            placeholder=".gateway.defer[{Query}]"
+          />
+        </div>
+      </QuerySection>
+    );
+  }
+
+  renderStreamFields(streamName?: string, maxStreamRows?: number, streamRetentionMs?: number) {
+    const streamRetentionSeconds = streamRetentionMs ? Math.round(streamRetentionMs / 1000) : '';
+    return (
+      <QuerySection title="Streaming">
+        <div style={blockStyle}>
+          <FormField
+            name="StreamNameInputField"
+            inputWidth={30}
+            labelWidth={13}
+            value={streamName || ''}
+            onChange={this.onStreamNameChange}
+            label="Stream Name"
+            tooltip="Optional stable stream channel name. Leave empty to create a unique stream per query run."
+          />
+        </div>
+        <InlineFieldRow>
+          <InlineField label="Max Rows" labelWidth={13} tooltip="Maximum rows retained in the browser for each streaming frame.">
+            <Input width={15} value={maxStreamRows || ''} onChange={this.onMaxStreamRowsChange} placeholder="1000" />
+          </InlineField>
+          <InlineField label="Retention (s)" labelWidth={13} tooltip="Optional browser-side streaming time window. Leave empty or 0 to retain by Max Rows only.">
+            <Input width={15} value={streamRetentionSeconds} onChange={this.onStreamRetentionSecondsChange} placeholder="0" />
+          </InlineField>
+        </InlineFieldRow>
+      </QuerySection>
+    );
+  }
+
+  renderPanopticonFields(compat: MyQuery['compatibilityMode'], panopticonQueryWrapper?: string, panopticonRequestFunction?: string) {
+    if (compat !== 'panopticon') {
+      return null;
+    }
+    return (
+      <QuerySection title="Panopticon">
+        <div style={blockStyle}>
+          <FormField
+            name="PanopticonWrapperInputField"
+            inputWidth={48}
+            labelWidth={13}
+            value={panopticonQueryWrapper || ''}
+            onChange={this.onPanopticonQueryWrapperChange}
+            label="Wrapper"
+            tooltip="Optional Panopticon wrapper expression. Use exactly one {Query}; supported macros include {TimeWindowStart}, {TimeWindowEnd}, {Snapshot}, {IntervalMs}, and {MaxDataPoints}."
+            placeholder=".pano.run[{Query};{TimeWindowStart};{TimeWindowEnd}]"
+          />
+        </div>
+        <div style={blockStyle}>
+          <FormField
+            name="PanopticonRequestFunctionInputField"
+            inputWidth={48}
+            labelWidth={13}
+            value={panopticonRequestFunction || ''}
+            onChange={this.onPanopticonRequestFunctionChange}
+            label="Request Fn"
+            tooltip="Optional q function or lambda that accepts the full request dictionary. When set, the backend calls it instead of evaluating Query text directly."
+            placeholder="{[req] .pano.run req}"
+          />
+        </div>
+      </QuerySection>
+    );
+  }
+
+  renderResultFields(timeOut?: number, useTimeColumn?: boolean, includeKeyColumns?: boolean, timeColumn?: string) {
+    return (
+      <QuerySection title="Result">
+        <div style={blockStyle}>
+          <FormField
+            name="TimeoutTextInputField"
+            inputWidth={15}
+            labelWidth={13}
+            value={timeOut || ''}
+            onChange={this.onTimeOutChange}
+            label="Timeout (ms)"
+            placeholder="10000"
+            tooltip="Backend query timeout in milliseconds. Blank uses the backend default."
+          />
+        </div>
+        <InlineFieldRow>
+          <InlineField
+            label="Custom Time Column"
+            labelWidth={26}
+            tooltip="Use a named temporal column as the time axis instead of Grafana's default temporal column detection."
+          >
+            <InlineSwitch checked={!!useTimeColumn} onChange={this.onUseTimeColumnToggle} />
+          </InlineField>
+          <InlineField hidden={!useTimeColumn} label="Time Column" labelWidth={13} tooltip="Name of temporal column to use as the time axis">
+            <Input hidden={!useTimeColumn} className="TimeColumnInputField" width={30} value={timeColumn || ''} onChange={this.onTimeColumnChange} placeholder="time" />
+          </InlineField>
+        </InlineFieldRow>
+        <InlineField label="Include Keys" labelWidth={26} tooltip="Include key columns in grouped-table output.">
+          <InlineSwitch checked={!!includeKeyColumns} onChange={this.onIncludeKeyColumnsToggle} />
+        </InlineField>
+      </QuerySection>
+    );
+  }
+
+  render() {
+    const query = this.props.query;
+    const {
+      queryText,
+      timeOut,
+      useTimeColumn,
+      includeKeyColumns,
+      timeColumn,
+      executionMode,
+      compatibilityMode,
+      deferredQueryWrapper,
+      panopticonQueryWrapper,
+      panopticonRequestFunction,
+      streamName,
+      pollIntervalMs,
+      maxStreamRows,
+      streamRetentionMs,
+    } = query;
+    const mode = executionMode || 'sync';
+    const compat = compatibilityMode || 'native';
+
+    return (
+      <>
+        {this.renderExecutionFields(mode, compat)}
+        {this.renderQueryText(queryText)}
+        {this.renderDeferredFields(mode, deferredQueryWrapper)}
+        {mode === 'stream' && this.renderStreamFields(streamName, maxStreamRows, streamRetentionMs)}
+        {this.renderPanopticonFields(compat, panopticonQueryWrapper, panopticonRequestFunction)}
+        {this.renderAsyncFields(mode, pollIntervalMs)}
+        {this.renderResultFields(timeOut, useTimeColumn, includeKeyColumns, timeColumn)}
+      </>
+    );
+  }
 }

@@ -6,6 +6,120 @@ AsyncQ is close for Panopticon table-style panels where the q query or function 
 
 Use a Table panel as the first migration target. Convert to Time series, State timeline, Bar chart, or another Grafana visualization only after the returned data matches.
 
+## Compatibility Matrix
+
+Verdict legend:
+
+- Direct: paste the query/function call and point AsyncQ at the same q port.
+- Config-only: no q or plugin code change, but set wrapper, request function, variables, or panel options.
+- Adapter needed: same q port can still be the target, but AsyncQ needs a plugin adapter or a small q shim to speak the existing gateway protocol.
+- Visual rewrite: data can be retrieved, but Panopticon visual/interactivity must be rebuilt in Grafana.
+- Not portable: no reliable equivalent without changing the source application behavior.
+
+### Query And Execution
+
+| Panopticon behavior | AsyncQ status | AsyncQ configuration | Notes and limits |
+| --- | --- | --- | --- |
+| Plain q expression or function call over sync IPC | Direct | `compatibilityMode="panopticon"`, `executionMode="sync"` for validation | Highest-confidence copy/paste case when the result shape is supported. |
+| Long-running blocking query over the same q port | Direct | Validate with `sync`, then use `executionMode="pluginAsync"` | Keeps Grafana responsive. It does not make the q gateway itself non-blocking; cancellation is best-effort by closing the plugin-owned IPC connection. |
+| Existing gateway accepts a q expression wrapped in a known call | Config-only | Set `panopticonQueryWrapper` with exactly one `{Query}` | Example: `.gateway.run[{Query};{TimeWindowStart};{TimeWindowEnd}]`. |
+| Existing panel passes a full request object into a q function | Config-only if the function can accept AsyncQ's request dict; otherwise adapter needed | Set `panopticonRequestFunction` | AsyncQ passes a request dictionary with `Query`, `Panopticon`, top-level time aliases, datasource, user, and execution metadata. Proprietary envelopes need mapping. |
+| Panopticon source uses positional function args | Config-only or adapter needed | Prefer query text like `.fn[arg1;arg2]`; use wrapper/request function if args come from time range or variables | Works when args are expressible as q literals after macro/variable expansion. |
+| Panopticon server-side async submit/status/result/cancel | Adapter needed unless it already matches `.grafana.asyncq.async.*` | `executionMode="async"` only for the AsyncQ helper contract | Discover job ID field, status values, result function, error fields, expiry, and cancel semantics before patching. |
+| Deferred response or callback over IPC handle | Adapter needed | Current `deferredAsync` only wraps a query then runs Plugin Async | True q `neg` callback/deferred protocols need a plugin adapter that registers the callback handle and translates returned messages. |
+| Gateway only accepts serialized/proprietary Panopticon envelopes | Adapter needed | Implement envelope builder in plugin or q shim | Do not claim copy/paste until the envelope schema is known. |
+| Streaming subscription/push panel | Adapter needed | `executionMode="stream"` requires `.grafana.asyncq.stream.start/stop` or equivalent adapter | Panopticon stream definitions do not copy directly unless their protocol is implemented. |
+| Template variable query | Direct for sync one-column outputs | Variables use sync query execution | Async/live modes are not used for Grafana variables. Return a simple vector or single-column table. |
+| Alert query | Direct only for sync-compatible query paths | Use sync-compatible settings | Grafana alerting does not use the panel live-stream path. Avoid async/stream-only assumptions. |
+
+### Parameters And Context
+
+| Panopticon feature | AsyncQ status | Mapping | Notes and limits |
+| --- | --- | --- | --- |
+| `{TimeWindowStart}`, `$TimeWindowStart` | Direct | q timestamp literal from Grafana range start | UTC timestamp literal. |
+| `{TimeWindowEnd}`, `$TimeWindowEnd` | Direct | q timestamp literal from Grafana range end | UTC timestamp literal. |
+| `{Snapshot}`, `{FocusTime}`, dollar forms | Config-only | Currently mapped to Grafana range end | Good for many table panels; not a full Panopticon playback/focus model. |
+| `{Start}`, `{End}`, `{From}`, `{To}` | Direct | q timestamp literals | Aliases for Grafana range start/end. |
+| Formatted time macros | Direct | q string literal, e.g. `{TimeWindowStart:yyyy-MM-dd HH:mm:ss.SSS}` | Format support covers common Java-style date tokens; validate unusual formats. |
+| `{Interval}`, `{IntervalNs}`, `{IntervalMs}` | Direct | q long | Derived from Grafana query interval. |
+| `{MaxDataPoints}`, `{RefID}`, `{OrgID}`, user/datasource macros | Direct | q long or q string | Available in query text, wrapper, and request dict. |
+| Panopticon dashboard/action parameters | Config-only | Convert to Grafana variables and substitute in query text | Multi-select quoting and symbol-list semantics must be handled deliberately. |
+| Cascading/filter variables | Config-only or Visual rewrite | Use Grafana variables backed by sync q queries | Panopticon-specific filter UX must be rebuilt with Grafana variable controls. |
+| Panopticon session, entitlement, workbook state | Adapter needed | Reproduce expected fields in `panopticonRequestFunction` or plugin adapter | Same credentials may not be enough if gateway expects Panopticon session IDs or entitlements. |
+| Client-side calculated parameters | Visual rewrite or q adapter | Move calculation into q, Grafana transform, or variable expression | Do not assume Panopticon client transforms exist in Grafana. |
+
+### Result Shapes
+
+| q result from migrated query | AsyncQ status | Grafana frame behavior | Notes and limits |
+| --- | --- | --- | --- |
+| Flat table | Direct | One frame with table columns | Best target shape. |
+| Keyed table | Direct in Panopticon compatibility | Key and value columns flattened into one frame | Duplicate column names are disambiguated. |
+| Grouped table | Direct in native/AquaQ; usable in Panopticon if parsed as keyed table | Frames or flattened frame depending mode | Validate field names before changing visualization. |
+| Symbol-keyed primitive dictionary | Direct | One-row frame with keys as columns | Good for summary panels. |
+| Single key mapped to vector | Direct | One-column frame with vector rows | Useful for simple variable or value lists. |
+| Atom | Direct | One `value` column, one row | Good for Stat/Table panels. |
+| Primitive vector | Direct | One `value` column, many rows | Good for simple lists. |
+| Char vector | Direct | One `value` string row | Treated as a single string, not one row per char. |
+| List of row dictionaries | Direct | Union of keys becomes columns | Missing cells become null. Mixed numeric values widen to float. |
+| Sparse or reordered row dictionaries | Direct | Stable union of keys | Validate null handling in Grafana field display. |
+| Nested dictionaries/lists as cell values | Adapter needed | Return an explicit flat table from q | Grafana frames need primitive-ish column values. |
+| Generic list of arbitrary objects | Adapter needed | Convert to table/list of row dictionaries | Unsupported shapes are intentionally rejected with diagnostics. |
+| Panopticon-only client transform output | Visual rewrite or q adapter | Recreate transform in q or Grafana | The plugin only sees q result data, not Panopticon client-side state. |
+
+### Visuals And Interactions
+
+| Panopticon panel feature | AsyncQ/Grafana status | Migration approach | Notes and limits |
+| --- | --- | --- | --- |
+| Basic table/grid | Direct after data validation | Grafana Table panel | Field order, widths, sorting, and formatting are manual Grafana settings. |
+| Time-series line/area chart | Config-only | Return a real time column; enable `useTimeColumn` if needed | Grafana expects temporal field plus numeric value fields. |
+| Bar, stat, gauge, state timeline | Config-only | Use matching Grafana visualization after table validation | Field overrides usually replace Panopticon visual settings. |
+| Conditional coloring/thresholds | Visual rewrite | Grafana thresholds/value mappings/field overrides | Data can copy; styling rules need translation. |
+| Panopticon heatmaps, order books, custom finance widgets | Visual rewrite or custom panel | Start with table-compatible data, then map to native Grafana/custom plugin | Query may be portable; exact visual behavior usually is not. |
+| Drilldowns and navigation | Visual rewrite | Grafana data links/dashboard links | URL and variable mapping must be rebuilt. |
+| Panopticon actions/writebacks | Not portable through datasource alone | Build explicit Grafana app/plugin or secured backend endpoint | Datasource queries should not be treated as a generic writeback/action channel. |
+| Cross-panel brushing, focus/playback behavior | Visual rewrite | Approximate with Grafana variables/time range where possible | Grafana interaction model is different. |
+| Full dashboard layout/theme import | Visual rewrite | Rebuild dashboard JSON manually or with a future importer | AsyncQ only handles datasource/query compatibility. |
+
+### Decision Rules
+
+1. If the query is plain q, wrapper-based, or request-function-based and returns a supported shape, call it Direct or Config-only.
+2. If the q port expects an async/deferred/streaming/session envelope that AsyncQ does not currently generate, call it Adapter needed and document the exact protocol fields.
+3. If the data can be retrieved but the Panopticon value is mostly visual styling, interaction, or client transform behavior, call it Visual rewrite.
+4. If the feature performs writeback/action side effects through Panopticon-only infrastructure, call it Not portable through the datasource alone.
+
+## Same-Port Legacy Gateway Migration
+
+When the goal is to point Grafana at the same q ports Panopticon used, optimize for no q-side changes first.
+
+Feasible without modifying the gateway/RDB:
+
+- Plain sync q expressions or function calls.
+- Blocking gateway calls wrapped by AsyncQ `pluginAsync`, which keeps Grafana responsive while the existing q call runs on a dedicated IPC connection.
+- Panopticon-style time macros expanded by the plugin before submission.
+- Result parsing for flat tables, keyed tables, primitive dictionaries, atoms, vectors, char vectors, and lists of row dictionaries.
+- Request-dictionary invocation when the existing gateway already accepts a compatible function/lambda call through `panopticonRequestFunction`.
+
+Not automatically feasible without discovering and reproducing the existing client protocol:
+
+- True server-side async where Panopticon submits a job, receives an ID, polls status, fetches results, or receives deferred/callback messages.
+- Push streaming or subscriptions unless the gateway exposes a known protocol the plugin can speak.
+- Session state, entitlements, callback handles, or request envelopes that are specific to Panopticon.
+- Gateways that only accept a proprietary Panopticon envelope rather than plain q text or a documented request dict.
+
+Discovery workflow for source code and q ports:
+
+1. Inspect gateway source for `.z.pg`, `.z.ps`, dispatch tables, auth/session checks, request parsing, logging, job tables, handles, `neg` async sends, timers, and Panopticon-named functions.
+2. Identify whether Panopticon sent raw query text, a function call, positional args, a request dictionary, a serialized object, or a deferred/callback subscription.
+3. Use read-only IPC probes against development ports only. Start with health checks and harmless expressions such as `1+1`, then safe metadata calls. Do not run mutating or broad data scans.
+4. Match the closest current AsyncQ mode:
+   - raw blocking call -> `sync` for validation, then `pluginAsync`
+   - existing full request dict function -> `panopticonRequestFunction`
+   - wrapper around query -> `panopticonQueryWrapper`
+   - `.grafana.asyncq.*` helper functions -> `async` or `stream`
+5. If the gateway has a different async protocol, document the adapter contract needed in the plugin: submit function, status function, result function, cancel function, job ID field, status values, result delivery mode, error fields, expiry behavior, and cancellation semantics.
+
+Do not claim the plugin can use arbitrary legacy async protocols by configuration unless the code already supports that adapter. It is acceptable to produce a plugin patch plan when the unchanged gateway contract is understood.
+
 ## Query Target Template
 
 ```json

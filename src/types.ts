@@ -5,7 +5,7 @@ export type CompatibilityMode = 'native' | 'aquaq' | 'panopticon';
 
 export interface MyQuery extends DataQuery {
   queryText?: string;
-  timeOut: number;
+  timeOut?: number;
   useTimeColumn: boolean;
   timeColumn: string;
   includeKeyColumns: boolean;
@@ -25,7 +25,7 @@ export interface MyQuery extends DataQuery {
  */
 export interface MyDataSourceOptions extends DataSourceJsonData {
   host: string;
-  port: number;
+  port?: number;
   timeout?: string;
   withTLS: boolean;
   skipVerifyTLS: boolean;
