@@ -1,0 +1,54 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  linux-plugin:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build Linux backend binaries
+        run: |
+          GOOS=linux GOARCH=amd64 go build -o dist/gpx_asyncq-kdbbackend-datasource_linux_amd64 ./pkg
+          GOOS=linux GOARCH=arm64 go build -o dist/gpx_asyncq-kdbbackend-datasource_linux_arm64 ./pkg
+          chmod +x dist/gpx_asyncq-kdbbackend-datasource_linux_amd64 dist/gpx_asyncq-kdbbackend-datasource_linux_arm64
+
+      - name: Package plugin
+        run: |
+          mkdir -p release/asyncq-kdbbackend-datasource
+          cp -R dist/. release/asyncq-kdbbackend-datasource/
+          cd release
+          zip -r "asyncq-kdbbackend-datasource-${GITHUB_REF_NAME}-linux.zip" asyncq-kdbbackend-datasource
+          sha256sum "asyncq-kdbbackend-datasource-${GITHUB_REF_NAME}-linux.zip" > "asyncq-kdbbackend-datasource-${GITHUB_REF_NAME}-linux.zip.sha256"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" release/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" release/* \
+              --title "$GITHUB_REF_NAME" \
+              --notes "AsyncQ kdb+ datasource ${GITHUB_REF_NAME}. Linux plugin package with amd64 and arm64 backend binaries."
+          fi
