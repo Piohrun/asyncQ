@@ -125,6 +125,15 @@ Two optional Panopticon invocation controls are available at datasource and quer
 
 This does not make Grafana a byte-for-byte Panopticon runtime. Grafana variables, panel configuration, callbacks, and client-side Panopticon macros still need deliberate mapping, but simple function-driven table panels are much closer to copy/paste compatible.
 
+## LLM migration skill
+
+This repo includes a Codex-style skill for LLM-assisted Panopticon migrations:
+
+- [skills/panopticon-grafana-migration/SKILL.md](skills/panopticon-grafana-migration/SKILL.md)
+- [skills/panopticon-grafana-migration/references/asyncq-migration.md](skills/panopticon-grafana-migration/references/asyncq-migration.md)
+
+Use it as the instruction bundle when asking an LLM to translate Panopticon q-backed table panels into Grafana panels that use this datasource.
+
 ## Security
 
 This datasource preserves the upstream behavior of sending user-entered q text to kdb+. Treat that text as untrusted input unless your environment already has strong controls. For production gateways, prefer allowlisted function calls, `reval` where applicable, `-b`, authenticated IPC, query timeouts, memory limits, and separate worker processes.
