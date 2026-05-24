@@ -1,0 +1,13 @@
+{
+  "extends": "@grafana/tsconfig",
+  "compilerOptions": {
+    "rootDir": ".",
+    "baseUrl": "./src",
+    "esModuleInterop": true,
+    "jsx": "react",
+    "resolveJsonModule": true,
+    "typeRoots": ["./node_modules/@types"]
+  },
+  "include": ["src/**/*"],
+  "exclude": ["dist", "node_modules"]
+}

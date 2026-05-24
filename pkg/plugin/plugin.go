@@ -1,0 +1,466 @@
+package plugin
+
+import (
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/json"
+	"fmt"
+	"io"
+	"time"
+
+	"github.com/grafana/grafana-plugin-sdk-go/backend"
+	"github.com/grafana/grafana-plugin-sdk-go/backend/instancemgmt"
+	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
+	"github.com/grafana/grafana-plugin-sdk-go/data"
+	kdb "github.com/sv/kdbgo"
+)
+
+const ADAPTOR_VERSION = float64(2.0)
+
+const (
+	ExecutionModeSync   = "sync"
+	ExecutionModeAsync  = "async"
+	ExecutionModeStream = "stream"
+
+	defaultQueryTimeout     = 10000
+	defaultPollIntervalMs   = 1000
+	defaultMaxStreamRows    = 1000
+	asyncQHelperUnavailable = "async/stream queries require q/asyncq_grafana.q to be loaded in the target kdb+ process or gateway"
+)
+
+var (
+	_ backend.QueryDataHandler      = (*KdbDatasource)(nil)
+	_ backend.CheckHealthHandler    = (*KdbDatasource)(nil)
+	_ backend.StreamHandler         = (*KdbDatasource)(nil)
+	_ instancemgmt.InstanceDisposer = (*KdbDatasource)(nil)
+)
+
+type QueryModel struct {
+	QueryText         string `json:"queryText"`
+	Timeout           int    `json:"timeOut"`
+	UseTimeColumn     bool   `json:"useTimeColumn"`
+	TimeColumn        string `json:"timeColumn"`
+	IncludeKeyColumns bool   `json:"includeKeyColumns"`
+	ExecutionMode     string `json:"executionMode,omitempty"`
+	StreamName        string `json:"streamName,omitempty"`
+	PollIntervalMs    int    `json:"pollIntervalMs,omitempty"`
+	MaxStreamRows     int    `json:"maxStreamRows,omitempty"`
+}
+
+type kdbSyncQuery struct {
+	query   *kdb.K
+	id      uint32
+	timeout time.Duration
+}
+
+type kdbRawRead struct {
+	result  *kdb.K
+	msgType kdb.ReqType
+	err     error
+}
+
+type kdbSyncRes struct {
+	result *kdb.K
+	err    error
+	id     uint32
+}
+
+type KdbDatasource struct {
+	Host             string `json:"host"`
+	Port             int    `json:"port"`
+	Timeout          string `json:"timeout"`
+	WithTls          bool   `json:"withTLS"`
+	SkipVertifyTLS   bool   `json:"skipVerifyTLS"`
+	WithCACert       bool   `json:"withCACert"`
+	EnableAsync      bool   `json:"enableAsync"`
+	EnableStreaming  bool   `json:"enableStreaming"`
+	asyncConfigured  bool
+	streamConfigured bool
+
+	user            string
+	pass            string
+	TlsCertificate  string
+	TlsKey          string
+	CaCert          string
+	TlsServerConfig *tls.Config
+	DialTimeout     time.Duration
+	KdbHandle       *kdb.KDBConn
+
+	signals             chan int
+	syncQueue           chan *kdbSyncQuery
+	rawReadChan         chan *kdbRawRead
+	syncResChan         chan *kdbSyncRes
+	kdbSyncQueryCounter uint32
+	IsOpen              bool
+
+	KdbHandleListener func()
+	RunKdbQuerySync   func(*kdb.K, time.Duration) (*kdb.K, error)
+	OpenConnection    func() error
+	CloseConnection   func() error
+	WriteConnection   func(kdb.ReqType, *kdb.K) error
+	ReadConnection    func() (*kdb.K, kdb.ReqType, error)
+}
+
+// NewKdbDatasource creates a new datasource instance.
+func NewKdbDatasource(_ context.Context, settings backend.DataSourceInstanceSettings) (instancemgmt.Instance, error) {
+	client := KdbDatasource{}
+	var rawSettings map[string]json.RawMessage
+	_ = json.Unmarshal(settings.JSONData, &rawSettings)
+	err := json.Unmarshal(settings.JSONData, &client)
+	if err != nil {
+		log.DefaultLogger.Error("Error decrypting Host and Port information", "error", err)
+		return nil, err
+	}
+	_, client.asyncConfigured = rawSettings["enableAsync"]
+	_, client.streamConfigured = rawSettings["enableStreaming"]
+
+	username, ok := settings.DecryptedSecureJSONData["username"]
+	if ok {
+		client.user = username
+	} else {
+		client.user = ""
+		log.DefaultLogger.Info("No username provided; using default")
+	}
+
+	pass, ok := settings.DecryptedSecureJSONData["password"]
+	if ok {
+		client.pass = pass
+	} else {
+		client.pass = ""
+		log.DefaultLogger.Info("No password provided; using default")
+	}
+
+	if client.WithTls {
+		tlsServerConfig := new(tls.Config)
+		log.DefaultLogger.Info("TLS enabled for new kdb datasource, creating tls config...")
+		tlsCertificate, certOk := settings.DecryptedSecureJSONData["tlsCertificate"]
+		if !certOk {
+			log.DefaultLogger.Info("Error decrypting TLS Cert or no TLS Cert provided")
+		}
+		client.TlsCertificate = tlsCertificate
+
+		tlsKey, keyOk := settings.DecryptedSecureJSONData["tlsKey"]
+		if !keyOk {
+			log.DefaultLogger.Error("Error decrypting TLS Key or no TLS Key provided")
+		}
+		client.TlsKey = tlsKey
+
+		if client.SkipVertifyTLS {
+			log.DefaultLogger.Info("New kdb+ datasource config setup to skip TLS verification")
+		}
+
+		if client.WithCACert {
+			caCert, keyOk := settings.DecryptedSecureJSONData["caCert"]
+			if !keyOk {
+				log.DefaultLogger.Error("Error decrypting CA Cert or no CA Cert provided")
+			}
+			client.CaCert = caCert
+			log.DefaultLogger.Info("Setting custom CA certificate...")
+			tlsCaCert := x509.NewCertPool()
+			r := tlsCaCert.AppendCertsFromPEM([]byte(client.CaCert))
+			if !r {
+				log.DefaultLogger.Info("Error parsing custom CA certificate")
+			}
+			tlsServerConfig.RootCAs = tlsCaCert
+		}
+
+		cert, err := tls.X509KeyPair([]byte(client.TlsCertificate), []byte(client.TlsKey))
+		if err != nil {
+			log.DefaultLogger.Error("Cert convert error", "error", err)
+		}
+
+		tlsServerConfig.Certificates = []tls.Certificate{cert}
+		tlsServerConfig.InsecureSkipVerify = client.SkipVertifyTLS
+		client.TlsServerConfig = tlsServerConfig
+	}
+
+	timeOutDuration, err := time.ParseDuration(client.Timeout + "ms")
+	if nil != err {
+		log.DefaultLogger.Info("Using default timeout")
+		timeOutDuration = time.Second
+	}
+	client.DialTimeout = timeOutDuration
+	client.setupKdbConnectionHandlers()
+	client.IsOpen = false
+
+	log.DefaultLogger.Info("Making synchronous query channel")
+	client.syncQueue = make(chan *kdbSyncQuery)
+
+	log.DefaultLogger.Info("Making synchronous response channel")
+	client.syncResChan = make(chan *kdbSyncRes)
+
+	log.DefaultLogger.Info("Making signals channel")
+	client.signals = make(chan int)
+
+	go client.syncQueryRunner()
+
+	log.DefaultLogger.Info("KDB Datasource created successfully")
+	return &client, nil
+}
+
+func (d *KdbDatasource) Dispose() {
+	log.DefaultLogger.Info("Dispose called")
+	if d.IsOpen {
+		log.DefaultLogger.Info("Handle open when dispose called, closing handle")
+		if err := d.CloseConnection(); err != nil {
+			log.DefaultLogger.Error("Error closing KDB connection", "error", err)
+		}
+	}
+	safeCloseIntChan(d.signals)
+	safeCloseSyncQueryChan(d.syncQueue)
+	safeCloseSyncResChan(d.syncResChan)
+}
+
+func safeCloseIntChan(ch chan int) {
+	defer func() { _ = recover() }()
+	if ch != nil {
+		close(ch)
+	}
+}
+
+func safeCloseSyncQueryChan(ch chan *kdbSyncQuery) {
+	defer func() { _ = recover() }()
+	if ch != nil {
+		close(ch)
+	}
+}
+
+func safeCloseSyncResChan(ch chan *kdbSyncRes) {
+	defer func() { _ = recover() }()
+	if ch != nil {
+		close(ch)
+	}
+}
+
+func (d *KdbDatasource) newConnection() (*kdb.KDBConn, error) {
+	log.DefaultLogger.Info("Opening connection to kdb+", "host", d.Host, "port", d.Port)
+	auth := fmt.Sprintf("%s:%s", d.user, d.pass)
+	var conn *kdb.KDBConn
+	var err error
+	if d.WithTls {
+		conn, err = kdb.DialTLS(d.Host, d.Port, auth, d.TlsServerConfig)
+	} else {
+		conn, err = kdb.DialKDBTimeout(d.Host, d.Port, auth, d.DialTimeout)
+	}
+	if err != nil {
+		log.DefaultLogger.Error("Error establishing kdb connection", "error", err)
+		return nil, err
+	}
+	log.DefaultLogger.Info("Dialled kdb+ successfully", "host", d.Host, "port", d.Port)
+	return conn, nil
+}
+
+func (d *KdbDatasource) openConnection() error {
+	conn, err := d.newConnection()
+	if err != nil {
+		d.KdbHandle = nil
+		return err
+	}
+	d.KdbHandle = conn
+	d.IsOpen = true
+
+	log.DefaultLogger.Info("Making raw response channel")
+	d.rawReadChan = make(chan *kdbRawRead, 16)
+
+	log.DefaultLogger.Info("Beginning handle listener")
+	go d.KdbHandleListener()
+	return nil
+}
+
+func (d *KdbDatasource) closeConnection() error {
+	if !d.IsOpen {
+		log.DefaultLogger.Info("Connection already closed", "host", d.Host, "port", d.Port)
+		return nil
+	}
+	log.DefaultLogger.Info("Closing connection", "host", d.Host, "port", d.Port)
+	err := d.KdbHandle.Close()
+	if err != nil {
+		log.DefaultLogger.Error("Error closing handle", "host", d.Host, "port", d.Port, "error", err)
+	}
+	d.IsOpen = false
+	return err
+}
+
+func (d *KdbDatasource) QueryData(ctx context.Context, req *backend.QueryDataRequest) (*backend.QueryDataResponse, error) {
+	response := backend.NewQueryDataResponse()
+
+	for _, q := range req.Queries {
+		res := d.query(ctx, req.PluginContext, q)
+		response.Responses[q.RefID] = res
+	}
+	return response, nil
+}
+
+func (d *KdbDatasource) query(_ context.Context, pCtx backend.PluginContext, query backend.DataQuery) backend.DataResponse {
+	var model QueryModel
+	response := backend.DataResponse{}
+	err := json.Unmarshal(query.JSON, &model)
+	if err != nil {
+		log.DefaultLogger.Error("Error decoding query and field", "error", err)
+		response.Error = err
+		return response
+	}
+	normalizeQueryModel(&model)
+	if model.ExecutionMode != ExecutionModeSync {
+		response.Error = fmt.Errorf("%s mode is served through Grafana Live, not the standard query endpoint", model.ExecutionMode)
+		return response
+	}
+
+	kdbResponse, err := d.RunKdbQuerySync(buildSyncQueryPayload(pCtx, query, model), time.Duration(model.Timeout)*time.Millisecond)
+	if err != nil {
+		response.Error = err
+		return response
+	}
+
+	frames, err := parseKdbResponseToFrames(kdbResponse, model, query.RefID)
+	if err != nil {
+		response.Error = err
+		return response
+	}
+	response.Frames = append(response.Frames, frames...)
+	return response
+}
+
+func normalizeQueryModel(model *QueryModel) {
+	if model.Timeout < 1 {
+		model.Timeout = defaultQueryTimeout
+	}
+	if model.ExecutionMode == "" {
+		model.ExecutionMode = ExecutionModeSync
+	}
+	if model.PollIntervalMs < 1 {
+		model.PollIntervalMs = defaultPollIntervalMs
+	}
+	if model.MaxStreamRows < 1 {
+		model.MaxStreamRows = defaultMaxStreamRows
+	}
+}
+
+func buildSyncQueryPayload(pCtx backend.PluginContext, query backend.DataQuery, model QueryModel) *kdb.K {
+	masterKeys, masterValues := buildMasterKdbLists(pCtx, query, model)
+	return kdb.NewList(kdb.Atom(kdb.KC, "{[x] value x[`Query;`Query]}"), kdb.NewDict(masterKeys, masterValues))
+}
+
+func buildMasterKdbLists(pCtx backend.PluginContext, query backend.DataQuery, model QueryModel) (*kdb.K, *kdb.K) {
+	userDict := buildUserKdbDict(pCtx.User)
+	datasourceDict := buildDatasourceKdbDict(pCtx.DataSourceInstanceSettings)
+	queryDict := buildQueryKdbDict(query, model.QueryText)
+	masterKeys := kdb.SymbolV([]string{"AQUAQ_KDB_BACKEND_GRAF_DATASOURCE", "Time", "OrgID", "Datasource", "User", "Query", "Timeout"})
+	masterValues := kdb.NewList(
+		kdb.Float(ADAPTOR_VERSION),
+		kdb.Atom(-kdb.KP, time.Now()),
+		kdb.Long(pCtx.OrgID),
+		datasourceDict,
+		userDict,
+		queryDict,
+		kdb.Long(int64(model.Timeout)))
+	return masterKeys, masterValues
+}
+
+func parseKdbResponseToFrames(kdbResponse *kdb.K, model QueryModel, refID string) ([]*data.Frame, error) {
+	var frames []*data.Frame
+	switch {
+	case kdbResponse == nil:
+		return nil, fmt.Errorf("kdb+ returned nil response")
+	case kdbResponse.Type == kdb.XT:
+		frame, err := ParseSimpleKdbTable(kdbResponse)
+		if err != nil {
+			return nil, err
+		}
+		frame.Name = refID
+		frame.RefID = refID
+		frames = append(frames, frame)
+	case kdbResponse.Type == kdb.XD:
+		groupedFrames, err := ParseGroupedKdbTable(kdbResponse, model.IncludeKeyColumns)
+		if err != nil {
+			return nil, err
+		}
+		for _, frame := range groupedFrames {
+			frame.RefID = refID
+		}
+		frames = append(frames, groupedFrames...)
+	default:
+		return nil, fmt.Errorf("returned object of unsupported type %v, only tables and grouped tables are supported", kdbResponse.Type)
+	}
+
+	if model.UseTimeColumn {
+		for _, frame := range frames {
+			if err := moveTimeColumnToFront(frame, model.TimeColumn); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return frames, nil
+}
+
+func moveTimeColumnToFront(frame *data.Frame, timeColumn string) error {
+	timeOverrideIndex := -1
+	for v, field := range frame.Fields {
+		if field.Name == timeColumn {
+			timeOverrideIndex = v
+			break
+		}
+	}
+	if timeOverrideIndex == -1 {
+		return fmt.Errorf("temporal column override '%v' is not present in all returned tables", timeColumn)
+	}
+	timeCol := frame.Fields[timeOverrideIndex]
+	nonTimeCols := append(frame.Fields[:timeOverrideIndex], frame.Fields[timeOverrideIndex+1:]...)
+	frame.Fields = append([]*data.Field{timeCol}, nonTimeCols...)
+	return nil
+}
+
+func (d *KdbDatasource) CheckHealth(_ context.Context, req *backend.CheckHealthRequest) (*backend.CheckHealthResult, error) {
+	pCtx := backend.PluginContext{}
+	if req != nil {
+		pCtx = req.PluginContext
+	}
+	userDict := buildUserKdbDict(pCtx.User)
+	datasourceDict := buildDatasourceKdbDict(pCtx.DataSourceInstanceSettings)
+	k := kdb.SymbolV([]string{"AQUAQ_KDB_BACKEND_GRAF_DATASOURCE", "Time", "OrgID", "Datasource", "User", "Query", "Timeout"})
+	v := kdb.NewList(
+		kdb.Float(ADAPTOR_VERSION),
+		kdb.Atom(-kdb.KP, time.Now()),
+		kdb.Long(pCtx.OrgID),
+		datasourceDict,
+		userDict,
+		kdb.NewDict(kdb.SymbolV([]string{"Query", "QueryType"}), kdb.NewList(kdb.Atom(kdb.KC, "1+1"), kdb.Symbol("HEALTHCHECK"))),
+		kdb.Long(int64(d.DialTimeout/time.Millisecond)))
+
+	test, err := d.RunKdbQuerySync(kdb.NewList(kdb.Atom(kdb.KC, "{[x] value x[`Query;`Query]}"), kdb.NewDict(k, v)), d.DialTimeout)
+	if err != nil {
+		log.DefaultLogger.Error("CheckHealth error", "error", err)
+		emsg := fmt.Sprintf("Error querying kdb+ process: %v", err)
+		if err == io.EOF {
+			emsg += " (hint: potential authentication error)"
+		}
+		return &backend.CheckHealthResult{Status: backend.HealthStatusError, Message: emsg}, nil
+	}
+	var status = backend.HealthStatusUnknown
+	var message = ""
+
+	if test.Type != -kdb.KJ {
+		status = backend.HealthStatusError
+		message = fmt.Sprintf("kdb+ result not of expected type; received type %v", test.Type)
+		log.DefaultLogger.Info("Response from kdb+ incorrect type", "object", test.Data)
+		return &backend.CheckHealthResult{
+			Status:  status,
+			Message: message,
+		}, nil
+	}
+	val := test.Data.(int64)
+
+	if val == 2 {
+		status = backend.HealthStatusOk
+		message = "kdb+ connected successfully"
+	} else {
+		status = backend.HealthStatusError
+		message = fmt.Sprintf("kdb+ response to \"1+1\" was correct type but incorrect value (returned %v)", val)
+	}
+
+	return &backend.CheckHealthResult{
+		Status:  status,
+		Message: message,
+	}, nil
+}

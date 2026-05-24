@@ -1,0 +1,41 @@
+{
+  "$schema": "https://raw.githubusercontent.com/grafana/grafana/master/docs/sources/developers/plugins/plugin.schema.json",
+  "type": "datasource",
+  "name": "kdb+ Async",
+  "id": "asyncq-kdbbackend-datasource",
+  "metrics": true,
+  "backend": true,
+  "executable": "gpx_asyncq-kdbbackend-datasource",
+  "alerting": true,
+  "info": {
+    "description": "Grafana backend datasource for kdb+ with synchronous, asynchronous, and streaming query support",
+    "author": {
+      "name": "AsyncQ",
+      "url": "https://github.com/greg/asyncq"
+    },
+    "keywords": [
+      "kdb+"
+    ],
+    "logos": {
+      "small": "img/asyncq-logo.svg",
+      "large": "img/asyncq-logo.svg"
+    },
+    "links": [
+      {
+        "name": "Website",
+        "url": "https://github.com/greg/asyncq"
+      },
+      {
+        "name": "License",
+        "url": "https://github.com/greg/asyncq/blob/main/LICENSE"
+      }
+    ],
+    "screenshots": [],
+    "version": "%VERSION%",
+    "updated": "%TODAY%"
+  },
+  "dependencies": {
+    "grafanaDependency": ">=13.0.0",
+    "plugins": []
+  }
+}

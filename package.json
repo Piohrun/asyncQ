@@ -1,0 +1,48 @@
+{
+  "name": "asyncq-kdbbackend-datasource",
+  "version": "0.1.2",
+  "description": "kdb+ datasource with async and streaming support",
+  "scripts": {
+    "build": "npm run typecheck && webpack --config ./.config/webpack/webpack.config.js --mode production",
+    "dev": "webpack --watch --config ./.config/webpack/webpack.config.js --mode development",
+    "test": "npm run typecheck",
+    "typecheck": "tsc --noEmit",
+    "sign": "npx --yes @grafana/sign-plugin@latest"
+  },
+  "author": "AsyncQ contributors; derived from AquaQ Analytics' kdb+ backend datasource",
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@grafana/tsconfig": "^2.0.1",
+    "@swc/core": "^1.15.0",
+    "@types/lodash": "^4.17.20",
+    "@types/node": "^24.0.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "copy-webpack-plugin": "^13.0.0",
+    "css-loader": "^7.1.0",
+    "replace-in-file-webpack-plugin": "^1.0.0",
+    "sass": "^1.89.0",
+    "sass-loader": "^16.0.0",
+    "style-loader": "^4.0.0",
+    "swc-loader": "^0.2.0",
+    "terser-webpack-plugin": "^5.3.0",
+    "typescript": "5.9.2",
+    "webpack": "^5.101.0",
+    "webpack-cli": "^6.0.0"
+  },
+  "dependencies": {
+    "@emotion/css": "11.10.6",
+    "@grafana/data": "13.0.1",
+    "@grafana/i18n": "13.0.1",
+    "@grafana/runtime": "13.0.1",
+    "@grafana/schema": "13.0.1",
+    "@grafana/ui": "13.0.1",
+    "lodash": "^4.17.23",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "rxjs": "7.8.2"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

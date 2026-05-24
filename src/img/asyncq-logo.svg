@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="AsyncQ logo">
+  <rect width="128" height="128" rx="18" fill="#0b5fff"/>
+  <path d="M34 74c0-23 13-39 34-39 20 0 34 16 34 39 0 12-4 22-11 29l13 14H87l-7-7c-4 2-8 3-12 3-21 0-34-16-34-39zm18 0c0 14 6 24 16 24 3 0 5-1 7-2L64 85h18l3 3c2-4 3-9 3-14 0-14-7-24-20-24-10 0-16 10-16 24z" fill="#ffffff"/>
+  <path d="M23 26h23v11H23V26zm59 0h23v11H82V26z" fill="#64d2ff"/>
+</svg>

@@ -1,0 +1,19 @@
+services:
+  grafana:
+    image: grafana/grafana:13.0.1
+    container_name: asyncq-demo-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_LOG_LEVEL: info
+      GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS: asyncq-kdbbackend-datasource
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_SECURITY_ADMIN_USER: admin
+      GF_USERS_DEFAULT_THEME: light
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ../dist:/var/lib/grafana/plugins/asyncq-kdbbackend-datasource:ro
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
