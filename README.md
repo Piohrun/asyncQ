@@ -126,12 +126,14 @@ Panopticon query text and Panopticon wrappers expand these q-literal macros:
 | `{Interval}`, `{IntervalNs}`, `{IntervalMs}`, `{MaxDataPoints}`, `{OrgID}` | `5000j` |
 | `{RefID}`, `{UserName}`, `{UserLogin}`, `{UserEmail}`, `{DatasourceName}`, `{DatasourceUID}` | `"A"` |
 
+Panopticon dashboard parameters are also expanded in Panopticon mode when a Grafana variable with the same name exists. For example, a Grafana variable named `symbol` lets a pasted query keep `{symbol}` or `{symbol:,}` syntax. Multi-value parameters use the delimiter after `:`, defaulting to `,` when no delimiter is provided. Values are inserted as raw text, matching Panopticon-style query substitution, so keep any required q quoting in the pasted query.
+
 Two optional Panopticon invocation controls are available at datasource and query level:
 
 - `Pano Wrapper` rewrites the query expression before execution. It must contain exactly one `{Query}` placeholder, for example `.pano.run[{Query};{TimeWindowStart};{TimeWindowEnd}]`.
 - `Pano Fn` is a q function or lambda that accepts the full request dictionary. When set, the backend calls it instead of directly evaluating query text, for example `{[req] .pano.run req}`.
 
-This does not make Grafana a byte-for-byte Panopticon runtime. Grafana variables, panel configuration, callbacks, and client-side Panopticon macros still need deliberate mapping, but simple function-driven table panels are much closer to copy/paste compatible.
+This does not make Grafana a byte-for-byte Panopticon runtime. Grafana variables still need to be created, and panel configuration, callbacks, and client-side Panopticon behavior still need deliberate mapping, but simple function-driven table panels are much closer to copy/paste compatible.
 
 ## LLM migration skill
 
@@ -170,7 +172,7 @@ In native and AquaQ compatibility modes, queries must return either:
 - a flat table, kdb+ type 98
 - a grouped table, kdb+ type 99 where key and value are congruent tables
 
-Panopticon compatibility mode also accepts keyed tables, symbol-keyed dictionaries, atoms, vectors, and lists of row dictionaries. Columns should have stable scalar types; mixed numeric row-dictionary values are widened to float columns, and sparse row dictionaries produce nullable columns. String columns and grouped table keys are supported by the inherited parser. If `Use Custom Time Column` is enabled, the named column must exist in every returned frame.
+Panopticon compatibility mode also accepts keyed tables, symbol-keyed dictionaries, atoms, vectors, and lists of row dictionaries. Columns should have stable scalar types where possible; mixed numeric row-dictionary values are widened to float columns, sparse row dictionaries produce nullable columns, and mixed generic-list columns are converted to strings. String columns and grouped table keys are supported by the inherited parser. If `Use Custom Time Column` is enabled, the named column must exist in every returned frame.
 
 ## Development
 

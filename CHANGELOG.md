@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.1
+
+- Fixed generic/mixed kdb+ list columns (`type 0`) by converting mixed values to string columns instead of producing empty fields.
+- Added Panopticon dashboard-parameter compatibility for `{parameter}` and `{parameter:delimiter}` syntax backed by matching Grafana variables.
+- Updated Panopticon migration docs and skill guidance for dashboard parameters and copy/paste query compatibility.
+
 ## 0.2.0 (Unreleased)
 
 - Added plugin-managed async mode for long-running q queries without q helper functions.

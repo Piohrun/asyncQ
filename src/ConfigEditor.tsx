@@ -447,7 +447,7 @@ export class ConfigEditor extends PureComponent<Props> {
                 onChange={this.onPanopticonQueryWrapperChange}
                 value={jsonData.panopticonQueryWrapper || ''}
                 placeholder=".pano.run[{Query};{TimeWindowStart};{TimeWindowEnd}]"
-                tooltip="Datasource default Panopticon wrapper expression. It must contain exactly one {Query} placeholder when set."
+                tooltip="Datasource default Panopticon wrapper expression. It must contain exactly one {Query} placeholder when set. Grafana-backed dashboard parameters such as {symbol} are expanded in Panopticon mode."
               />
             </div>
             <div className="gf-form">

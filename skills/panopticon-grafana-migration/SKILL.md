@@ -41,7 +41,8 @@ For the compatibility matrix, detailed mappings, and examples, read [references/
 5. Translate parameters conservatively.
    - Keep Panopticon time parameters in the pasted query where possible: `{TimeWindowStart}`, `{TimeWindowEnd}`, `{Snapshot}`, `{FocusTime}`, `$TimeWindowStart`, `$TimeWindowEnd`, `$Snapshot`, `$FocusTime`.
    - Formatted parameters like `{TimeWindowStart:yyyy-MM-dd HH:mm:ss.SSS}` are supported and expand to q string literals.
-   - Map Panopticon action parameters to Grafana variables manually. Do not invent variable values.
+   - Create Grafana variables with the same names as Panopticon dashboard/action parameters where possible. AsyncQ Panopticon mode expands `{parameter}` and `{parameter:delimiter}` from matching Grafana variables in query text and `panopticonQueryWrapper`.
+   - Do not invent variable values. Values are inserted as raw text, so preserve the q quoting/backtick syntax the original query expects.
 
 6. Build the Grafana panel.
    - Start with a Table panel for migration validation, even if the final visual will be different.

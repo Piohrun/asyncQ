@@ -14,6 +14,7 @@ import { merge, Observable, of } from 'rxjs';
 import { map, shareReplay, takeWhile } from 'rxjs/operators';
 
 import { MyDataSourceOptions, MyQuery, MyVariableQuery } from './types';
+import { expandPanopticonDashboardParameters } from './panopticonParameters';
 
 const defaultMode = 'sync';
 
@@ -45,13 +46,28 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
 
   applyTemplateVariables(query: MyQuery, scopedVars?: ScopedVars) {
     const templateSrv = getTemplateSrv();
+    const dashboardVariables = templateSrv.getVariables();
+    const executionMode = query.executionMode || this.options.executionMode || defaultMode;
+    const compatibilityMode = query.compatibilityMode || this.options.compatibilityMode || 'native';
+    let queryText = query.queryText ? templateSrv.replace(query.queryText, scopedVars) : '';
+    let panopticonQueryWrapper = query.panopticonQueryWrapper || this.options.panopticonQueryWrapper || '';
+
+    if (compatibilityMode === 'panopticon') {
+      queryText = expandPanopticonDashboardParameters(queryText, scopedVars, dashboardVariables);
+      panopticonQueryWrapper = expandPanopticonDashboardParameters(
+        templateSrv.replace(panopticonQueryWrapper, scopedVars),
+        scopedVars,
+        dashboardVariables
+      );
+    }
+
     return {
       ...query,
-      queryText: query.queryText ? templateSrv.replace(query.queryText, scopedVars) : '',
-      executionMode: query.executionMode || this.options.executionMode || defaultMode,
-      compatibilityMode: query.compatibilityMode || this.options.compatibilityMode || 'native',
+      queryText,
+      executionMode,
+      compatibilityMode,
       deferredQueryWrapper: query.deferredQueryWrapper || this.options.deferredQueryWrapper || '',
-      panopticonQueryWrapper: query.panopticonQueryWrapper || this.options.panopticonQueryWrapper || '',
+      panopticonQueryWrapper,
       panopticonRequestFunction: query.panopticonRequestFunction || this.options.panopticonRequestFunction || '',
     };
   }

@@ -43,7 +43,7 @@ Verdict legend:
 | Formatted time macros | Direct | q string literal, e.g. `{TimeWindowStart:yyyy-MM-dd HH:mm:ss.SSS}` | Format support covers common Java-style date tokens; validate unusual formats. |
 | `{Interval}`, `{IntervalNs}`, `{IntervalMs}` | Direct | q long | Derived from Grafana query interval. |
 | `{MaxDataPoints}`, `{RefID}`, `{OrgID}`, user/datasource macros | Direct | q long or q string | Available in query text, wrapper, and request dict. |
-| Panopticon dashboard/action parameters | Config-only | Convert to Grafana variables and substitute in query text | Multi-select quoting and symbol-list semantics must be handled deliberately. |
+| Panopticon dashboard/action parameters | Config-only | Create Grafana variables with matching names; AsyncQ expands `{parameter}` and `{parameter:delimiter}` in Panopticon mode | Values are inserted as raw text. Multi-select quoting and symbol-list semantics must still match the q query. |
 | Cascading/filter variables | Config-only or Visual rewrite | Use Grafana variables backed by sync q queries | Panopticon-specific filter UX must be rebuilt with Grafana variable controls. |
 | Panopticon session, entitlement, workbook state | Adapter needed | Reproduce expected fields in `panopticonRequestFunction` or plugin adapter | Same credentials may not be enough if gateway expects Panopticon session IDs or entitlements. |
 | Client-side calculated parameters | Visual rewrite or q adapter | Move calculation into q, Grafana transform, or variable expression | Do not assume Panopticon client transforms exist in Grafana. |
@@ -62,8 +62,9 @@ Verdict legend:
 | Char vector | Direct | One `value` string row | Treated as a single string, not one row per char. |
 | List of row dictionaries | Direct | Union of keys becomes columns | Missing cells become null. Mixed numeric values widen to float. |
 | Sparse or reordered row dictionaries | Direct | Stable union of keys | Validate null handling in Grafana field display. |
+| Generic list column with mixed scalar/string values | Direct | String column | Useful for Panopticon table columns with q type `0`; nested values are stringified. |
 | Nested dictionaries/lists as cell values | Adapter needed | Return an explicit flat table from q | Grafana frames need primitive-ish column values. |
-| Generic list of arbitrary objects | Adapter needed | Convert to table/list of row dictionaries | Unsupported shapes are intentionally rejected with diagnostics. |
+| Generic list result of arbitrary non-row objects | Direct but adapter recommended | One stringified `value` column | Copy/paste may render, but explicit table/list-of-dicts output is easier to reason about. |
 | Panopticon-only client transform output | Visual rewrite or q adapter | Recreate transform in q or Grafana | The plugin only sees q result data, not Panopticon client-side state. |
 
 ### Visuals And Interactions
@@ -178,7 +179,15 @@ These expand in `queryText` and `panopticonQueryWrapper`:
 | `{UserName}`, `{UserLogin}`, `{UserEmail}` | q strings |
 | `{DatasourceName}`, `{DatasourceUID}` | q strings |
 
-Action parameters and dashboard variables must be mapped to Grafana variables manually.
+Dashboard/action parameters can be kept in Panopticon curly-brace form when a Grafana variable with the same name exists:
+
+| Parameter | Expansion |
+| --- | --- |
+| `{symbol}` | Raw Grafana variable value for `symbol` |
+| `{symbol:,}` | Multi-value `symbol` joined with `,` |
+| `{symbol: }` | Multi-value `symbol` joined with a space |
+
+Values are inserted as raw text, mirroring Panopticon-style query substitution. Keep q quoting in the query, for example ``sym=`{symbol}`` for a single symbol or ``sym in `$" " vs "{symbols: }"`` for a multi-symbol variable joined by spaces. Grafana variables must still be created with the correct values; the plugin does not infer dashboard parameter definitions from a Panopticon workbook.
 
 ## Request Function Shape
 
@@ -223,12 +232,13 @@ Configure:
 | List of row dictionaries | Union of row keys becomes columns |
 | Sparse row dictionaries | Missing cells are null |
 | Mixed numeric row values | Values widen to float |
+| Mixed generic-list table columns | Values become strings |
 
 Unsupported or fragile shapes:
 
 - nested dictionaries as cells
-- generic lists of non-row objects
-- deeply nested list columns
+- generic lists of non-row objects, unless stringified display is acceptable
+- deeply nested list columns, unless stringified display is acceptable
 - client-side Panopticon transforms that do not exist in q output
 - visual-only Panopticon state
 

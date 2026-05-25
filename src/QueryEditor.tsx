@@ -223,7 +223,7 @@ export class QueryEditor extends PureComponent<Props> {
             value={panopticonQueryWrapper || ''}
             onChange={this.onPanopticonQueryWrapperChange}
             label="Wrapper"
-            tooltip="Optional Panopticon wrapper expression. Use exactly one {Query}; supported macros include {TimeWindowStart}, {TimeWindowEnd}, {Snapshot}, {IntervalMs}, and {MaxDataPoints}."
+            tooltip="Optional Panopticon wrapper expression. Use exactly one {Query}; supported macros include {TimeWindowStart}, {IntervalMs}, and Grafana-backed dashboard parameters such as {symbol}."
             placeholder=".pano.run[{Query};{TimeWindowStart};{TimeWindowEnd}]"
           />
         </div>
