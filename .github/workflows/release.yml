@@ -48,10 +48,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          assets=(
+            "release/asyncq-kdbbackend-datasource-${GITHUB_REF_NAME}-linux.zip"
+            "release/asyncq-kdbbackend-datasource-${GITHUB_REF_NAME}-linux.zip.sha256"
+            "release/asyncq-kdbbackend-datasource-${GITHUB_REF_NAME}-linux.tar.gz"
+            "release/asyncq-kdbbackend-datasource-${GITHUB_REF_NAME}-linux.tar.gz.sha256"
+          )
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" release/* --clobber
+            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
           else
-            gh release create "$GITHUB_REF_NAME" release/* \
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
               --title "$GITHUB_REF_NAME" \
-              --notes "AsyncQ kdb+ datasource ${GITHUB_REF_NAME}. Linux plugin package with amd64 and arm64 backend binaries."
+              --notes "AsyncQ kdb+ datasource ${GITHUB_REF_NAME}. Linux plugin package with fully static amd64 and arm64 backend binaries."
           fi
