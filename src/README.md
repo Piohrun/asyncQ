@@ -53,6 +53,8 @@ The request dictionary preserves the upstream `AQUAQ_KDB_BACKEND_GRAF_DATASOURCE
 
 Panopticon query text and wrappers expand q-literal macros such as `{TimeWindowStart}`, `{TimeWindowEnd}`, `{Snapshot}`, `{FocusTime}`, `$TimeWindowStart`, `{TimeWindowStart:yyyy-MM-dd HH:mm:ss}`, `{IntervalMs}`, `{MaxDataPoints}`, `{RefID}`, and `{UserLogin}`. Panopticon dashboard parameters such as `{symbol}` and `{symbol:,}` are expanded from Grafana variables with matching names in Panopticon mode. `Pano Wrapper` rewrites query text with one `{Query}` placeholder. `Pano Fn` calls a q function or lambda with the full request dictionary instead of evaluating query text directly.
 
+For Panopticon dashboards where several panels share one base query and only apply different transforms or visual options, use one AsyncQ source panel and Grafana's `-- Dashboard --` datasource for dependent panels. Duplicating the same AsyncQ target in every panel sends repeated kdb+ requests.
+
 ## Diagnostics
 
 Enable datasource `Diagnostics` to write structured backend logs for sync, async, deferred, and stream lifecycles. By default the logs contain request IDs, ref IDs, mode, query hashes, kdb+ object shapes, frame schemas, q worker/result metadata, status transitions, durations, and errors, but not raw query text. q stack traces are hashed by default. `Log Query Text` is a separate opt-in switch for trusted debugging sessions only.

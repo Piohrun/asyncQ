@@ -58,6 +58,8 @@ Docker is optional. It is useful when you want a fully disposable Grafana contai
 - `AsyncQ Panopticon compatibility matrix` maps the migration matrix to demo panels: direct sync, plugin async, wrapper, request function, macros, keyed table, dictionary, row dictionaries, an expected adapter-needed failure, and its table-shaped replacement.
 - `AsyncQ async execution tests` compares sync, helper async, plugin async, deferred async, streaming, and Panopticon request-function execution.
 
+For Panopticon dashboards where several panels share one base datasource result, create one AsyncQ source panel and set the dependent panels to Grafana's `-- Dashboard --` datasource with `Use results from panel`. The demo dashboards keep most panels direct so the plugin behavior is visible, but production migrations should use Dashboard datasource sharing for this Panopticon pattern.
+
 If you restart the q process while the dashboard is already open, refresh the browser tab so the async and streaming panels create fresh Grafana Live subscriptions.
 
 ## Stop

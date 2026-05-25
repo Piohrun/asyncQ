@@ -6,6 +6,8 @@ AsyncQ is close for Panopticon table-style panels where the q query or function 
 
 Use a Table panel as the first migration target. Convert to Time series, State timeline, Bar chart, or another Grafana visualization only after the returned data matches.
 
+When a Panopticon dashboard runs one datasource query and several panels only transform or visualize that same result differently, map it to Grafana's Dashboard datasource. Use one AsyncQ source panel for the shared q query; configure dependent panels with datasource `-- Dashboard --` and `Use results from panel` pointing at the source panel. This avoids repeated kdb+ calls and is the closest Grafana equivalent to Panopticon shared result reuse.
+
 ## Compatibility Matrix
 
 Verdict legend:
@@ -25,6 +27,7 @@ Verdict legend:
 | Existing gateway accepts a q expression wrapped in a known call | Config-only | Set `panopticonQueryWrapper` with exactly one `{Query}` | Example: `.gateway.run[{Query};{TimeWindowStart};{TimeWindowEnd}]`. |
 | Existing panel passes a full request object into a q function | Config-only if the function can accept AsyncQ's request dict; otherwise adapter needed | Set `panopticonRequestFunction` | AsyncQ passes a request dictionary with `Query`, `Panopticon`, top-level time aliases, datasource, user, and execution metadata. Proprietary envelopes need mapping. |
 | Panopticon source uses positional function args | Config-only or adapter needed | Prefer query text like `.fn[arg1;arg2]`; use wrapper/request function if args come from time range or variables | Works when args are expressible as q literals after macro/variable expansion. |
+| Multiple panels share one base query/result | Config-only | One AsyncQ source panel, dependent panels use Grafana datasource `-- Dashboard --` and `Use results from panel` | Do not duplicate the same AsyncQ target in each dependent panel; duplicate targets produce repeated kdb+ requests. |
 | Panopticon server-side async submit/status/result/cancel | Adapter needed unless it already matches `.grafana.asyncq.async.*` | `executionMode="async"` only for the AsyncQ helper contract | Discover job ID field, status values, result function, error fields, expiry, and cancel semantics before patching. |
 | Deferred response or callback over IPC handle | Adapter needed | Current `deferredAsync` only wraps a query then runs Plugin Async | True q `neg` callback/deferred protocols need a plugin adapter that registers the callback handle and translates returned messages. |
 | Gateway only accepts serialized/proprietary Panopticon envelopes | Adapter needed | Implement envelope builder in plugin or q shim | Do not claim copy/paste until the envelope schema is known. |
@@ -75,6 +78,7 @@ Verdict legend:
 | Time-series line/area chart | Config-only | Return a real time column; enable `useTimeColumn` if needed | Grafana expects temporal field plus numeric value fields. |
 | Bar, stat, gauge, state timeline | Config-only | Use matching Grafana visualization after table validation | Field overrides usually replace Panopticon visual settings. |
 | Conditional coloring/thresholds | Visual rewrite | Grafana thresholds/value mappings/field overrides | Data can copy; styling rules need translation. |
+| Multiple panels derived from one shared result set | Config-only | Source panel queries AsyncQ; dependent panels use Dashboard datasource plus transformations | Reduces q load and matches Panopticon shared-query behavior better than duplicated panel queries. |
 | Panopticon heatmaps, order books, custom finance widgets | Visual rewrite or custom panel | Start with table-compatible data, then map to native Grafana/custom plugin | Query may be portable; exact visual behavior usually is not. |
 | Drilldowns and navigation | Visual rewrite | Grafana data links/dashboard links | URL and variable mapping must be rebuilt. |
 | Panopticon actions/writebacks | Not portable through datasource alone | Build explicit Grafana app/plugin or secured backend endpoint | Datasource queries should not be treated as a generic writeback/action channel. |
@@ -84,9 +88,10 @@ Verdict legend:
 ### Decision Rules
 
 1. If the query is plain q, wrapper-based, or request-function-based and returns a supported shape, call it Direct or Config-only.
-2. If the q port expects an async/deferred/streaming/session envelope that AsyncQ does not currently generate, call it Adapter needed and document the exact protocol fields.
-3. If the data can be retrieved but the Panopticon value is mostly visual styling, interaction, or client transform behavior, call it Visual rewrite.
-4. If the feature performs writeback/action side effects through Panopticon-only infrastructure, call it Not portable through the datasource alone.
+2. If multiple panels share the same underlying Panopticon result, use one AsyncQ source panel and Dashboard datasource dependents before considering plugin-side caching or q changes.
+3. If the q port expects an async/deferred/streaming/session envelope that AsyncQ does not currently generate, call it Adapter needed and document the exact protocol fields.
+4. If the data can be retrieved but the Panopticon value is mostly visual styling, interaction, or client transform behavior, call it Visual rewrite.
+5. If the feature performs writeback/action side effects through Panopticon-only infrastructure, call it Not portable through the datasource alone.
 
 ## Same-Port Legacy Gateway Migration
 
@@ -97,6 +102,7 @@ Feasible without modifying the gateway/RDB:
 - Plain sync q expressions or function calls.
 - Blocking gateway calls wrapped by AsyncQ `pluginAsync`, which keeps Grafana responsive while the existing q call runs on a dedicated IPC connection.
 - Panopticon-style time macros expanded by the plugin before submission.
+- Shared base-query panels using Grafana's Dashboard datasource to reuse one AsyncQ source panel result.
 - Result parsing for flat tables, keyed tables, primitive dictionaries, atoms, vectors, char vectors, and lists of row dictionaries.
 - Request-dictionary invocation when the existing gateway already accepts a compatible function/lambda call through `panopticonRequestFunction`.
 
@@ -146,12 +152,25 @@ For the proposed configurable adapter shape, see `research/legacy-async-adapter.
 
 Use `sync` while validating. Switch to `pluginAsync` when the query is correct and may be slow.
 
+## Shared Result Panels
+
+Use Grafana's Dashboard datasource when a Panopticon dashboard used one shared datasource result for several panels:
+
+1. Create a source panel that uses AsyncQ and contains the shared q query.
+2. Validate the source panel as a Table panel first.
+3. Create dependent panels with datasource `-- Dashboard --`.
+4. In each dependent panel, set `Use results from panel` to the source panel.
+5. Apply panel-specific Grafana transformations, field overrides, filters, thresholds, and visualization settings.
+
+Do not paste the same expensive AsyncQ query into every dependent panel unless you intentionally want separate q requests. Direct duplicate AsyncQ targets are independent Grafana queries: sync targets serialize through the datasource's sync IPC path, and `pluginAsync` targets use separate plugin-managed IPC calls rather than a shared result.
+
 ## Mode Selection
 
 | Panopticon source behavior | AsyncQ setting |
 | --- | --- |
 | Plain q expression/function call | `compatibilityMode="panopticon"`, `executionMode="sync"` first, then `pluginAsync` |
 | Long-running direct query | `executionMode="pluginAsync"` |
+| Shared result reused by several panels | One source panel uses AsyncQ; dependent panels use datasource `-- Dashboard --` |
 | q gateway already has async submit/status/result/cancel | `executionMode="async"` |
 | Query must be wrapped before evaluation | Set `panopticonQueryWrapper`, exactly one `{Query}` |
 | Pass-to-function panel | Set `panopticonRequestFunction` to a q function/lambda accepting `req` |

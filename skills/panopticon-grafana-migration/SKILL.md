@@ -22,6 +22,7 @@ For the compatibility matrix, detailed mappings, and examples, read [references/
 2. Identify the Panopticon panel type and data path.
    - Extract the q query text or function call.
    - Note whether Panopticon uses direct query, pass-to-function, deferred query, time-window parameters, action parameters, streaming, or post-query transforms.
+   - Identify whether multiple Panopticon panels share the same underlying datasource query/result and only differ by client-side transforms, filtering, aggregation, or visualization.
    - Record expected result shape: table, keyed table, dictionary, scalar, vector, or list of row dictionaries.
 
 3. Discover the existing q gateway contract when source code or q ports are available.
@@ -34,6 +35,7 @@ For the compatibility matrix, detailed mappings, and examples, read [references/
    - Use `executionMode: "sync"` for quick validation.
    - Use `executionMode: "pluginAsync"` when the gateway only supports blocking sync IPC but the query should not block Grafana. This works with legacy gateways without q-side helper functions.
    - Use `executionMode: "async"` only when the target q process exposes `.grafana.asyncq.async.submit/status/result/cancel`.
+   - For shared Panopticon base-query results, create one AsyncQ source panel and point dependent panels at Grafana's `-- Dashboard --` datasource with `Use results from panel`; do not duplicate the same AsyncQ query in every dependent panel.
    - Use `panopticonRequestFunction` when the Panopticon panel used pass-to-function or the q side expects a full request dictionary.
    - Use `panopticonQueryWrapper` when the original query must be wrapped around `{Query}`.
    - For a legacy async protocol with different function names or fields, identify the submit/status/result/cancel mapping and state whether AsyncQ needs a custom adapter patch.
@@ -46,6 +48,7 @@ For the compatibility matrix, detailed mappings, and examples, read [references/
 
 6. Build the Grafana panel.
    - Start with a Table panel for migration validation, even if the final visual will be different.
+   - When several panels share one Panopticon result set, build a source panel with the AsyncQ query first, then build dependent panels using the Dashboard datasource and Grafana transformations/field overrides.
    - Set `useTimeColumn: false` unless the returned frame has a real time column and the target visualization needs it.
    - Once data matches, change the visualization type and field overrides.
 
@@ -74,6 +77,7 @@ When asked to migrate a panel, return:
 - A short migration assessment: likely compatible, needs adapter, or not directly portable.
 - A compatibility-matrix verdict and the exact reason for any gap.
 - The target AsyncQ query settings.
+- The Dashboard datasource mapping for any panels that should reuse another panel's result instead of querying AsyncQ directly.
 - The Grafana panel target JSON or exact fields to set in the query editor.
 - Any q adapter function needed.
 - Any AsyncQ plugin adapter/config gap needed to speak an unchanged legacy gateway protocol.

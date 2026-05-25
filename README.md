@@ -128,6 +128,8 @@ Panopticon query text and Panopticon wrappers expand these q-literal macros:
 
 Panopticon dashboard parameters are also expanded in Panopticon mode when a Grafana variable with the same name exists. For example, a Grafana variable named `symbol` lets a pasted query keep `{symbol}` or `{symbol:,}` syntax. Multi-value parameters use the delimiter after `:`, defaulting to `,` when no delimiter is provided. Values are inserted as raw text, matching Panopticon-style query substitution, so keep any required q quoting in the pasted query.
 
+If a Panopticon dashboard runs one base datasource query and several panels only transform or visualize that same result differently, model that in Grafana with the built-in Dashboard datasource rather than duplicating the AsyncQ query in every panel. Create one AsyncQ source panel with the shared q query, then set dependent panels to datasource `-- Dashboard --` and select the source panel in `Use results from panel`. This makes Grafana issue one kdb+ query and reuse the returned frames across panels. Grafana documents this workflow as [sharing query results with another panel](https://grafana.com/docs/grafana/latest/visualizations/panels-visualizations/query-transform-data/share-query/).
+
 Two optional Panopticon invocation controls are available at datasource and query level:
 
 - `Pano Wrapper` rewrites the query expression before execution. It must contain exactly one `{Query}` placeholder, for example `.pano.run[{Query};{TimeWindowStart};{TimeWindowEnd}]`.
