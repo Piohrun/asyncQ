@@ -53,6 +53,57 @@ func TestParsePanopticonCharVectorAsString(t *testing.T) {
 	}
 }
 
+func TestParseSimpleTableConvertsMixedGenericListColumnToStrings(t *testing.T) {
+	res := kdb.NewTable(
+		[]string{"sym", "mixed"},
+		[]*kdb.K{
+			kdb.SymbolV([]string{"AAPL", "MSFT", "GOOG"}),
+			kdb.NewList(kdb.Long(42), kdb.Atom(kdb.KC, "ready"), kdb.Symbol("done")),
+		},
+	)
+	frames, err := parseKdbResponseToFrames(res, QueryModel{}, "A")
+	if err != nil {
+		t.Fatalf("parseKdbResponseToFrames returned error: %v", err)
+	}
+	frame := onlyFrame(t, frames)
+
+	assertFieldNames(t, frame, []string{"sym", "mixed"})
+	if frame.Fields[0].Len() != 3 || frame.Fields[1].Len() != 3 {
+		t.Fatalf("mixed generic column should preserve row count, got %d/%d", frame.Fields[0].Len(), frame.Fields[1].Len())
+	}
+	mixed := fieldByName(t, frame, "mixed")
+	for i, want := range []string{"42", "ready", "done"} {
+		if got := mixed.At(i); got != want {
+			t.Fatalf("unexpected mixed value at %d: got %#v want %#v", i, got, want)
+		}
+	}
+}
+
+func TestParseSimpleTablePreservesGenericStringListColumn(t *testing.T) {
+	res := kdb.NewTable(
+		[]string{"sym", "state"},
+		[]*kdb.K{
+			kdb.SymbolV([]string{"AAPL", "MSFT"}),
+			kdb.NewList(kdb.Atom(kdb.KC, "ready"), kdb.Atom(kdb.KC, "done")),
+		},
+	)
+	frames, err := parseKdbResponseToFrames(res, QueryModel{}, "A")
+	if err != nil {
+		t.Fatalf("parseKdbResponseToFrames returned error: %v", err)
+	}
+	frame := onlyFrame(t, frames)
+
+	state := fieldByName(t, frame, "state")
+	if state.Len() != 2 {
+		t.Fatalf("generic string column should have two rows, got %d", state.Len())
+	}
+	for i, want := range []string{"ready", "done"} {
+		if got := state.At(i); got != want {
+			t.Fatalf("unexpected string value at %d: got %#v want %#v", i, got, want)
+		}
+	}
+}
+
 func TestParsePanopticonGenericDictAsFrame(t *testing.T) {
 	res := kdb.NewDict(
 		kdb.SymbolV([]string{"sym", "count"}),
@@ -127,6 +178,33 @@ func TestParsePanopticonKeyedTableFlattensKeyAndValueColumns(t *testing.T) {
 	}
 	if got := fieldByName(t, frame, "price").At(0); got != float64(189.5) {
 		t.Fatalf("unexpected price value: %#v", got)
+	}
+}
+
+func TestParseGroupedTableConvertsMixedGenericListColumnToStrings(t *testing.T) {
+	res := kdb.NewDict(
+		kdb.NewTable([]string{"sym"}, []*kdb.K{
+			kdb.SymbolV([]string{"AAPL"}),
+		}),
+		kdb.NewTable([]string{"mixed"}, []*kdb.K{
+			kdb.NewList(kdb.NewList(kdb.Long(42), kdb.Atom(kdb.KC, "ready"), kdb.Symbol("done"))),
+		}),
+	)
+	frames, err := parseKdbResponseToFrames(res, QueryModel{}, "A")
+	if err != nil {
+		t.Fatalf("parseKdbResponseToFrames returned error: %v", err)
+	}
+	frame := onlyFrame(t, frames)
+
+	assertFieldNames(t, frame, []string{"mixed"})
+	mixed := fieldByName(t, frame, "mixed")
+	if mixed.Len() != 3 {
+		t.Fatalf("mixed grouped column should preserve row count, got %d", mixed.Len())
+	}
+	for i, want := range []string{"42", "ready", "done"} {
+		if got := mixed.At(i); got != want {
+			t.Fatalf("unexpected grouped mixed value at %d: got %#v want %#v", i, got, want)
+		}
 	}
 }
 

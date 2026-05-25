@@ -30,15 +30,24 @@ func stringParser(data *kdb.K) ([]string, error) {
 	return stringArray, nil
 }
 
+func genericListStringColumn(data *kdb.K) []string {
+	items := data.Data.([]*kdb.K)
+	out := make([]string, len(items))
+	for i, item := range items {
+		out[i] = kdbObjectString(item)
+	}
+	return out
+}
+
 func standardColumnParser(inputData *kdb.K) interface{} {
 
 	switch {
 	case inputData.Type == kdb.K0:
 		stringColumn, err := stringParser(inputData)
-		if err != nil {
-			//return nil, fmt.Errorf("The following column: %v return this error: %v", columnName, err)
+		if err == nil {
+			return stringColumn
 		}
-		return stringColumn
+		return genericListStringColumn(inputData)
 	case inputData.Type == kdb.KC:
 		return charParser(inputData)
 
@@ -654,12 +663,7 @@ func kdbObjectColumnWithDepth(value *kdb.K, depth int) (interface{}, error) {
 		if strings, err := stringParser(value); err == nil {
 			return resizeColumn(strings, depth), nil
 		}
-		items := value.Data.([]*kdb.K)
-		out := make([]string, len(items))
-		for i, item := range items {
-			out[i] = kdbObjectString(item)
-		}
-		return resizeColumn(out, depth), nil
+		return resizeColumn(genericListStringColumn(value), depth), nil
 	}
 	return resizeParsedColumn(standardColumnParser(value), depth), nil
 }
@@ -776,10 +780,11 @@ func ParseGroupedKdbTable(res *kdb.K, includeKeys bool) ([]*data.Frame, error) {
 					dat = standardColumnParser(KObj)
 				case KObj.Type == kdb.K0:
 					stringColumn, err := stringParser(KObj)
-					if err != nil {
-						return nil, fmt.Errorf("Error parsing data of type K0")
+					if err == nil {
+						dat = stringColumn
+					} else {
+						dat = genericListStringColumn(KObj)
 					}
-					dat = stringColumn
 				}
 			}
 			frame.Fields = append(frame.Fields, data.NewField(colName, nil, dat))
