@@ -23,7 +23,7 @@ case "$(uname -m)" in
 esac
 
 OUTPUT="dist/gpx_asyncq-kdbbackend-datasource_linux_${GOARCH}"
-GOOS=linux GOARCH="$GOARCH" go build -o "$OUTPUT" ./pkg
+CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" go build -o "$OUTPUT" ./pkg
 chmod +x "$OUTPUT"
 
 echo "Built frontend and backend plugin assets in $ROOT_DIR/dist"
