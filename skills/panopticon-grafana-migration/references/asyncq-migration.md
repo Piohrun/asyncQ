@@ -290,6 +290,7 @@ Common fixes:
 | Missing time column error | `useTimeColumn=true` but returned frame lacks that column | Disable custom time column or return a real time column |
 | Helper async never completes | q helper contract mismatch | Test `.grafana.asyncq.async.submit/status/result/cancel` directly |
 | Request function fails | Expects different request envelope | Use top-level aliases or `req\`Panopticon`; add a small q shim |
+| Panels still resolve one by one after raising `syncMaxConnections` | Target q gateway/process serializes requests or datasource config was not applied | Inspect diagnostics: high `syncPoolAcquireWaitMs` means plugin pool saturation; low acquire wait with high `syncTransportMs` means the target q side is taking/serializing the work |
 
 For production debugging, prefer adding a q adapter that logs job ID, ref ID, time range, query hash, and result type on the q side without logging sensitive query text.
 

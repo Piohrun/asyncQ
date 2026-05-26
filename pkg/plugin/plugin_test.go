@@ -286,7 +286,7 @@ func TestCheckHealthSuccess(t *testing.T) {
 	ds.setupKdbConnectionHandlers()
 	// Set handle assignment as open
 	ds.IsOpen = true
-	ds.RunKdbQuerySync = func(*kdb.K, time.Duration) (*kdb.K, error) { return kdb.Long(2), nil }
+	ds.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) { return kdb.Long(2), nil }
 	res, err := ds.CheckHealth(nil, nil)
 	if err != nil {
 		t.Errorf("Error running CheckHealth: %v", err)
@@ -304,7 +304,7 @@ func TestCheckHealthFailValue(t *testing.T) {
 	ds.setupKdbConnectionHandlers()
 	// Set handle assignment as open
 	ds.IsOpen = true
-	ds.RunKdbQuerySync = func(*kdb.K, time.Duration) (*kdb.K, error) { return kdb.Long(3), nil }
+	ds.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) { return kdb.Long(3), nil }
 	res, err := ds.CheckHealth(nil, nil)
 	if err != nil {
 		t.Errorf("Error running CheckHealth: %v", err)
@@ -322,7 +322,7 @@ func TestCheckHealthFailType(t *testing.T) {
 	ds.setupKdbConnectionHandlers()
 	// Set handle assignment as open
 	ds.IsOpen = true
-	ds.RunKdbQuerySync = func(*kdb.K, time.Duration) (*kdb.K, error) {
+	ds.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
 		return kdb.Error(fmt.Errorf("kdb+ server-side error")), nil
 	}
 	res, err := ds.CheckHealth(nil, nil)
@@ -342,7 +342,7 @@ func TestCheckHealthFailError(t *testing.T) {
 	ds.setupKdbConnectionHandlers()
 	// Set handle assignment as open
 	ds.IsOpen = true
-	ds.RunKdbQuerySync = func(*kdb.K, time.Duration) (*kdb.K, error) {
+	ds.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
 		return nil, fmt.Errorf("Go backend-side error")
 	}
 	res, err := ds.CheckHealth(nil, nil)
@@ -392,7 +392,7 @@ func TestQueryDataRunsSyncQueriesConcurrently(t *testing.T) {
 
 	var inFlight int32
 	var maxInFlight int32
-	ds.RunKdbQuerySync = func(*kdb.K, time.Duration) (*kdb.K, error) {
+	ds.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
 		current := atomic.AddInt32(&inFlight, 1)
 		for {
 			max := atomic.LoadInt32(&maxInFlight)

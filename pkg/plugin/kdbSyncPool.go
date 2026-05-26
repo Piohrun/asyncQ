@@ -8,6 +8,34 @@ import (
 	kdb "github.com/sv/kdbgo"
 )
 
+type syncPoolAcquireInfo struct {
+	reused   bool
+	wait     time.Duration
+	snapshot syncPoolSnapshot
+}
+
+type syncPoolReleaseInfo struct {
+	action   string
+	snapshot syncPoolSnapshot
+}
+
+type syncPoolSnapshot struct {
+	max       int
+	active    int
+	idle      int
+	slots     int
+	available int
+	closed    bool
+}
+
+type syncPoolDiagnosticOptions struct {
+	acquireWaitMs int64
+	acquireSource string
+	action        string
+	reusable      *bool
+	transportMs   int64
+}
+
 func (d *KdbDatasource) ensureSyncPool() error {
 	d.normalizeDatasourceDefaults()
 
@@ -29,12 +57,13 @@ func (d *KdbDatasource) ensureSyncPool() error {
 	return nil
 }
 
-func (d *KdbDatasource) acquireSyncConnection(timeout time.Duration) (*kdb.KDBConn, error) {
+func (d *KdbDatasource) acquireSyncConnection(timeout time.Duration) (*kdb.KDBConn, syncPoolAcquireInfo, error) {
 	if timeout <= 0 {
 		timeout = time.Duration(defaultQueryTimeout) * time.Millisecond
 	}
+	start := time.Now()
 	if err := d.ensureSyncPool(); err != nil {
-		return nil, err
+		return nil, syncPoolAcquireInfo{wait: time.Since(start), snapshot: d.syncPoolSnapshot()}, err
 	}
 
 	timer := time.NewTimer(timeout)
@@ -43,7 +72,7 @@ func (d *KdbDatasource) acquireSyncConnection(timeout time.Duration) (*kdb.KDBCo
 	for {
 		pool, slots, err := d.syncPoolChannels()
 		if err != nil {
-			return nil, err
+			return nil, syncPoolAcquireInfo{wait: time.Since(start), snapshot: d.syncPoolSnapshot()}, err
 		}
 
 		select {
@@ -52,9 +81,9 @@ func (d *KdbDatasource) acquireSyncConnection(timeout time.Duration) (*kdb.KDBCo
 				continue
 			}
 			if err := d.activateSyncConnection(conn); err != nil {
-				return nil, err
+				return nil, syncPoolAcquireInfo{reused: true, wait: time.Since(start), snapshot: d.syncPoolSnapshot()}, err
 			}
-			return conn, nil
+			return conn, syncPoolAcquireInfo{reused: true, wait: time.Since(start), snapshot: d.syncPoolSnapshot()}, nil
 		default:
 		}
 
@@ -64,28 +93,28 @@ func (d *KdbDatasource) acquireSyncConnection(timeout time.Duration) (*kdb.KDBCo
 				continue
 			}
 			if err := d.activateSyncConnection(conn); err != nil {
-				return nil, err
+				return nil, syncPoolAcquireInfo{reused: true, wait: time.Since(start), snapshot: d.syncPoolSnapshot()}, err
 			}
-			return conn, nil
+			return conn, syncPoolAcquireInfo{reused: true, wait: time.Since(start), snapshot: d.syncPoolSnapshot()}, nil
 		case slots <- struct{}{}:
 			conn, err := d.newConnection()
 			if err != nil {
 				d.releaseSyncPoolSlot()
-				return nil, err
+				return nil, syncPoolAcquireInfo{wait: time.Since(start), snapshot: d.syncPoolSnapshot()}, err
 			}
 			if err := d.activateSyncConnection(conn); err != nil {
-				return nil, err
+				return nil, syncPoolAcquireInfo{wait: time.Since(start), snapshot: d.syncPoolSnapshot()}, err
 			}
-			return conn, nil
+			return conn, syncPoolAcquireInfo{wait: time.Since(start), snapshot: d.syncPoolSnapshot()}, nil
 		case <-timer.C:
-			return nil, fmt.Errorf("timed out waiting for sync connection after %v", timeout)
+			return nil, syncPoolAcquireInfo{wait: time.Since(start), snapshot: d.syncPoolSnapshot()}, fmt.Errorf("timed out waiting for sync connection after %v", timeout)
 		}
 	}
 }
 
-func (d *KdbDatasource) releaseSyncConnection(conn *kdb.KDBConn) {
+func (d *KdbDatasource) releaseSyncConnection(conn *kdb.KDBConn) syncPoolReleaseInfo {
 	if conn == nil {
-		return
+		return syncPoolReleaseInfo{action: "none", snapshot: d.syncPoolSnapshot()}
 	}
 
 	d.syncPoolMu.Lock()
@@ -94,19 +123,21 @@ func (d *KdbDatasource) releaseSyncConnection(conn *kdb.KDBConn) {
 		d.syncPoolMu.Unlock()
 		_ = conn.Close()
 		d.releaseSyncPoolSlot()
-		return
+		return syncPoolReleaseInfo{action: "closed", snapshot: d.syncPoolSnapshot()}
 	}
 	select {
 	case d.syncPool <- conn:
 		d.syncPoolMu.Unlock()
+		return syncPoolReleaseInfo{action: "returned", snapshot: d.syncPoolSnapshot()}
 	default:
 		d.syncPoolMu.Unlock()
 		_ = conn.Close()
 		d.releaseSyncPoolSlot()
+		return syncPoolReleaseInfo{action: "closed", snapshot: d.syncPoolSnapshot()}
 	}
 }
 
-func (d *KdbDatasource) discardSyncConnection(conn *kdb.KDBConn) {
+func (d *KdbDatasource) discardSyncConnection(conn *kdb.KDBConn) syncPoolReleaseInfo {
 	d.syncPoolMu.Lock()
 	delete(d.syncPoolActive, conn)
 	d.syncPoolMu.Unlock()
@@ -115,6 +146,7 @@ func (d *KdbDatasource) discardSyncConnection(conn *kdb.KDBConn) {
 		_ = conn.Close()
 	}
 	d.releaseSyncPoolSlot()
+	return syncPoolReleaseInfo{action: "discarded", snapshot: d.syncPoolSnapshot()}
 }
 
 func (d *KdbDatasource) closeSyncPool() {
@@ -197,4 +229,61 @@ func (d *KdbDatasource) releaseSyncPoolSlotUnlocked() {
 	case <-slots:
 	default:
 	}
+}
+
+func (d *KdbDatasource) syncPoolSnapshot() syncPoolSnapshot {
+	d.syncPoolMu.Lock()
+	defer d.syncPoolMu.Unlock()
+
+	max := d.SyncMaxConnections
+	if d.syncPoolMax > 0 {
+		max = d.syncPoolMax
+	}
+	idle := 0
+	if d.syncPool != nil {
+		idle = len(d.syncPool)
+	}
+	slots := 0
+	if d.syncPoolSlots != nil {
+		slots = len(d.syncPoolSlots)
+	}
+	active := 0
+	if d.syncPoolActive != nil {
+		active = len(d.syncPoolActive)
+	}
+	return syncPoolSnapshot{
+		max:       max,
+		active:    active,
+		idle:      idle,
+		slots:     slots,
+		available: max - slots,
+		closed:    d.syncPoolClosed,
+	}
+}
+
+func appendSyncPoolDiagnosticFields(fields []interface{}, snapshot syncPoolSnapshot, options syncPoolDiagnosticOptions) []interface{} {
+	fields = append(fields,
+		"syncPoolMax", snapshot.max,
+		"syncPoolActive", snapshot.active,
+		"syncPoolIdle", snapshot.idle,
+		"syncPoolSlots", snapshot.slots,
+		"syncPoolAvailable", snapshot.available,
+		"syncPoolClosed", snapshot.closed,
+	)
+	if options.acquireSource != "" {
+		fields = append(fields,
+			"syncPoolAcquireWaitMs", options.acquireWaitMs,
+			"syncPoolAcquireSource", options.acquireSource,
+		)
+	}
+	if options.action != "" {
+		fields = append(fields, "syncPoolAction", options.action)
+	}
+	if options.reusable != nil {
+		fields = append(fields, "syncPoolReusable", *options.reusable)
+	}
+	if options.action != "" {
+		fields = append(fields, "syncTransportMs", options.transportMs)
+	}
+	return fields
 }

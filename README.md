@@ -163,7 +163,7 @@ Datasource config includes two diagnostic switches:
 - `Diagnostics` writes structured backend logs for query receipt, preparation, q execution, result parsing, frame send, cancellation, and completion across sync, helper async, plugin async, deferred async, and stream paths.
 - `Log Query Text` additionally writes raw query and wrapper text to backend logs. It is disabled by default because q text can contain sensitive table names, filters, identifiers, or credentials.
 
-Safe diagnostics logs include request IDs, Grafana ref IDs, execution and compatibility modes, time-range metadata, query and wrapper SHA-256 hashes, kdb+ object descriptions, Grafana frame schemas, durations, job IDs, stream IDs, q worker IDs, q result metadata, status changes, and errors. q stack traces are hashed by default and logged verbatim only with `Log Query Text`. The local demo provisions `diagnosticsEnabled: true` and `diagnosticsLogQueryText: false` so you can inspect behavior without exposing raw q text.
+Safe diagnostics logs include request IDs, Grafana ref IDs, execution and compatibility modes, time-range metadata, query and wrapper SHA-256 hashes, kdb+ object descriptions, Grafana frame schemas, durations, job IDs, stream IDs, q worker IDs, q result metadata, status changes, and errors. Sync diagnostics also include pool acquire wait, opened/reused connections, active/idle pool state, release/discard action, and transport duration, which helps distinguish plugin-side pool saturation from q-side gateway serialization. q stack traces are hashed by default and logged verbatim only with `Log Query Text`. The local demo provisions `diagnosticsEnabled: true` and `diagnosticsLogQueryText: false` so you can inspect behavior without exposing raw q text.
 
 ## Security
 
@@ -203,4 +203,10 @@ A runnable demo is available in [demo/README.md](demo/README.md). It provisions 
 
 ```bash
 ./scripts/start-demo-local.sh
+```
+
+The sync pool probe dashboard is provisioned at:
+
+```text
+http://localhost:3000/d/asyncq-sync-pool/asyncq-sync-connection-pool
 ```

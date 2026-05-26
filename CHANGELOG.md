@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.2
+
+- Added a bounded reusable synchronous kdb+ IPC connection pool per datasource instance.
+- Added `Sync Max Connections` datasource configuration; default is `4`, while `1` restores strict legacy single-handle sync behavior.
+- Changed standard `QueryData` handling so independent sync targets in the same Grafana request run concurrently, with the datasource pool enforcing the limit.
+- Added sync pool diagnostics for acquire wait, opened/reused connections, active/idle pool state, release/discard action, transport duration, and timeout/error cases.
+- Added a local sync pool probe q function and demo dashboard for checking whether waits happen in the plugin pool or inside the target q gateway/process.
+
 ## 1.0.1
 
 - Fixed generic/mixed kdb+ list columns (`type 0`) by converting mixed values to string columns instead of producing empty fields.

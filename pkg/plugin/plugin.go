@@ -127,7 +127,7 @@ type KdbDatasource struct {
 	IsOpen              bool
 
 	KdbHandleListener func()
-	RunKdbQuerySync   func(*kdb.K, time.Duration) (*kdb.K, error)
+	RunKdbQuerySync   func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error)
 	OpenConnection    func() error
 	CloseConnection   func() error
 	WriteConnection   func(kdb.ReqType, *kdb.K) error
@@ -385,7 +385,7 @@ func (d *KdbDatasource) query(_ context.Context, pCtx backend.PluginContext, que
 	fields = d.diagnosticQueryFields(pCtx, query, model, requestID)
 	d.logDiagnostics("sync query prepared", fields...)
 
-	kdbResponse, err := d.RunKdbQuerySync(buildSyncQueryPayload(pCtx, query, model), time.Duration(model.Timeout)*time.Millisecond)
+	kdbResponse, err := d.RunKdbQuerySync(buildSyncQueryPayload(pCtx, query, model), time.Duration(model.Timeout)*time.Millisecond, fields...)
 	if err != nil {
 		d.logDiagnosticError("sync query failed", appendDiagnosticError(fields, err)...)
 		response.Error = err

@@ -27,6 +27,7 @@ Additional provisioned test dashboards:
 http://localhost:3000/d/asyncq-compat-matrix/asyncq-panopticon-compatibility-matrix
 http://localhost:3000/d/asyncq-pano-compat/asyncq-panopticon-compatibility-tests
 http://localhost:3000/d/asyncq-async-tests/asyncq-async-execution-tests
+http://localhost:3000/d/asyncq-sync-pool/asyncq-sync-connection-pool
 ```
 
 Grafana is configured with anonymous admin access for the demo. The explicit login is `admin` / `admin`.
@@ -59,6 +60,7 @@ Docker is optional. It is useful when you want a fully disposable Grafana contai
 - `AsyncQ Panopticon compatibility tests` exercises macro expansion, dashboard-parameter expansion from Grafana variables, `Pano Wrapper`, `Pano Fn`, scalar/vector/string returns, keyed tables, lists of row dictionaries, sparse row dictionaries, and mixed numeric row values.
 - `AsyncQ Panopticon compatibility matrix` maps the migration matrix to demo panels: direct sync, plugin async, wrapper, request function, macros, keyed table, dictionary, row dictionaries, an expected adapter-needed failure, and its table-shaped replacement.
 - `AsyncQ async execution tests` compares sync, helper async, plugin async, deferred async, streaming, and Panopticon request-function execution.
+- `AsyncQ sync connection pool` runs four slow sync probes against the same datasource. With the single local q process, q itself may serialize execution; inspect Grafana diagnostics for `syncPoolAcquireWaitMs`, `syncPoolAcquireSource`, `syncPoolActive`, and `syncTransportMs` to distinguish plugin pool wait from target q processing time.
 
 For Panopticon dashboards where several panels share one base datasource result, create one AsyncQ source panel and set the dependent panels to Grafana's `-- Dashboard --` datasource with `Use results from panel`. The demo dashboards keep most panels direct so the plugin behavior is visible, but production migrations should use Dashboard datasource sharing for this Panopticon pattern.
 
@@ -80,6 +82,7 @@ For the Docker path, run `docker compose down` from `demo/`, then `./scripts/sto
 - `demo/grafana/provisioning/dashboards/json/asyncq-compatibility-matrix.json` - compatibility matrix dashboard
 - `demo/grafana/provisioning/dashboards/json/asyncq-panopticon-compat.json` - Panopticon compatibility test dashboard
 - `demo/grafana/provisioning/dashboards/json/asyncq-async-tests.json` - async execution mode test dashboard
+- `demo/grafana/provisioning/dashboards/json/asyncq-sync-pool.json` - sync pool diagnostics dashboard
 - `demo/docker-compose.yml` - Grafana 13 container
 
 ## Notes

@@ -59,4 +59,4 @@ For Panopticon dashboards where several panels share one base query and only app
 
 ## Diagnostics
 
-Enable datasource `Diagnostics` to write structured backend logs for sync, async, deferred, and stream lifecycles. By default the logs contain request IDs, ref IDs, mode, query hashes, kdb+ object shapes, frame schemas, q worker/result metadata, status transitions, durations, and errors, but not raw query text. q stack traces are hashed by default. `Log Query Text` is a separate opt-in switch for trusted debugging sessions only.
+Enable datasource `Diagnostics` to write structured backend logs for sync, async, deferred, and stream lifecycles. By default the logs contain request IDs, ref IDs, mode, query hashes, kdb+ object shapes, frame schemas, q worker/result metadata, status transitions, durations, and errors, but not raw query text. Sync logs also include pool acquire wait, opened/reused connections, active/idle pool state, release/discard action, and transport duration. q stack traces are hashed by default. `Log Query Text` is a separate opt-in switch for trusted debugging sessions only.

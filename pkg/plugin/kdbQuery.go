@@ -30,23 +30,51 @@ func (d *KdbDatasource) getKdbSyncQueryId() uint32 {
 	return d.kdbSyncQueryCounter
 }
 
-func (d *KdbDatasource) runKdbQuerySync(query *kdb.K, timeout time.Duration) (*kdb.K, error) {
+func (d *KdbDatasource) runKdbQuerySync(query *kdb.K, timeout time.Duration, diagnosticFields ...interface{}) (*kdb.K, error) {
 	if timeout <= 0 {
 		timeout = time.Duration(defaultQueryTimeout) * time.Millisecond
 	}
 
-	conn, err := d.acquireSyncConnection(timeout)
+	conn, acquireInfo, err := d.acquireSyncConnection(timeout)
 	if err != nil {
+		d.logDiagnostics("sync pool acquire failed", appendSyncPoolDiagnosticFields(appendDiagnosticError(diagnosticFields, err), acquireInfo.snapshot, syncPoolDiagnosticOptions{
+			acquireWaitMs: acquireInfo.wait.Milliseconds(),
+			acquireSource: "failed",
+		})...)
 		return nil, err
 	}
+	d.logDiagnostics("sync pool acquired", appendSyncPoolDiagnosticFields(diagnosticFields, acquireInfo.snapshot, syncPoolDiagnosticOptions{
+		acquireWaitMs: acquireInfo.wait.Milliseconds(),
+		acquireSource: syncPoolAcquireSource(acquireInfo.reused),
+	})...)
 
+	start := time.Now()
 	result, reusable, err := runKdbQueryOnConnection(conn, query, timeout)
+	duration := time.Since(start)
+	reusablePtr := &reusable
 	if reusable {
-		d.releaseSyncConnection(conn)
+		releaseInfo := d.releaseSyncConnection(conn)
+		d.logDiagnostics("sync pool connection released", appendSyncPoolDiagnosticFields(appendDiagnosticError(diagnosticFields, err), releaseInfo.snapshot, syncPoolDiagnosticOptions{
+			action:      releaseInfo.action,
+			reusable:    reusablePtr,
+			transportMs: duration.Milliseconds(),
+		})...)
 	} else {
-		d.discardSyncConnection(conn)
+		releaseInfo := d.discardSyncConnection(conn)
+		d.logDiagnostics("sync pool connection discarded", appendSyncPoolDiagnosticFields(appendDiagnosticError(diagnosticFields, err), releaseInfo.snapshot, syncPoolDiagnosticOptions{
+			action:      releaseInfo.action,
+			reusable:    reusablePtr,
+			transportMs: duration.Milliseconds(),
+		})...)
 	}
 	return result, err
+}
+
+func syncPoolAcquireSource(reused bool) string {
+	if reused {
+		return "reused"
+	}
+	return "opened"
 }
 
 func runKdbQueryOnConnection(conn *kdb.KDBConn, query *kdb.K, timeout time.Duration) (*kdb.K, bool, error) {

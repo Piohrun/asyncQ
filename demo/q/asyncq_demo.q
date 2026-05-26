@@ -72,6 +72,15 @@ Grafana Live demos.
     select avgPrice:avg price, maxPrice:max price, minPrice:min price, trades:count i, turnover:sum price*size by sym from .demo.asyncq.trade where time>.z.p-0D00:05:00.000000000
   };
 
+.demo.asyncq.poolProbe:{[label;delayMs]
+    started:.z.p;
+    delaySeconds:1|ceiling delayMs%1000;
+    system "sleep ",string delaySeconds;
+    finished:.z.p;
+    elapsedNs:`long$(finished-started);
+    ([] probe:enlist .demo.asyncq.text label; handle:enlist .z.w; delayMs:enlist delayMs; started:enlist started; finished:enlist finished; elapsedMs:enlist elapsedNs div 1000000; tradeRows:enlist count .demo.asyncq.trade)
+  };
+
 .demo.asyncq.deferred:{[result]
     result
   };
@@ -220,6 +229,7 @@ Grafana Live demos.
 -1 "AsyncQ demo q process ready on port ",string system "p";
 -1 "Try sync:  .demo.asyncq.latest 10";
 -1 "Try async: .demo.asyncq.slowAgg[]";
+-1 "Try sync pool probe: .demo.asyncq.poolProbe[\"A\";3000]";
 -1 "Try Panopticon-style dict: .demo.asyncq.panopticonSummary[]";
 -1 "Try Panopticon request function: {[req] .demo.asyncq.panopticonRequest req}";
 -1 "Try compatibility matrix direct fixture: .demo.asyncq.compatMatrixDirect[]";
