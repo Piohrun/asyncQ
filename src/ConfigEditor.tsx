@@ -289,6 +289,28 @@ export class ConfigEditor extends PureComponent<Props> {
     this.updateJsonData({ excelReports: event.currentTarget.value });
   };
 
+  onExcelReportTemplateDirsChange = (event: FormEvent<HTMLTextAreaElement>) => {
+    this.updateJsonData({ excelReportTemplateDirs: event.currentTarget.value });
+  };
+
+  onExcelReportMaxRowsChange = (event: ChangeEvent<HTMLInputElement>) => {
+    if (/^\d+$/.test(event.target.value) || event.target.value === '') {
+      this.updateJsonData({ excelReportMaxRows: event.target.value === '' ? undefined : parseInt(event.target.value, 10) });
+    }
+  };
+
+  onExcelReportMaxFileBytesChange = (event: ChangeEvent<HTMLInputElement>) => {
+    if (/^\d+$/.test(event.target.value) || event.target.value === '') {
+      this.updateJsonData({ excelReportMaxFileBytes: event.target.value === '' ? undefined : parseInt(event.target.value, 10) });
+    }
+  };
+
+  onExcelReportTimeoutMsChange = (event: ChangeEvent<HTMLInputElement>) => {
+    if (/^\d+$/.test(event.target.value) || event.target.value === '') {
+      this.updateJsonData({ excelReportTimeoutMs: event.target.value === '' ? undefined : parseInt(event.target.value, 10) });
+    }
+  };
+
   onTlsCertificateChange = (event: FormEvent<HTMLTextAreaElement>) => {
     const { onOptionsChange, options } = this.props;
     onOptionsChange({
@@ -835,6 +857,58 @@ export class ConfigEditor extends PureComponent<Props> {
   renderExcelReports(jsonData: MyDataSourceOptions) {
     return (
       <ConfigSection title="Excel Reports">
+        <div className="gf-form">
+          <InlineField
+            label="Template Dirs"
+            labelWidth={14}
+            grow
+            tooltip="Absolute allowlisted directories for report templatePath files. Separate multiple directories with newlines, commas, or semicolons."
+          >
+            <TextArea
+              name="ExcelReportTemplateDirsInputField"
+              rows={3}
+              style={{ width: 720, fontFamily: 'monospace' }}
+              value={jsonData.excelReportTemplateDirs || ''}
+              placeholder="/var/lib/grafana/asyncq/templates"
+              onChange={this.onExcelReportTemplateDirsChange}
+            />
+          </InlineField>
+        </div>
+        <div className="gf-form-inline">
+          <div className="gf-form">
+            <FormField
+              name="ExcelReportMaxRowsInputField"
+              label="Max Rows"
+              labelWidth={14}
+              inputWidth={12}
+              value={jsonData.excelReportMaxRows ?? ''}
+              placeholder="100000"
+              onChange={this.onExcelReportMaxRowsChange}
+            />
+          </div>
+          <div className="gf-form">
+            <FormField
+              name="ExcelReportMaxFileBytesInputField"
+              label="Max Bytes"
+              labelWidth={12}
+              inputWidth={14}
+              value={jsonData.excelReportMaxFileBytes ?? ''}
+              placeholder="52428800"
+              onChange={this.onExcelReportMaxFileBytesChange}
+            />
+          </div>
+          <div className="gf-form">
+            <FormField
+              name="ExcelReportTimeoutMsInputField"
+              label="Timeout (ms)"
+              labelWidth={13}
+              inputWidth={12}
+              value={jsonData.excelReportTimeoutMs ?? ''}
+              placeholder="60000"
+              onChange={this.onExcelReportTimeoutMsChange}
+            />
+          </div>
+        </div>
         <div className="gf-form">
           <InlineField
             label="Report Catalog"

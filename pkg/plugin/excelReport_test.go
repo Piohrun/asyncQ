@@ -1,9 +1,14 @@
 package plugin
 
 import (
+	"context"
+	"encoding/json"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/data"
 	"github.com/xuri/excelize/v2"
 )
@@ -153,6 +158,88 @@ func TestExcelReportFileNameAllowsUserOverrideAndSanitizes(t *testing.T) {
 	if got != want {
 		t.Fatalf("unexpected filename: got %q want %q", got, want)
 	}
+}
+
+func TestExcelReportTemplatePathRequiresAllowlist(t *testing.T) {
+	templatePath := writeTestExcelTemplate(t, t.TempDir())
+	ds := &KdbDatasource{}
+
+	if _, err := ds.resolveExcelReportTemplatePath(templatePath); err == nil || !strings.Contains(err.Error(), "allowlist") {
+		t.Fatalf("expected allowlist error, got %v", err)
+	}
+}
+
+func TestExcelReportTemplatePathAllowsConfiguredDirectory(t *testing.T) {
+	dir := t.TempDir()
+	templatePath := writeTestExcelTemplate(t, dir)
+	ds := &KdbDatasource{ExcelReportTemplateDirs: dir}
+
+	resolved, err := ds.resolveExcelReportTemplatePath(templatePath)
+	if err != nil {
+		t.Fatalf("resolveExcelReportTemplatePath returned error: %v", err)
+	}
+	if resolved != templatePath {
+		t.Fatalf("unexpected resolved path: got %q want %q", resolved, templatePath)
+	}
+}
+
+func TestExcelReportGenerationRejectsSubmittedRowsOverLimit(t *testing.T) {
+	ds := &KdbDatasource{ExcelReports: `{"reports":[{"id":"r1","maxRows":1,"bindings":[{"id":"A","sheet":"Data","cell":"A1"}]}]}`}
+	request := excelReportGenerateRequest{
+		ReportID:  "r1",
+		TimeRange: excelReportTimeRange{From: "2026-05-26T10:00:00Z", To: "2026-05-26T10:01:00Z"},
+		Frames: []excelSubmittedFrame{
+			{
+				RefID:  "A",
+				Fields: []excelSubmittedField{{Name: "sym", Values: []interface{}{"AAPL", "MSFT"}}},
+			},
+		},
+	}
+
+	_, err := ds.generateExcelReport(context.Background(), backend.PluginContext{}, request)
+	if err == nil || !strings.Contains(err.Error(), "exceeds maxRows") {
+		t.Fatalf("expected maxRows error, got %v", err)
+	}
+}
+
+func TestExcelReportValidateResourceReportsTemplateIssues(t *testing.T) {
+	ds := &KdbDatasource{
+		ExcelReports: `{"reports":[{"id":"r1","templatePath":"/tmp/not-allowlisted.xlsx","bindings":[{"id":"A","sheet":"Data","cell":"A1"}]}]}`,
+	}
+
+	var resourceResp *backend.CallResourceResponse
+	err := ds.CallResource(context.Background(), &backend.CallResourceRequest{
+		Path: "report/validate",
+	}, backend.CallResourceResponseSenderFunc(func(resp *backend.CallResourceResponse) error {
+		resourceResp = resp
+		return nil
+	}))
+	if err != nil {
+		t.Fatalf("CallResource returned error: %v", err)
+	}
+	if resourceResp == nil || resourceResp.Status != 400 {
+		t.Fatalf("expected validation failure status, got %#v", resourceResp)
+	}
+	var validation excelReportValidationResponse
+	if err := json.Unmarshal(resourceResp.Body, &validation); err != nil {
+		t.Fatalf("unable to decode validation response: %v", err)
+	}
+	if validation.OK || len(validation.Errors) == 0 {
+		t.Fatalf("expected validation errors, got %#v", validation)
+	}
+}
+
+func writeTestExcelTemplate(t *testing.T, dir string) string {
+	t.Helper()
+	path := filepath.Join(dir, "template.xlsx")
+	workbook := excelize.NewFile()
+	if err := workbook.SaveAs(path); err != nil {
+		t.Fatalf("SaveAs returned error: %v", err)
+	}
+	if err := workbook.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+	return path
 }
 
 func assertCell(t *testing.T, workbook *excelize.File, sheet string, cell string, want string) {

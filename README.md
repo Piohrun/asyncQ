@@ -212,7 +212,10 @@ The report panel sends the current Grafana time range, dashboard variables, curr
 The backend resources are:
 
 - `GET report/catalog`
+- `GET report/validate`
 - `POST report/generate`
+
+Template files are restricted to allowlisted local directories. Set datasource `excelReportTemplateDirs` or the `ASYNCQ_EXCEL_TEMPLATE_DIRS` environment variable to one or more absolute directories, separated by newlines, commas, or semicolons. The backend resolves symlinks before checking that `templatePath` stays inside the allowlist. Generation is also guarded by datasource defaults `excelReportMaxRows` (`100000`), `excelReportMaxFileBytes` (`52428800`), and `excelReportTimeoutMs` (`60000`); reports can override these with `maxRows`, `maxFileBytes`, and `generationTimeoutMs`, while individual bindings can override `maxRows`.
 
 Example datasource `excelReports` JSON:
 
@@ -282,6 +285,13 @@ npm install
 npm test
 npm run build:all
 go test ./pkg/...
+```
+
+Run the local demo e2e test after installing the Playwright browser:
+
+```bash
+npm run test:e2e:install
+npm run test:e2e:demo
 ```
 
 Validate the q helper if a local `q` binary is available:

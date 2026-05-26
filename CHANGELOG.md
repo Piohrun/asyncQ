@@ -1,6 +1,11 @@
 # Changelog
 
-## 1.0.6 (Unreleased)
+## 1.0.7
+
+- Added Excel report template directory allowlisting, generated workbook size limits, row limits, generation timeout controls, and `report/validate`.
+- Added local Playwright e2e coverage for the demo Excel reporting dashboard and workbook download.
+
+## 1.0.6
 
 - Added datasource Excel report resources for preconfigured XLSX catalogs and workbook generation.
 - Added `asyncq-excel-report-panel`, a dashboard report button that sends current time range and variables to the datasource.

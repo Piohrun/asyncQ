@@ -34,6 +34,10 @@ datasources:
       queryCacheControlEnabled: true
       diagnosticsEnabled: true
       diagnosticsLogQueryText: false
+      excelReportTemplateDirs: "$ASYNCQ_DEMO_TEMPLATE_DIR"
+      excelReportMaxRows: 100000
+      excelReportMaxFileBytes: 52428800
+      excelReportTimeoutMs: 60000
       excelReports: |
         {
           "reports": [

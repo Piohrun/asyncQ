@@ -115,7 +115,9 @@ Use the companion panel plugin `asyncq-excel-report-panel` when the migrated das
 - A binding with `queryText` executes a mapped q query through the same datasource sync path, including Panopticon time macros, dashboard-parameter expansion, sync connection pool, cache, and diagnostics.
 - A binding without `queryText` writes submitted frames matched by `refId` or `id`; use Grafana's `-- Dashboard --` datasource in the report panel targets when the report should use another panel's already-shared result.
 - Each returned frame is written to `sheet`/`cell`; `clearRange` can blank a stale template data area first.
-- `templatePath` points to an `.xlsx` file on the Grafana server. Leave it blank to generate a basic workbook.
+- `templatePath` points to an `.xlsx` file on the Grafana server and must resolve inside datasource `excelReportTemplateDirs` or `ASYNCQ_EXCEL_TEMPLATE_DIRS`. Leave `templatePath` blank to generate a basic workbook.
+- Use `GET report/validate` to check saved report definitions, template allowlist access, and effective row/file/timeout limits without running q queries.
+- Datasource safeguards default to `excelReportMaxRows=100000`, `excelReportMaxFileBytes=52428800`, and `excelReportTimeoutMs=60000`. Report or binding `maxRows` can lower or raise row caps; report `maxFileBytes` and `generationTimeoutMs` override output size and generation timeout.
 - Downloads should be submitted as a direct form POST to `report/generate`, not converted to a JavaScript blob URL. The backend honors the request `fileName` override or report `outputName` template and returns `Content-Disposition`; blob downloads can lose that filename in Grafana.
 - Existing Excel charts and formulas should point at the populated ranges. The plugin does not capture screenshots or export Grafana visual pixels.
 
@@ -291,6 +293,8 @@ For frame-backed reports that reference multiple existing panels, set the report
 
 The report panel should send a user-edited filename as `fileName` in the `report/generate` payload. Keep the direct form POST download path so the browser uses the datasource backend's `Content-Disposition` filename instead of a random object/blob name.
 
+When using templates in a work Grafana environment, configure `excelReportTemplateDirs` on the datasource or `ASYNCQ_EXCEL_TEMPLATE_DIRS` in the Grafana process before setting report `templatePath`. Do not point `templatePath` at arbitrary user-controlled paths.
+
 ## Mode Selection
 
 | Panopticon source behavior | AsyncQ setting |
@@ -425,6 +429,7 @@ Common fixes:
 | Reopened dashboard still hits kdb+ | Query cache disabled, cache TTL expired, exact relative `now` timestamps changed, query key changed, ref ID differs under strict key mode, or query contains cache bypass marker | Enable `queryCacheEnabled`, increase `queryCacheTTLSeconds`, set `queryCacheTimeBucketSeconds` for relative ranges, use `queryCacheKeyMode=shared` only for ref-ID-independent queries, keep variables stable, and inspect `queryCacheStatus` diagnostics |
 | Reopened dashboard shows old data once, then fresh data on next refresh | Stale-while-revalidate is active | This is expected for standard Grafana query panels. The plugin can refresh its backend cache after returning stale data, but Grafana will not receive the refreshed frame until another panel query unless using a live/stream path. |
 | Excel report downloads with a random filename | The panel converted the response to a blob URL or did not send `fileName` | Use the current `asyncq-excel-report-panel` direct form POST path. Backend logs include `requestedFileName` and `resolvedFileName` for `excel report generated`. |
+| Excel report validation fails on `templatePath` | Template path is outside `excelReportTemplateDirs`, env expansion did not produce an absolute path, file is missing, or the file is not `.xlsx` | Configure the template directory allowlist and run `GET report/validate`; the backend resolves symlinks before allowing templates. |
 
 For production debugging, prefer adding a q adapter that logs job ID, ref ID, time range, query hash, and result type on the q side without logging sensitive query text.
 

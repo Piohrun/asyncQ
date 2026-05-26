@@ -179,6 +179,10 @@ type KdbDatasource struct {
 	DiagnosticsEnabled          bool   `json:"diagnosticsEnabled,omitempty"`
 	DiagnosticsLogQueryText     bool   `json:"diagnosticsLogQueryText,omitempty"`
 	ExcelReports                string `json:"excelReports,omitempty"`
+	ExcelReportTemplateDirs     string `json:"excelReportTemplateDirs,omitempty"`
+	ExcelReportMaxRows          int    `json:"excelReportMaxRows,omitempty"`
+	ExcelReportMaxFileBytes     int64  `json:"excelReportMaxFileBytes,omitempty"`
+	ExcelReportTimeoutMs        int    `json:"excelReportTimeoutMs,omitempty"`
 	asyncConfigured             bool
 	streamConfigured            bool
 	queryCacheConfigured        bool

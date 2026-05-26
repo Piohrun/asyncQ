@@ -93,6 +93,10 @@ export interface MyDataSourceOptions extends DataSourceJsonData {
   diagnosticsEnabled?: boolean;
   diagnosticsLogQueryText?: boolean;
   excelReports?: string;
+  excelReportTemplateDirs?: string;
+  excelReportMaxRows?: number;
+  excelReportMaxFileBytes?: number;
+  excelReportTimeoutMs?: number;
 }
 
 export const defaultConfig: Partial<MyDataSourceOptions> = {
@@ -129,6 +133,10 @@ export const defaultConfig: Partial<MyDataSourceOptions> = {
   diagnosticsEnabled: false,
   diagnosticsLogQueryText: false,
   excelReports: '',
+  excelReportTemplateDirs: '',
+  excelReportMaxRows: 100000,
+  excelReportMaxFileBytes: 52428800,
+  excelReportTimeoutMs: 60000,
 };
 
 /**

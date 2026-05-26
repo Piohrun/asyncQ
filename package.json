@@ -1,6 +1,6 @@
 {
   "name": "asyncq-kdbbackend-datasource",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "kdb+ datasource with async and streaming support",
   "scripts": {
     "build": "npm run build:datasource",
@@ -10,6 +10,9 @@
     "build:all": "npm run build:datasource && npm run build:panel && npm run build:excel-report-panel",
     "dev": "webpack --watch --config ./.config/webpack/webpack.config.js --mode development",
     "test": "npm run typecheck && npm run typecheck:panel && npm run typecheck:excel-report-panel",
+    "test:e2e": "playwright test",
+    "test:e2e:demo": "ASYNCQ_E2E_START_DEMO=1 playwright test",
+    "test:e2e:install": "playwright install chromium",
     "typecheck": "tsc --noEmit",
     "typecheck:panel": "tsc --noEmit -p tsconfig.panel.json",
     "typecheck:excel-report-panel": "tsc --noEmit -p tsconfig.excel-report-panel.json",
@@ -19,6 +22,7 @@
   "license": "Apache-2.0",
   "devDependencies": {
     "@grafana/tsconfig": "^2.0.1",
+    "@playwright/test": "^1.60.0",
     "@swc/core": "^1.15.0",
     "@types/lodash": "^4.17.20",
     "@types/node": "^24.0.0",

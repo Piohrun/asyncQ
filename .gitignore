@@ -35,6 +35,10 @@ go.work.sum
 dist/
 dist-panel/
 
+# Playwright output
+test-results/
+playwright-report/
+
 # Local demo runtime state
 demo/logs/
 demo/runtime/

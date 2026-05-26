@@ -40,6 +40,8 @@ The demo datasource enables safe backend diagnostics by default. Grafana logs in
 
 The provisioned datasource sets `syncMaxConnections: 4`, so multiple sync panels can exercise the per-datasource kdb+ connection pool. Lower this to `1` in `demo/grafana/provisioning/datasources/asyncq.yml` if you want to compare the original serial sync behavior. Query caching and local disk cache are enabled in the demo with a 60-second sync result TTL. For relative `now` ranges, set `queryCacheTimeBucketSeconds: 60` if you want near-identical reloads to share cached results. Set `queryCacheStaleTTLSeconds` to return stale data immediately while the backend refreshes the cache for the next query.
 
+The Excel report demo allowlists `demo/templates` through `excelReportTemplateDirs` and uses default safeguards for row count, generated workbook size, and generation timeout.
+
 ## Start with Docker
 
 Docker is optional. It is useful when you want a fully disposable Grafana container:
@@ -70,6 +72,15 @@ Docker is optional. It is useful when you want a fully disposable Grafana contai
 For Panopticon dashboards where several panels share one base datasource result, create one AsyncQ source panel or `asyncq-masterdata-panel` and set the dependent panels to Grafana's `-- Dashboard --` datasource with `Use results from panel`. The demo dashboards keep most panels direct so the plugin behavior is visible, but production migrations should use Dashboard datasource sharing for this Panopticon pattern.
 
 If you restart the q process while the dashboard is already open, refresh the browser tab so the async and streaming panels create fresh Grafana Live subscriptions.
+
+## E2E test
+
+The Excel reporting path has a local Playwright test that starts/reuses the demo, waits for dashboard panel data, clicks the report download button, and inspects the generated workbook:
+
+```bash
+npm run test:e2e:install
+npm run test:e2e:demo
+```
 
 ## Stop
 

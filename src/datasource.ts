@@ -64,6 +64,10 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
     return this.getResource('report/catalog');
   }
 
+  validateExcelReports(): Promise<any> {
+    return this.getResource('report/validate');
+  }
+
   applyTemplateVariables(query: MyQuery, scopedVars?: ScopedVars) {
     const templateSrv = getTemplateSrv();
     const dashboardVariables = templateSrv.getVariables();

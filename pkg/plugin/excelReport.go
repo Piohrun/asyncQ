@@ -3,6 +3,7 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -21,6 +22,12 @@ import (
 )
 
 const excelReportContentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+const (
+	defaultExcelReportMaxRows      = 100000
+	defaultExcelReportMaxFileBytes = int64(50 * 1024 * 1024)
+	defaultExcelReportTimeoutMs    = 60000
+)
 
 var excelReportParameterPattern = regexp.MustCompile(`\{([A-Za-z_][A-Za-z0-9_.-]*)(?::([^{}]*))?\}`)
 
@@ -46,6 +53,9 @@ type excelReportDefinition struct {
 	Description       string                 `json:"description,omitempty"`
 	OutputName        string                 `json:"outputName,omitempty"`
 	TemplatePath      string                 `json:"templatePath,omitempty"`
+	MaxRows           int                    `json:"maxRows,omitempty"`
+	MaxFileBytes      int64                  `json:"maxFileBytes,omitempty"`
+	GenerationTimeout int                    `json:"generationTimeoutMs,omitempty"`
 	ExecutionMode     string                 `json:"executionMode,omitempty"`
 	CompatibilityMode string                 `json:"compatibilityMode,omitempty"`
 	QueryCacheMode    string                 `json:"queryCacheMode,omitempty"`
@@ -74,6 +84,7 @@ type excelReportBinding struct {
 	QueryCacheKeyMode         string `json:"queryCacheKeyMode,omitempty"`
 	Timeout                   int    `json:"timeOut,omitempty"`
 	MaxDataPoints             int64  `json:"maxDataPoints,omitempty"`
+	MaxRows                   int    `json:"maxRows,omitempty"`
 	IntervalMs                int64  `json:"intervalMs,omitempty"`
 	UseTimeColumn             *bool  `json:"useTimeColumn,omitempty"`
 	TimeColumn                string `json:"timeColumn,omitempty"`
@@ -105,9 +116,24 @@ type excelReportTimeRange struct {
 
 type excelReportResourceResponse struct {
 	OK      bool   `json:"ok"`
+	Code    string `json:"code,omitempty"`
 	Error   string `json:"error,omitempty"`
 	Report  string `json:"report,omitempty"`
 	Binding string `json:"binding,omitempty"`
+}
+
+type excelReportValidationResponse struct {
+	OK          bool                         `json:"ok"`
+	ReportCount int                          `json:"reportCount"`
+	Errors      []excelReportValidationIssue `json:"errors,omitempty"`
+	Warnings    []excelReportValidationIssue `json:"warnings,omitempty"`
+}
+
+type excelReportValidationIssue struct {
+	Report  string `json:"report,omitempty"`
+	Binding string `json:"binding,omitempty"`
+	Field   string `json:"field,omitempty"`
+	Message string `json:"message"`
 }
 
 type excelReportGenerated struct {
@@ -119,6 +145,12 @@ type excelReportRunResult struct {
 	Binding         excelReportBinding
 	Frames          []*data.Frame
 	SubmittedFrames []excelSubmittedFrame
+}
+
+type excelReportLimits struct {
+	MaxRows      int
+	MaxFileBytes int64
+	Timeout      time.Duration
 }
 
 type excelSubmittedFrame struct {
@@ -142,6 +174,13 @@ func (d *KdbDatasource) handleExcelReportResource(ctx context.Context, req *back
 			return sendResourceJSON(sender, http.StatusBadRequest, excelReportResourceResponse{OK: false, Error: err.Error()})
 		}
 		return sendResourceJSON(sender, http.StatusOK, publicExcelReportCatalog(catalog))
+	case "report/validate":
+		validation := d.validateExcelReportConfiguration()
+		status := http.StatusOK
+		if !validation.OK {
+			status = http.StatusBadRequest
+		}
+		return sendResourceJSON(sender, status, validation)
 	case "report/generate":
 		var body excelReportGenerateRequest
 		if err := decodeExcelReportGenerateRequest(req.Body, &body); err != nil {
@@ -149,8 +188,9 @@ func (d *KdbDatasource) handleExcelReportResource(ctx context.Context, req *back
 		}
 		generated, err := d.generateExcelReport(ctx, req.PluginContext, body)
 		if err != nil {
-			log.DefaultLogger.Error("excel report generation failed", "datasourceUID", d.instanceUID, "reportID", body.ReportID, "error", err.Error())
-			return sendResourceJSON(sender, http.StatusBadRequest, excelReportResourceResponse{OK: false, Report: body.ReportID, Error: err.Error()})
+			status, code := excelReportErrorStatus(err)
+			log.DefaultLogger.Error("excel report generation failed", "datasourceUID", d.instanceUID, "reportID", body.ReportID, "status", status, "code", code, "error", err.Error())
+			return sendResourceJSON(sender, status, excelReportResourceResponse{OK: false, Code: code, Report: body.ReportID, Error: err.Error()})
 		}
 		return sender.Send(&backend.CallResourceResponse{
 			Status: http.StatusOK,
@@ -178,6 +218,23 @@ func publicExcelReportCatalog(catalog excelReportCatalog) excelReportPublicCatal
 		})
 	}
 	return public
+}
+
+func excelReportErrorStatus(err error) (int, string) {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return http.StatusGatewayTimeout, "timeout"
+	case strings.Contains(err.Error(), "unknown reportId"):
+		return http.StatusNotFound, "unknown-report"
+	case strings.Contains(err.Error(), "exceeds maxRows"):
+		return http.StatusRequestEntityTooLarge, "row-limit"
+	case strings.Contains(err.Error(), "exceeds maxFileBytes"):
+		return http.StatusRequestEntityTooLarge, "file-size-limit"
+	case strings.Contains(err.Error(), "templatePath"):
+		return http.StatusBadRequest, "template-path"
+	default:
+		return http.StatusBadRequest, "report-generation"
+	}
 }
 
 func decodeExcelReportGenerateRequest(raw []byte, target *excelReportGenerateRequest) error {
@@ -275,6 +332,18 @@ func validateExcelReportCatalog(catalog excelReportCatalog) error {
 		if len(report.Bindings) == 0 {
 			return fmt.Errorf("excel report %q must define at least one binding", id)
 		}
+		if report.MaxRows < 0 {
+			return fmt.Errorf("excel report %q maxRows must be non-negative", id)
+		}
+		if report.MaxFileBytes < 0 {
+			return fmt.Errorf("excel report %q maxFileBytes must be non-negative", id)
+		}
+		if report.GenerationTimeout < 0 {
+			return fmt.Errorf("excel report %q generationTimeoutMs must be non-negative", id)
+		}
+		if templatePath := strings.TrimSpace(report.TemplatePath); templatePath != "" && !strings.EqualFold(filepath.Ext(templatePath), ".xlsx") {
+			return fmt.Errorf("excel report %q templatePath must point to an .xlsx file", id)
+		}
 		for j, binding := range report.Bindings {
 			if strings.TrimSpace(binding.QueryText) == "" && strings.TrimSpace(binding.RefID) == "" && strings.TrimSpace(binding.ID) == "" {
 				return fmt.Errorf("excel report %q binding %d requires queryText, refId, or id", id, j)
@@ -288,9 +357,92 @@ func validateExcelReportCatalog(catalog excelReportCatalog) error {
 			if _, _, err := excelize.CellNameToCoordinates(strings.TrimSpace(binding.Cell)); err != nil {
 				return fmt.Errorf("excel report %q binding %d has invalid cell %q: %w", id, j, binding.Cell, err)
 			}
+			if strings.TrimSpace(binding.ClearRange) != "" {
+				if _, _, err := parseExcelRange(binding.ClearRange); err != nil {
+					return fmt.Errorf("excel report %q binding %d has invalid clearRange %q: %w", id, j, binding.ClearRange, err)
+				}
+			}
+			if binding.MaxRows < 0 {
+				return fmt.Errorf("excel report %q binding %d maxRows must be non-negative", id, j)
+			}
 		}
 	}
 	return nil
+}
+
+func (d *KdbDatasource) validateExcelReportConfiguration() excelReportValidationResponse {
+	response := excelReportValidationResponse{OK: true}
+	catalog, err := d.excelReportCatalog()
+	if err != nil {
+		response.OK = false
+		response.Errors = append(response.Errors, excelReportValidationIssue{
+			Field:   "excelReports",
+			Message: err.Error(),
+		})
+		return response
+	}
+	response.ReportCount = len(catalog.Reports)
+	if len(catalog.Reports) == 0 {
+		response.Warnings = append(response.Warnings, excelReportValidationIssue{
+			Field:   "excelReports",
+			Message: "no Excel reports are configured",
+		})
+	}
+	for _, report := range catalog.Reports {
+		if strings.TrimSpace(report.TemplatePath) != "" {
+			templatePath, err := d.resolveExcelReportTemplatePath(report.TemplatePath)
+			if err != nil {
+				response.Errors = append(response.Errors, excelReportValidationIssue{
+					Report:  report.ID,
+					Field:   "templatePath",
+					Message: err.Error(),
+				})
+			} else if workbook, err := excelize.OpenFile(templatePath); err != nil {
+				response.Errors = append(response.Errors, excelReportValidationIssue{
+					Report:  report.ID,
+					Field:   "templatePath",
+					Message: fmt.Sprintf("unable to open template workbook: %v", err),
+				})
+			} else {
+				_ = workbook.Close()
+			}
+		}
+		limits := d.excelReportLimits(report)
+		if limits.MaxRows <= 0 {
+			response.Errors = append(response.Errors, excelReportValidationIssue{
+				Report:  report.ID,
+				Field:   "maxRows",
+				Message: "maxRows must resolve to a positive value",
+			})
+		}
+		if limits.MaxFileBytes <= 0 {
+			response.Errors = append(response.Errors, excelReportValidationIssue{
+				Report:  report.ID,
+				Field:   "maxFileBytes",
+				Message: "maxFileBytes must resolve to a positive value",
+			})
+		}
+		if limits.Timeout <= 0 {
+			response.Errors = append(response.Errors, excelReportValidationIssue{
+				Report:  report.ID,
+				Field:   "generationTimeoutMs",
+				Message: "generationTimeoutMs must resolve to a positive value",
+			})
+		}
+		for _, binding := range report.Bindings {
+			bindingID := excelReportBindingID(binding)
+			if maxRows := d.excelReportBindingMaxRows(report, binding); maxRows <= 0 {
+				response.Errors = append(response.Errors, excelReportValidationIssue{
+					Report:  report.ID,
+					Binding: bindingID,
+					Field:   "maxRows",
+					Message: "binding maxRows must resolve to a positive value",
+				})
+			}
+		}
+	}
+	response.OK = len(response.Errors) == 0
+	return response
 }
 
 func (d *KdbDatasource) generateExcelReport(ctx context.Context, pCtx backend.PluginContext, request excelReportGenerateRequest) (excelReportGenerated, error) {
@@ -304,6 +456,12 @@ func (d *KdbDatasource) generateExcelReport(ctx context.Context, pCtx backend.Pl
 	}
 	if strings.TrimSpace(request.TimeRange.From) == "" || strings.TrimSpace(request.TimeRange.To) == "" {
 		return excelReportGenerated{}, fmt.Errorf("timeRange.from and timeRange.to are required")
+	}
+	limits := d.excelReportLimits(report)
+	if limits.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, limits.Timeout)
+		defer cancel()
 	}
 	from, err := parseExcelReportTime(request.TimeRange.From)
 	if err != nil {
@@ -332,16 +490,22 @@ func (d *KdbDatasource) generateExcelReport(ctx context.Context, pCtx backend.Pl
 		if err != nil {
 			return excelReportGenerated{}, fmt.Errorf("binding %q failed: %w", excelReportBindingID(binding), err)
 		}
+		if err := d.validateExcelReportResultRows(report, binding, result); err != nil {
+			return excelReportGenerated{}, err
+		}
 		results = append(results, result)
 	}
 
-	workbook, err := openExcelReportWorkbook(report)
+	workbook, err := d.openExcelReportWorkbook(report)
 	if err != nil {
 		return excelReportGenerated{}, err
 	}
 	defer func() { _ = workbook.Close() }()
 
 	for _, result := range results {
+		if err := ctx.Err(); err != nil {
+			return excelReportGenerated{}, err
+		}
 		if err := writeExcelReportBinding(workbook, result.Binding, result.Frames); err != nil {
 			return excelReportGenerated{}, err
 		}
@@ -354,8 +518,11 @@ func (d *KdbDatasource) generateExcelReport(ctx context.Context, pCtx backend.Pl
 	if err != nil {
 		return excelReportGenerated{}, err
 	}
+	if maxBytes := limits.MaxFileBytes; maxBytes > 0 && int64(buffer.Len()) > maxBytes {
+		return excelReportGenerated{}, fmt.Errorf("generated workbook size %d bytes exceeds maxFileBytes %d for report %q", buffer.Len(), maxBytes, report.ID)
+	}
 	fileName := excelReportFileName(report, request, time.Now().UTC())
-	log.DefaultLogger.Info("excel report generated", "datasourceUID", d.instanceUID, "reportID", report.ID, "requestedFileName", request.FileName, "resolvedFileName", fileName, "frameCount", len(results))
+	log.DefaultLogger.Info("excel report generated", "datasourceUID", d.instanceUID, "reportID", report.ID, "requestedFileName", request.FileName, "resolvedFileName", fileName, "frameCount", len(results), "bytes", buffer.Len(), "maxFileBytes", limits.MaxFileBytes, "maxRows", limits.MaxRows)
 	return excelReportGenerated{
 		Body:     buffer.Bytes(),
 		FileName: fileName,
@@ -369,6 +536,46 @@ func findExcelReport(catalog excelReportCatalog, id string) (excelReportDefiniti
 		}
 	}
 	return excelReportDefinition{}, false
+}
+
+func (d *KdbDatasource) excelReportLimits(report excelReportDefinition) excelReportLimits {
+	maxRows := firstPositiveInt(report.MaxRows, d.ExcelReportMaxRows, defaultExcelReportMaxRows)
+	maxFileBytes := firstPositiveInt64(report.MaxFileBytes, d.ExcelReportMaxFileBytes, defaultExcelReportMaxFileBytes)
+	timeoutMs := firstPositiveInt(report.GenerationTimeout, d.ExcelReportTimeoutMs, defaultExcelReportTimeoutMs)
+	return excelReportLimits{
+		MaxRows:      maxRows,
+		MaxFileBytes: maxFileBytes,
+		Timeout:      time.Duration(timeoutMs) * time.Millisecond,
+	}
+}
+
+func (d *KdbDatasource) excelReportBindingMaxRows(report excelReportDefinition, binding excelReportBinding) int {
+	return firstPositiveInt(binding.MaxRows, report.MaxRows, d.ExcelReportMaxRows, defaultExcelReportMaxRows)
+}
+
+func (d *KdbDatasource) validateExcelReportResultRows(report excelReportDefinition, binding excelReportBinding, result excelReportRunResult) error {
+	maxRows := d.excelReportBindingMaxRows(report, binding)
+	if maxRows <= 0 {
+		return fmt.Errorf("binding %q maxRows must resolve to a positive value", excelReportBindingID(binding))
+	}
+	rowCount := excelReportRunResultRows(result)
+	if rowCount > maxRows {
+		return fmt.Errorf("binding %q row count %d exceeds maxRows %d for report %q", excelReportBindingID(binding), rowCount, maxRows, report.ID)
+	}
+	return nil
+}
+
+func excelReportRunResultRows(result excelReportRunResult) int {
+	rows := 0
+	for _, frame := range result.Frames {
+		if frame != nil {
+			rows += frame.Rows()
+		}
+	}
+	for _, frame := range result.SubmittedFrames {
+		rows += submittedFrameRows(frame)
+	}
+	return rows
 }
 
 func parseExcelReportTime(raw string) (time.Time, error) {
@@ -417,11 +624,12 @@ func (d *KdbDatasource) runExcelReportBinding(pCtx backend.PluginContext, report
 	if model.ExecutionMode != ExecutionModeSync {
 		return excelReportRunResult{}, fmt.Errorf("excel report bindings currently require sync execution, got %q", model.ExecutionMode)
 	}
+	defaultMaxDataPoints := int64(d.excelReportBindingMaxRows(report, binding))
 
 	query := backend.DataQuery{
 		RefID:         refID,
 		QueryType:     "excel-report",
-		MaxDataPoints: firstPositiveInt64(binding.MaxDataPoints, report.MaxDataPoints, 10000),
+		MaxDataPoints: firstPositiveInt64(binding.MaxDataPoints, report.MaxDataPoints, defaultMaxDataPoints),
 		Interval:      time.Duration(firstPositiveInt64(binding.IntervalMs, report.IntervalMs, 1000)) * time.Millisecond,
 		TimeRange: backend.TimeRange{
 			From: from,
@@ -577,20 +785,99 @@ func excelReportSingleVariableValue(value interface{}) string {
 	}
 }
 
-func openExcelReportWorkbook(report excelReportDefinition) (*excelize.File, error) {
+func (d *KdbDatasource) openExcelReportWorkbook(report excelReportDefinition) (*excelize.File, error) {
 	templatePath := strings.TrimSpace(report.TemplatePath)
 	if templatePath == "" {
 		return excelize.NewFile(), nil
 	}
-	expandedPath := os.ExpandEnv(templatePath)
-	if !filepath.IsAbs(expandedPath) {
-		expandedPath = filepath.Clean(expandedPath)
+	expandedPath, err := d.resolveExcelReportTemplatePath(templatePath)
+	if err != nil {
+		return nil, err
 	}
 	workbook, err := excelize.OpenFile(expandedPath)
 	if err != nil {
 		return nil, fmt.Errorf("unable to open report template %q: %w", templatePath, err)
 	}
 	return workbook, nil
+}
+
+func (d *KdbDatasource) resolveExcelReportTemplatePath(templatePath string) (string, error) {
+	templatePath = strings.TrimSpace(templatePath)
+	if templatePath == "" {
+		return "", fmt.Errorf("templatePath is empty")
+	}
+	if !strings.EqualFold(filepath.Ext(templatePath), ".xlsx") {
+		return "", fmt.Errorf("templatePath %q must point to an .xlsx file", templatePath)
+	}
+	expandedPath := os.ExpandEnv(templatePath)
+	if !filepath.IsAbs(expandedPath) {
+		return "", fmt.Errorf("templatePath %q must be absolute after environment expansion", templatePath)
+	}
+	target, err := filepath.EvalSymlinks(filepath.Clean(expandedPath))
+	if err != nil {
+		return "", fmt.Errorf("unable to resolve templatePath %q: %w", templatePath, err)
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		return "", fmt.Errorf("unable to stat templatePath %q: %w", templatePath, err)
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("templatePath %q points to a directory, expected .xlsx file", templatePath)
+	}
+	allowedDirs, err := d.resolvedExcelReportTemplateDirs()
+	if err != nil {
+		return "", err
+	}
+	if len(allowedDirs) == 0 {
+		return "", fmt.Errorf("templatePath %q requires excelReportTemplateDirs or ASYNCQ_EXCEL_TEMPLATE_DIRS allowlist", templatePath)
+	}
+	for _, dir := range allowedDirs {
+		if pathWithinDir(target, dir) {
+			return target, nil
+		}
+	}
+	return "", fmt.Errorf("templatePath %q resolves outside configured template directories", templatePath)
+}
+
+func (d *KdbDatasource) resolvedExcelReportTemplateDirs() ([]string, error) {
+	raw := firstNonEmpty(d.ExcelReportTemplateDirs, os.Getenv("ASYNCQ_EXCEL_TEMPLATE_DIRS"), os.Getenv("ASYNCQ_EXCEL_TEMPLATE_DIR"))
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n' || r == '\r'
+	})
+	dirs := make([]string, 0, len(parts))
+	for _, part := range parts {
+		dir := os.ExpandEnv(strings.TrimSpace(part))
+		if dir == "" {
+			continue
+		}
+		if !filepath.IsAbs(dir) {
+			return nil, fmt.Errorf("excelReportTemplateDirs entry %q must be absolute after environment expansion", part)
+		}
+		resolved, err := filepath.EvalSymlinks(filepath.Clean(dir))
+		if err != nil {
+			return nil, fmt.Errorf("unable to resolve excelReportTemplateDirs entry %q: %w", part, err)
+		}
+		info, err := os.Stat(resolved)
+		if err != nil {
+			return nil, fmt.Errorf("unable to stat excelReportTemplateDirs entry %q: %w", part, err)
+		}
+		if !info.IsDir() {
+			return nil, fmt.Errorf("excelReportTemplateDirs entry %q is not a directory", part)
+		}
+		dirs = append(dirs, resolved)
+	}
+	return dirs, nil
+}
+
+func pathWithinDir(path string, dir string) bool {
+	rel, err := filepath.Rel(dir, path)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 func writeExcelReportBinding(workbook *excelize.File, binding excelReportBinding, frames []*data.Frame) error {
