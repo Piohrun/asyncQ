@@ -5,7 +5,7 @@ This demo runs:
 - a local q process on port `5000`
 - Grafana 13 on `http://localhost:3000`
 - a provisioned `AsyncQ Demo` datasource
-- a provisioned `AsyncQ kdb+ demo` dashboard with sync, helper async, plugin async, legacy async adapter, deferred wrapper, Panopticon compatibility, and stream panels
+- a provisioned `AsyncQ kdb+ demo` dashboard with sync, helper async, plugin async, legacy async adapter, deferred wrapper, Panopticon compatibility, stream panels, cache diagnostics, and Excel reporting
 
 ## Start without Docker
 
@@ -29,6 +29,7 @@ http://localhost:3000/d/asyncq-pano-compat/asyncq-panopticon-compatibility-tests
 http://localhost:3000/d/asyncq-async-tests/asyncq-async-execution-tests
 http://localhost:3000/d/asyncq-sync-pool/asyncq-sync-connection-pool
 http://localhost:3000/d/asyncq-masterdata-cache/asyncq-master-data-and-cache-controls
+http://localhost:3000/d/asyncq-excel-report/asyncq-excel-reporting
 ```
 
 Grafana is configured with anonymous admin access for the demo. The explicit login is `admin` / `admin`.
@@ -63,6 +64,8 @@ Docker is optional. It is useful when you want a fully disposable Grafana contai
 - `AsyncQ async execution tests` compares sync, helper async, plugin async, legacy async adapter, deferred async, streaming, and Panopticon request-function execution. The legacy panel uses `.demo.legacy.submit/status/result/cancel`, which deliberately return `id/state/pct/payload` envelopes instead of the `.grafana.asyncq.async.*` helper contract.
 - `AsyncQ sync connection pool` runs four slow sync probes against the same datasource. With the single local q process, q itself may serialize execution; inspect Grafana diagnostics for `syncPoolAcquireWaitMs`, `syncPoolAcquireSource`, `syncPoolActive`, and `syncTransportMs` to distinguish plugin pool wait from target q processing time.
 - `AsyncQ master data and cache controls` demonstrates the companion `asyncq-masterdata-panel`: one master data panel runs the AsyncQ query, a freshness widget and table reuse that result through Grafana's `-- Dashboard --` datasource, and cache-control buttons call the datasource cache resources.
+- `AsyncQ Excel reporting` demonstrates the companion `asyncq-excel-report-panel`. Change the `Symbols` dashboard variable or time range, optionally edit the generated workbook filename, then use the report button to download an `.xlsx` workbook populated from the same filtered q data.
+  The demo reports use [demo/templates/asyncq-demo-report-template.xlsx](templates/asyncq-demo-report-template.xlsx), which contains a dashboard sheet with formulas and charts pointing at the populated `Summary` and `Trades` ranges.
 
 For Panopticon dashboards where several panels share one base datasource result, create one AsyncQ source panel or `asyncq-masterdata-panel` and set the dependent panels to Grafana's `-- Dashboard --` datasource with `Use results from panel`. The demo dashboards keep most panels direct so the plugin behavior is visible, but production migrations should use Dashboard datasource sharing for this Panopticon pattern.
 
@@ -86,6 +89,8 @@ For the Docker path, run `docker compose down` from `demo/`, then `./scripts/sto
 - `demo/grafana/provisioning/dashboards/json/asyncq-async-tests.json` - async execution mode test dashboard
 - `demo/grafana/provisioning/dashboards/json/asyncq-sync-pool.json` - sync pool diagnostics dashboard
 - `demo/grafana/provisioning/dashboards/json/asyncq-masterdata-cache.json` - master data/cache-control dashboard
+- `demo/grafana/provisioning/dashboards/json/asyncq-excel-report.json` - Excel report dashboard
+- `demo/templates/asyncq-demo-report-template.xlsx` - sample workbook template for Excel report tests
 - `demo/docker-compose.yml` - Grafana 13 container
 
 ## Notes

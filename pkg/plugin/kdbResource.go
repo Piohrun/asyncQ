@@ -26,7 +26,7 @@ type cacheResourceResponse struct {
 	Error         string               `json:"error,omitempty"`
 }
 
-func (d *KdbDatasource) CallResource(_ context.Context, req *backend.CallResourceRequest, sender backend.CallResourceResponseSender) error {
+func (d *KdbDatasource) CallResource(ctx context.Context, req *backend.CallResourceRequest, sender backend.CallResourceResponseSender) error {
 	path := strings.Trim(strings.TrimSpace(req.Path), "/")
 	switch path {
 	case "cache/status":
@@ -64,6 +64,9 @@ func (d *KdbDatasource) CallResource(_ context.Context, req *backend.CallResourc
 		resp := d.clearExpiredSyncQueryCache(body.Scope)
 		return sendResourceJSON(sender, http.StatusOK, resp)
 	default:
+		if strings.HasPrefix(path, "report/") {
+			return d.handleExcelReportResource(ctx, req, sender, path)
+		}
 		return sendResourceJSON(sender, http.StatusNotFound, cacheResourceResponse{OK: false, Error: "unknown resource path"})
 	}
 }

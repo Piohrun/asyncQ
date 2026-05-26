@@ -34,3 +34,67 @@ datasources:
       queryCacheControlEnabled: true
       diagnosticsEnabled: true
       diagnosticsLogQueryText: false
+      excelReports: |
+        {
+          "reports": [
+            {
+              "id": "demo-market-report",
+              "name": "Demo market report",
+              "description": "Latest demo prices and trades written to workbook data sheets.",
+              "outputName": "{userId}_{reportType}_yyyymmddhhmm.xlsx",
+              "metadata": {
+                "reportType": "demo-market-report"
+              },
+              "templatePath": "$ASYNCQ_DEMO_TEMPLATE_DIR/asyncq-demo-report-template.xlsx",
+              "compatibilityMode": "panopticon",
+              "bindings": [
+                {
+                  "id": "last-prices",
+                  "refId": "A",
+                  "queryText": "select lastPrice:last price, trades:count i by sym from .demo.asyncq.trade where time within ({TimeWindowStart};{TimeWindowEnd}), sym in `$\" \" vs \"{symbols: }\"",
+                  "sheet": "Summary",
+                  "cell": "A1",
+                  "clearRange": "A1:Z2000",
+                  "includeHeader": true
+                },
+                {
+                  "id": "latest-trades",
+                  "refId": "B",
+                  "queryText": "50#reverse select from .demo.asyncq.trade where time within ({TimeWindowStart};{TimeWindowEnd}), sym in `$\" \" vs \"{symbols: }\"",
+                  "sheet": "Trades",
+                  "cell": "A1",
+                  "clearRange": "A1:Z2000",
+                  "includeHeader": true
+                }
+              ]
+            },
+            {
+              "id": "demo-panel-frame-report",
+              "name": "Demo panel data report",
+              "description": "Writes frames supplied to the report panel, usually through Grafana's Dashboard datasource.",
+              "outputName": "{userId}_{reportType}_yyyymmddhhmm.xlsx",
+              "metadata": {
+                "reportType": "demo-panel-data-report"
+              },
+              "templatePath": "$ASYNCQ_DEMO_TEMPLATE_DIR/asyncq-demo-report-template.xlsx",
+              "bindings": [
+                {
+                  "id": "prices-from-panel",
+                  "refId": "A",
+                  "sheet": "Summary",
+                  "cell": "A1",
+                  "clearRange": "A1:Z2000",
+                  "includeHeader": true
+                },
+                {
+                  "id": "trades-from-panel",
+                  "refId": "B",
+                  "sheet": "Trades",
+                  "cell": "A1",
+                  "clearRange": "A1:Z2000",
+                  "includeHeader": true
+                }
+              ]
+            }
+          ]
+        }

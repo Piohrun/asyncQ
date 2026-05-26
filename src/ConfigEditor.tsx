@@ -285,6 +285,10 @@ export class ConfigEditor extends PureComponent<Props> {
     }
   };
 
+  onExcelReportsChange = (event: FormEvent<HTMLTextAreaElement>) => {
+    this.updateJsonData({ excelReports: event.currentTarget.value });
+  };
+
   onTlsCertificateChange = (event: FormEvent<HTMLTextAreaElement>) => {
     const { onOptionsChange, options } = this.props;
     onOptionsChange({
@@ -828,6 +832,30 @@ export class ConfigEditor extends PureComponent<Props> {
     );
   }
 
+  renderExcelReports(jsonData: MyDataSourceOptions) {
+    return (
+      <ConfigSection title="Excel Reports">
+        <div className="gf-form">
+          <InlineField
+            label="Report Catalog"
+            labelWidth={14}
+            grow
+            tooltip="Admin/provisioned JSON report definitions. Leave blank for the built-in demo report."
+          >
+            <TextArea
+              name="ExcelReportsInputField"
+              rows={12}
+              style={{ width: 720, fontFamily: 'monospace' }}
+              value={jsonData.excelReports || ''}
+              placeholder={excelReportsPlaceholder}
+              onChange={this.onExcelReportsChange}
+            />
+          </InlineField>
+        </div>
+      </ConfigSection>
+    );
+  }
+
   render() {
     const options = this.props.options;
     const jsonData = defaults({}, options.jsonData, defaultConfig) as MyDataSourceOptions;
@@ -841,8 +869,31 @@ export class ConfigEditor extends PureComponent<Props> {
         {this.renderCapabilities(jsonData)}
         {this.renderDefaults(jsonData)}
         {this.renderLegacyAsync(jsonData)}
+        {this.renderExcelReports(jsonData)}
         {this.renderDiagnostics(jsonData)}
       </div>
     );
   }
 }
+
+const excelReportsPlaceholder = `{
+  "reports": [
+    {
+      "id": "daily-risk",
+      "name": "Daily Risk",
+      "templatePath": "/var/lib/grafana/asyncq/templates/daily-risk.xlsx",
+      "outputName": "daily-risk-{timestamp}.xlsx",
+      "compatibilityMode": "panopticon",
+      "bindings": [
+        {
+          "id": "positions",
+          "queryText": ".risk.positions[{TimeWindowEnd};{book:,}]",
+          "sheet": "Positions",
+          "cell": "A1",
+          "clearRange": "A1:Z5000",
+          "includeHeader": true
+        }
+      ]
+    }
+  ]
+}`;

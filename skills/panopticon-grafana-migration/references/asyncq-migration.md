@@ -34,6 +34,7 @@ AsyncQ can also cache successful sync query results in the datasource instance. 
 | Multiple panels share one base query/result | Config-only | One AsyncQ source panel or `asyncq-masterdata-panel`, dependent panels use Grafana datasource `-- Dashboard --` and `Use results from panel` | Do not duplicate the same AsyncQ target in each dependent panel; duplicate targets produce repeated kdb+ requests. The companion master-data panel also exposes freshness and cache controls. |
 | Dashboard reopens should use warm server-side results | Config-only if stale data is acceptable | Use datasource `queryCacheEnabled`, `queryCacheDiskEnabled`, `queryCacheTTLSeconds`, optionally set `queryCacheStaleTTLSeconds` and `queryCacheTimeBucketSeconds`, and keep Dashboard datasource sharing for dependent panels | This approximates Panopticon query result cache. Cache only successful sync results and is local to the Grafana server/datasource instance. Disk cache persists across plugin restarts; stale-while-revalidate makes reopen feel instant, but the refreshed result appears on the next Grafana query/refresh unless the panel uses a live path. |
 | Duplicated panels should share the same cached q result | Config-only if the q path ignores ref ID | Set datasource or query `queryCacheKeyMode=shared`; prefer Dashboard datasource when a panel explicitly derives from a source panel | Shared cache mode omits ref ID from the cache key. Do not use it when a Panopticon request function branches on panel/ref ID. |
+| Preconfigured Excel workbook export from dashboard data | Config-only for query-backed tables or frame-backed source panels | Add datasource `excelReports` definitions and an `asyncq-excel-report-panel` button | The report button sends current time range, Grafana variables, and its own query frames. Bindings can execute mapped q queries synchronously or write submitted frames matched by `refId`/`id`, including frames pulled from another panel through Grafana's Dashboard datasource. It does not export screenshots or arbitrary panel visuals. |
 | Panopticon server-side async submit/status/result/cancel | Config-only when the gateway exposes callable functions and parseable envelopes; otherwise adapter needed | Use `executionMode="legacyAsync"` and configure submit/status/result/cancel functions, request mode, response paths, status value mappings, poll interval, and timeout. Use `executionMode="async"` only for the `.grafana.asyncq.async.*` helper contract | Discover job ID field, status values, result function, error fields, expiry, and cancel semantics before configuring. `Timeout (ms)` is the full lifecycle budget. Callback/deferred protocols still need a specific adapter. |
 | Deferred response or callback over IPC handle | Adapter needed | Current `deferredAsync` only wraps a query then runs Plugin Async | True q `neg` callback/deferred protocols need a plugin adapter that registers the callback handle and translates returned messages. |
 | Gateway only accepts serialized/proprietary Panopticon envelopes | Adapter needed | Implement envelope builder in plugin or q shim | Do not claim copy/paste until the envelope schema is known. |
@@ -88,6 +89,7 @@ AsyncQ can also cache successful sync query results in the datasource instance. 
 | Panopticon heatmaps, order books, custom finance widgets | Visual rewrite or custom panel | Start with table-compatible data, then map to native Grafana/custom plugin | Query may be portable; exact visual behavior usually is not. |
 | Drilldowns and navigation | Visual rewrite | Grafana data links/dashboard links | URL and variable mapping must be rebuilt. |
 | Panopticon actions/writebacks | Not portable through datasource alone | Build explicit Grafana app/plugin or secured backend endpoint | Datasource queries should not be treated as a generic writeback/action channel. |
+| Panopticon workbook/report export | Config-only when the export is data-range/template based; Visual rewrite or custom app if interactive | Use `asyncq-excel-report-panel` plus datasource `excelReports` bindings | Best fit when an `.xlsx` template already contains charts/formulas and only needs q data pasted into ranges. |
 | Cross-panel brushing, focus/playback behavior | Visual rewrite | Approximate with Grafana variables/time range where possible | Grafana interaction model is different. |
 | Full dashboard layout/theme import | Visual rewrite | Rebuild dashboard JSON manually or with a future importer | AsyncQ only handles datasource/query compatibility. |
 
@@ -103,13 +105,57 @@ The companion panel plugin `asyncq-masterdata-panel` is useful during Panopticon
 
 Use it when a Panopticon panel acted as the hidden or visible source query for several visual panels. Configure dependent panels with datasource `-- Dashboard --`, `panelId` set to the master-data panel ID, and their own Grafana transformations/field overrides.
 
+### Excel Reports
+
+Use the companion panel plugin `asyncq-excel-report-panel` when the migrated dashboard needs a preconfigured workbook download:
+
+- Configure report types on the AsyncQ datasource in `jsonData.excelReports`.
+- Use one panel button per report ID; dashboard users cannot edit report mappings from the panel.
+- The panel sends current dashboard time range, variables, and any frames returned to the report panel to `POST report/generate`.
+- A binding with `queryText` executes a mapped q query through the same datasource sync path, including Panopticon time macros, dashboard-parameter expansion, sync connection pool, cache, and diagnostics.
+- A binding without `queryText` writes submitted frames matched by `refId` or `id`; use Grafana's `-- Dashboard --` datasource in the report panel targets when the report should use another panel's already-shared result.
+- Each returned frame is written to `sheet`/`cell`; `clearRange` can blank a stale template data area first.
+- `templatePath` points to an `.xlsx` file on the Grafana server. Leave it blank to generate a basic workbook.
+- Downloads should be submitted as a direct form POST to `report/generate`, not converted to a JavaScript blob URL. The backend honors the request `fileName` override or report `outputName` template and returns `Content-Disposition`; blob downloads can lose that filename in Grafana.
+- Existing Excel charts and formulas should point at the populated ranges. The plugin does not capture screenshots or export Grafana visual pixels.
+
+Example datasource JSON:
+
+```json
+{
+  "reports": [
+    {
+      "id": "daily-risk",
+      "name": "Daily Risk",
+      "templatePath": "/var/lib/grafana/asyncq/templates/daily-risk.xlsx",
+      "outputName": "{userId}_{reportType}_yyyymmddhhmm.xlsx",
+      "metadata": {
+        "reportType": "daily-risk"
+      },
+      "compatibilityMode": "panopticon",
+      "bindings": [
+        {
+          "id": "positions",
+          "queryText": ".risk.positions[{TimeWindowEnd};{book:,}]",
+          "sheet": "Positions",
+          "cell": "A1",
+          "clearRange": "A1:Z5000",
+          "includeHeader": true
+        }
+      ]
+    }
+  ]
+}
+```
+
 ### Decision Rules
 
 1. If the query is plain q, wrapper-based, or request-function-based and returns a supported shape, call it Direct or Config-only.
 2. If multiple panels share the same underlying Panopticon result, use one AsyncQ source panel and Dashboard datasource dependents before considering plugin-side caching or q changes.
-3. If the q port expects an async/deferred/streaming/session envelope that AsyncQ does not currently generate, call it Adapter needed and document the exact protocol fields.
-4. If the data can be retrieved but the Panopticon value is mostly visual styling, interaction, or client transform behavior, call it Visual rewrite.
-5. If the feature performs writeback/action side effects through Panopticon-only infrastructure, call it Not portable through the datasource alone.
+3. If the dashboard requires an `.xlsx` data-range/template export, use datasource `excelReports` plus `asyncq-excel-report-panel`.
+4. If the q port expects an async/deferred/streaming/session envelope that AsyncQ does not currently generate, call it Adapter needed and document the exact protocol fields.
+5. If the data can be retrieved but the Panopticon value is mostly visual styling, interaction, or client transform behavior, call it Visual rewrite.
+6. If the feature performs writeback/action side effects through Panopticon-only infrastructure, call it Not portable through the datasource alone.
 
 ## Same-Port Legacy Gateway Migration
 
@@ -223,6 +269,27 @@ Dashboard datasource target JSON shape:
   "refId": "A"
 }
 ```
+
+Excel report button panel options:
+
+```json
+{
+  "type": "asyncq-excel-report-panel",
+  "options": {
+    "datasourceUid": "<asyncq-datasource-uid>",
+    "reportId": "<report-id-from-excelReports>",
+    "buttonText": "Download report",
+    "showFileNameInput": true,
+    "showReportName": true
+  }
+}
+```
+
+For frame-backed reports that reference multiple existing panels, set the report panel datasource to `-- Mixed --` and add one `-- Dashboard --` target per source panel. A panel-level `-- Dashboard --` datasource only forwards the first target in Grafana 13.
+
+`outputName` is the admin default filename template; users can edit the generated name in the report panel before download. Supported tokens include `{userId}`, `{userUid}`, `{login}`, `{userName}`, `{reportId}`, `{reportName}`, `{reportType}`, `{timestamp}`, `{yyyymmdd}`, `{yyyymmddhhmm}`, and `{yyyymmddhhmmss}`.
+
+The report panel should send a user-edited filename as `fileName` in the `report/generate` payload. Keep the direct form POST download path so the browser uses the datasource backend's `Content-Disposition` filename instead of a random object/blob name.
 
 ## Mode Selection
 
@@ -357,6 +424,7 @@ Common fixes:
 | Panels still resolve one by one after raising `syncMaxConnections` | Target q gateway/process serializes requests or datasource config was not applied | Inspect diagnostics: high `syncPoolAcquireWaitMs` means plugin pool saturation; low acquire wait with high `syncTransportMs` means the target q side is taking/serializing the work |
 | Reopened dashboard still hits kdb+ | Query cache disabled, cache TTL expired, exact relative `now` timestamps changed, query key changed, ref ID differs under strict key mode, or query contains cache bypass marker | Enable `queryCacheEnabled`, increase `queryCacheTTLSeconds`, set `queryCacheTimeBucketSeconds` for relative ranges, use `queryCacheKeyMode=shared` only for ref-ID-independent queries, keep variables stable, and inspect `queryCacheStatus` diagnostics |
 | Reopened dashboard shows old data once, then fresh data on next refresh | Stale-while-revalidate is active | This is expected for standard Grafana query panels. The plugin can refresh its backend cache after returning stale data, but Grafana will not receive the refreshed frame until another panel query unless using a live/stream path. |
+| Excel report downloads with a random filename | The panel converted the response to a blob URL or did not send `fileName` | Use the current `asyncq-excel-report-panel` direct form POST path. Backend logs include `requestedFileName` and `resolvedFileName` for `excel report generated`. |
 
 For production debugging, prefer adding a q adapter that logs job ID, ref ID, time range, query hash, and result type on the q side without logging sensitive query text.
 

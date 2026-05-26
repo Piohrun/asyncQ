@@ -62,6 +62,7 @@ fi
 
 ln -sfn "$ROOT_DIR/dist" "$PLUGIN_ROOT/asyncq-kdbbackend-datasource"
 ln -sfn "$ROOT_DIR/dist-panel/asyncq-masterdata-panel" "$PLUGIN_ROOT/asyncq-masterdata-panel"
+ln -sfn "$ROOT_DIR/dist-panel/asyncq-excel-report-panel" "$PLUGIN_ROOT/asyncq-excel-report-panel"
 
 sed 's/host\.docker\.internal/localhost/g' \
   "$ROOT_DIR/demo/grafana/provisioning/datasources/asyncq.yml" \
@@ -86,11 +87,12 @@ GF_AUTH_ANONYMOUS_ENABLED=true \
 GF_AUTH_ANONYMOUS_ORG_ROLE=Admin \
 GF_DATABASE_TYPE=sqlite3 \
 GF_LOG_LEVEL=info \
+ASYNCQ_DEMO_TEMPLATE_DIR="$ROOT_DIR/demo/templates" \
 GF_PATHS_DATA="$RUNTIME_DIR/data" \
 GF_PATHS_LOGS="$LOG_DIR" \
 GF_PATHS_PLUGINS="$PLUGIN_ROOT" \
 GF_PATHS_PROVISIONING="$PROVISIONING_DIR" \
-GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=asyncq-kdbbackend-datasource,asyncq-masterdata-panel \
+GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=asyncq-kdbbackend-datasource,asyncq-masterdata-panel,asyncq-excel-report-panel \
 GF_SECURITY_ADMIN_PASSWORD=admin \
 GF_SECURITY_ADMIN_USER=admin \
 GF_SERVER_HTTP_PORT="$PORT" \
@@ -107,5 +109,6 @@ echo "Compatibility matrix: http://localhost:$PORT/d/asyncq-compat-matrix/asyncq
 echo "Panopticon tests: http://localhost:$PORT/d/asyncq-pano-compat/asyncq-panopticon-compatibility-tests"
 echo "Async tests: http://localhost:$PORT/d/asyncq-async-tests/asyncq-async-execution-tests"
 echo "Master data/cache controls: http://localhost:$PORT/d/asyncq-masterdata-cache/asyncq-master-data-and-cache-controls"
+echo "Excel reporting: http://localhost:$PORT/d/asyncq-excel-report/asyncq-excel-reporting"
 echo "Login: admin / admin, or use anonymous admin access."
 echo "Log: $LOG_FILE"

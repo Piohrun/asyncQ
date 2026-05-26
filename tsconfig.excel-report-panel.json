@@ -1,0 +1,13 @@
+{
+  "extends": "@grafana/tsconfig",
+  "compilerOptions": {
+    "rootDir": ".",
+    "baseUrl": "./panel/asyncq-excel-report-panel/src",
+    "esModuleInterop": true,
+    "jsx": "react",
+    "resolveJsonModule": true,
+    "typeRoots": ["./node_modules/@types"]
+  },
+  "include": ["panel/asyncq-excel-report-panel/src/**/*"],
+  "exclude": ["dist", "dist-panel", "node_modules"]
+}

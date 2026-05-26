@@ -39,6 +39,7 @@ For the compatibility matrix, detailed mappings, and examples, read [references/
    - Use `executionMode: "legacyAsync"` when the unchanged gateway already exposes pull-style submit/status/result/cancel functions with configurable request mode, response paths, and status values.
    - For shared Panopticon base-query results, create one AsyncQ source panel and point dependent panels at Grafana's `-- Dashboard --` datasource with `Use results from panel`; do not duplicate the same AsyncQ query in every dependent panel.
    - Use `asyncq-masterdata-panel` as the source panel when the migrated dashboard should show data freshness, cache diagnostics, or cache-control buttons.
+   - Use `asyncq-excel-report-panel` for preconfigured workbook downloads. Report definitions belong in datasource `jsonData.excelReports`; the panel selects a report ID and sends the current dashboard time range, variables, and any frames returned to the report panel.
    - Use `panopticonRequestFunction` when the Panopticon panel used pass-to-function or the q side expects a full request dictionary.
    - Use `panopticonQueryWrapper` when the original query must be wrapped around `{Query}`.
    - For a legacy async protocol with different function names or fields, configure `legacyAsyncSubmit`, `legacyAsyncStatus`, optional `legacyAsyncResult`/`legacyAsyncCancel`, request mode, response paths, and status value mappings. Only call for a custom adapter patch when the gateway uses callback handles, proprietary serialization, or side-channel result delivery.
@@ -84,6 +85,7 @@ When asked to migrate a panel, return:
 - The target AsyncQ query settings.
 - The Dashboard datasource mapping for any panels that should reuse another panel's result instead of querying AsyncQ directly.
 - Whether `asyncq-masterdata-panel` should be used as a visible/hidden master data source or freshness widget.
+- Whether `asyncq-excel-report-panel` and a datasource `excelReports` definition should be created for Panopticon workbook/report exports.
 - The Grafana panel target JSON or exact fields to set in the query editor.
 - Any q adapter function needed.
 - Any AsyncQ plugin adapter/config gap needed to speak an unchanged legacy gateway protocol.

@@ -178,6 +178,7 @@ type KdbDatasource struct {
 	QueryCacheControlEnabled    bool   `json:"queryCacheControlEnabled,omitempty"`
 	DiagnosticsEnabled          bool   `json:"diagnosticsEnabled,omitempty"`
 	DiagnosticsLogQueryText     bool   `json:"diagnosticsLogQueryText,omitempty"`
+	ExcelReports                string `json:"excelReports,omitempty"`
 	asyncConfigured             bool
 	streamConfigured            bool
 	queryCacheConfigured        bool

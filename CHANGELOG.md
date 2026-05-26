@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.6 (Unreleased)
+
+- Added datasource Excel report resources for preconfigured XLSX catalogs and workbook generation.
+- Added `asyncq-excel-report-panel`, a dashboard report button that sends current time range and variables to the datasource.
+- Added datasource `excelReports` JSON configuration for template paths, output names, q query bindings, Dashboard datasource frame-backed bindings, sheet/cell mappings, clear ranges, and headers.
+- Added editable Excel download filenames with admin-configured default templates and user/report/time filename tokens.
+- Added a demo Excel reporting dashboard and updated the Panopticon migration skill with workbook export guidance.
+- Added a sample Excel template workbook for the local demo, with charts and formulas pointed at generated report data ranges.
+
 ## 1.0.5
 
 - Added `legacyAsync` execution mode for same-port legacy q gateway async protocols with configurable submit, status, result, cancel, response paths, request mode, and status value mappings.

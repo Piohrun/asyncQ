@@ -203,6 +203,63 @@ Cache status is read-only for any user who can query the datasource. Cache clear
 
 This repo also includes a companion panel plugin, `asyncq-masterdata-panel`. Use it as a master data panel that runs one AsyncQ query, exposes freshness/cache diagnostics, and can be referenced by dependent panels through Grafana's `-- Dashboard --` datasource. Freshness mode is a small widget-style view for main dashboard tabs.
 
+## Excel Reporting
+
+The datasource also exposes preconfigured Excel report resources, and this repo includes a companion panel plugin, `asyncq-excel-report-panel`, that renders a dashboard download button. Report definitions are admin/provisioning-controlled through datasource `jsonData.excelReports`; dashboard users select only the configured report button.
+
+The report panel sends the current Grafana time range, dashboard variables, current user identity, and any frames already returned to the report panel to the datasource. A binding with `queryText` is executed through the same AsyncQ sync query path as normal panels, so datasource credentials, sync connection pooling, query cache, diagnostics, Panopticon time macros, and Panopticon dashboard-parameter expansion all apply. A binding without `queryText` uses submitted frames matching its `refId` or `id`; this lets the report panel use Grafana's `-- Dashboard --` datasource to pull results from another panel and write them into Excel. For multiple source panels, configure the report panel datasource as `-- Mixed --` and add one `-- Dashboard --` target per source panel. The backend then writes each frame into the configured Excel sheet and cell. No screenshots are generated; rich workbook templates should contain their own formulas, charts, and formatting pointed at the populated ranges.
+
+The backend resources are:
+
+- `GET report/catalog`
+- `POST report/generate`
+
+Example datasource `excelReports` JSON:
+
+```json
+{
+  "reports": [
+    {
+      "id": "daily-risk",
+      "name": "Daily Risk",
+      "templatePath": "/var/lib/grafana/asyncq/templates/daily-risk.xlsx",
+      "outputName": "{userId}_{reportType}_yyyymmddhhmm.xlsx",
+      "metadata": {
+        "reportType": "daily-risk"
+      },
+      "compatibilityMode": "panopticon",
+      "bindings": [
+        {
+          "id": "positions",
+          "queryText": ".risk.positions[{TimeWindowEnd};{book:,}]",
+          "sheet": "Positions",
+          "cell": "A1",
+          "clearRange": "A1:Z5000",
+          "includeHeader": true
+        }
+      ]
+    }
+  ]
+}
+```
+
+Frame-backed bindings omit `queryText` and match a frame supplied to the report panel by `refId` or `id`:
+
+```json
+{
+  "id": "positions-from-panel",
+  "refId": "A",
+  "sheet": "Positions",
+  "cell": "A1",
+  "clearRange": "A1:Z5000",
+  "includeHeader": true
+}
+```
+
+Report bindings currently run synchronously because XLSX generation must wait for concrete result frames. Use read-only queries, cache settings, larger query timeouts, and Dashboard datasource sharing where appropriate. Templates are opened from the local Grafana server filesystem, and generated workbooks are returned directly to the browser.
+
+`outputName` is the admin-controlled default workbook filename template. The report panel shows it as an editable filename before download and sends the user's override to the backend. Supported filename tokens include `{userId}`, `{userUid}`, `{login}`, `{userName}`, `{reportId}`, `{reportName}`, `{reportType}`, `{timestamp}`, `{yyyymmdd}`, `{yyyymmddhhmm}`, and `{yyyymmddhhmmss}`. The backend appends `.xlsx` if needed and replaces path/filename-invalid characters with `_`.
+
 ## Security
 
 This datasource preserves the upstream behavior of sending user-entered q text to kdb+. Treat that text as untrusted input unless your environment already has strong controls. For production gateways, prefer allowlisted function calls, `reval` where applicable, `-b`, authenticated IPC, query timeouts, memory limits, and separate worker processes.
@@ -234,6 +291,7 @@ printf '\\\\\n' | q q/asyncq_grafana.q -q -T 5 -w 1024 -u 1 -b
 ```
 
 The datasource frontend build writes `dist/module.js` and copies datasource metadata. The companion panel build writes `dist-panel/asyncq-masterdata-panel/module.js`.
+The Excel report panel build writes `dist-panel/asyncq-excel-report-panel/module.js`.
 
 ## Local demo
 
@@ -248,3 +306,11 @@ The sync pool probe dashboard is provisioned at:
 ```text
 http://localhost:3000/d/asyncq-sync-pool/asyncq-sync-connection-pool
 ```
+
+The Excel reporting demo is provisioned at:
+
+```text
+http://localhost:3000/d/asyncq-excel-report/asyncq-excel-reporting
+```
+
+It uses [demo/templates/asyncq-demo-report-template.xlsx](demo/templates/asyncq-demo-report-template.xlsx), a sample workbook with charts and formulas pointed at the populated `Summary` and `Trades` ranges.

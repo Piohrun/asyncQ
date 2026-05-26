@@ -1,0 +1,47 @@
+{
+  "$schema": "https://raw.githubusercontent.com/grafana/grafana/master/docs/sources/developers/plugins/plugin.schema.json",
+  "type": "panel",
+  "name": "AsyncQ Excel Report",
+  "id": "asyncq-excel-report-panel",
+  "info": {
+    "description": "Dashboard report button for generating preconfigured AsyncQ Excel workbooks",
+    "author": {
+      "name": "AsyncQ",
+      "url": "https://github.com/greg/asyncq"
+    },
+    "keywords": [
+      "kdb+",
+      "asyncq",
+      "excel",
+      "reporting"
+    ],
+    "logos": {
+      "small": "img/asyncq-logo.svg",
+      "large": "img/asyncq-logo.svg"
+    },
+    "links": [
+      {
+        "name": "Website",
+        "url": "https://github.com/greg/asyncq"
+      },
+      {
+        "name": "License",
+        "url": "https://github.com/greg/asyncq/blob/main/LICENSE"
+      }
+    ],
+    "screenshots": [],
+    "version": "%VERSION%",
+    "updated": "%TODAY%"
+  },
+  "dependencies": {
+    "grafanaDependency": ">=13.0.0",
+    "plugins": [
+      {
+        "type": "datasource",
+        "id": "asyncq-kdbbackend-datasource",
+        "name": "AsyncQ kdb+ datasource",
+        "version": "%VERSION%"
+      }
+    ]
+  }
+}

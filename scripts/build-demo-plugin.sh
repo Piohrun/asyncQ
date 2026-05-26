@@ -28,4 +28,5 @@ chmod +x "$OUTPUT"
 
 echo "Built datasource plugin assets in $ROOT_DIR/dist"
 echo "Built panel plugin assets in $ROOT_DIR/dist-panel/asyncq-masterdata-panel"
+echo "Built Excel report panel plugin assets in $ROOT_DIR/dist-panel/asyncq-excel-report-panel"
 echo "Backend binary: $OUTPUT"

@@ -15,3 +15,4 @@ echo "Compatibility matrix: http://localhost:3000/d/asyncq-compat-matrix/asyncq-
 echo "Panopticon tests: http://localhost:3000/d/asyncq-pano-compat/asyncq-panopticon-compatibility-tests"
 echo "Async tests: http://localhost:3000/d/asyncq-async-tests/asyncq-async-execution-tests"
 echo "Master data/cache controls: http://localhost:3000/d/asyncq-masterdata-cache/asyncq-master-data-and-cache-controls"
+echo "Excel reporting: http://localhost:3000/d/asyncq-excel-report/asyncq-excel-reporting"

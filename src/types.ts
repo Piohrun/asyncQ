@@ -92,6 +92,7 @@ export interface MyDataSourceOptions extends DataSourceJsonData {
   queryCacheControlEnabled?: boolean;
   diagnosticsEnabled?: boolean;
   diagnosticsLogQueryText?: boolean;
+  excelReports?: string;
 }
 
 export const defaultConfig: Partial<MyDataSourceOptions> = {
@@ -127,6 +128,7 @@ export const defaultConfig: Partial<MyDataSourceOptions> = {
   queryCacheControlEnabled: true,
   diagnosticsEnabled: false,
   diagnosticsLogQueryText: false,
+  excelReports: '',
 };
 
 /**

@@ -8,7 +8,8 @@ services:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
       GF_LOG_LEVEL: info
-      GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS: asyncq-kdbbackend-datasource,asyncq-masterdata-panel
+      ASYNCQ_DEMO_TEMPLATE_DIR: /var/lib/grafana/asyncq/templates
+      GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS: asyncq-kdbbackend-datasource,asyncq-masterdata-panel,asyncq-excel-report-panel
       GF_SECURITY_ADMIN_PASSWORD: admin
       GF_SECURITY_ADMIN_USER: admin
       GF_USERS_DEFAULT_THEME: light
@@ -17,4 +18,6 @@ services:
     volumes:
       - ../dist:/var/lib/grafana/plugins/asyncq-kdbbackend-datasource:ro
       - ../dist-panel/asyncq-masterdata-panel:/var/lib/grafana/plugins/asyncq-masterdata-panel:ro
+      - ../dist-panel/asyncq-excel-report-panel:/var/lib/grafana/plugins/asyncq-excel-report-panel:ro
+      - ./templates:/var/lib/grafana/asyncq/templates:ro
       - ./grafana/provisioning:/etc/grafana/provisioning:ro

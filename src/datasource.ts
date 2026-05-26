@@ -60,6 +60,10 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
     return this.postResource('cache/clear-expired', { scope });
   }
 
+  getExcelReportCatalog(): Promise<any> {
+    return this.getResource('report/catalog');
+  }
+
   applyTemplateVariables(query: MyQuery, scopedVars?: ScopedVars) {
     const templateSrv = getTemplateSrv();
     const dashboardVariables = templateSrv.getVariables();
