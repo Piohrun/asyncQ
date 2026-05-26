@@ -31,22 +31,44 @@ func (d *KdbDatasource) getKdbSyncQueryId() uint32 {
 }
 
 func (d *KdbDatasource) runKdbQuerySync(query *kdb.K, timeout time.Duration) (*kdb.K, error) {
-	id := d.getKdbSyncQueryId()
-	queryObj := &kdbSyncQuery{query: query, id: id, timeout: timeout}
-	select {
-	case d.syncQueue <- queryObj:
-	case <-time.After(timeout):
-		return nil, fmt.Errorf("timed out waiting to queue query after %v", timeout)
+	if timeout <= 0 {
+		timeout = time.Duration(defaultQueryTimeout) * time.Millisecond
 	}
-	for {
-		res, ok := <-d.syncResChan
-		if !ok {
-			return nil, fmt.Errorf("datasource disposed before query completed")
+
+	conn, err := d.acquireSyncConnection(timeout)
+	if err != nil {
+		return nil, err
+	}
+
+	result, reusable, err := runKdbQueryOnConnection(conn, query, timeout)
+	if reusable {
+		d.releaseSyncConnection(conn)
+	} else {
+		d.discardSyncConnection(conn)
+	}
+	return result, err
+}
+
+func runKdbQueryOnConnection(conn *kdb.KDBConn, query *kdb.K, timeout time.Duration) (*kdb.K, bool, error) {
+	done := make(chan *kdbRawRead, 1)
+	go func() {
+		if err := conn.WriteMessage(kdb.SYNC, query); err != nil {
+			done <- &kdbRawRead{err: err}
+			return
 		}
-		if res.id != queryObj.id {
-			continue
+		result, msgType, err := conn.ReadMessage()
+		done <- &kdbRawRead{result: result, msgType: msgType, err: err}
+	}()
+
+	select {
+	case msg := <-done:
+		if msg.err != nil {
+			return nil, false, msg.err
 		}
-		return res.result, res.err
+		return msg.result, true, nil
+	case <-time.After(timeout):
+		_ = conn.Close()
+		return nil, false, fmt.Errorf("query timed out after %v", timeout)
 	}
 }
 

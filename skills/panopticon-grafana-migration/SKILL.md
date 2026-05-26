@@ -33,6 +33,7 @@ For the compatibility matrix, detailed mappings, and examples, read [references/
 4. Choose AsyncQ settings.
    - Use `compatibilityMode: "panopticon"` for migrated panels unless deliberately preserving AquaQ/native behavior.
    - Use `executionMode: "sync"` for quick validation.
+   - Tune datasource `syncMaxConnections` for the legacy port: keep the default `4` for parallel sync panels when the gateway supports concurrent handles, or set `1` for strict serial behavior/per-handle state.
    - Use `executionMode: "pluginAsync"` when the gateway only supports blocking sync IPC but the query should not block Grafana. This works with legacy gateways without q-side helper functions.
    - Use `executionMode: "async"` only when the target q process exposes `.grafana.asyncq.async.submit/status/result/cancel`.
    - For shared Panopticon base-query results, create one AsyncQ source panel and point dependent panels at Grafana's `-- Dashboard --` datasource with `Use results from panel`; do not duplicate the same AsyncQ query in every dependent panel.

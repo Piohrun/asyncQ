@@ -18,11 +18,13 @@ Verdict legend:
 - Visual rewrite: data can be retrieved, but Panopticon visual/interactivity must be rebuilt in Grafana.
 - Not portable: no reliable equivalent without changing the source application behavior.
 
+AsyncQ sync execution uses a per-datasource kdb+ IPC connection pool. `syncMaxConnections` defaults to `4`, so direct sync panels can run concurrently against the same datasource instance. Set `syncMaxConnections=1` when validating old Panopticon-serving ports that rely on strict serial requests, per-handle session state, or limited connection capacity.
+
 ### Query And Execution
 
 | Panopticon behavior | AsyncQ status | AsyncQ configuration | Notes and limits |
 | --- | --- | --- | --- |
-| Plain q expression or function call over sync IPC | Direct | `compatibilityMode="panopticon"`, `executionMode="sync"` for validation | Highest-confidence copy/paste case when the result shape is supported. |
+| Plain q expression or function call over sync IPC | Direct | `compatibilityMode="panopticon"`, `executionMode="sync"` for validation; tune `syncMaxConnections` per gateway | Highest-confidence copy/paste case when the result shape is supported. Set `syncMaxConnections=1` if the legacy port must serialize requests. |
 | Long-running blocking query over the same q port | Direct | Validate with `sync`, then use `executionMode="pluginAsync"` | Keeps Grafana responsive. It does not make the q gateway itself non-blocking; cancellation is best-effort by closing the plugin-owned IPC connection. |
 | Existing gateway accepts a q expression wrapped in a known call | Config-only | Set `panopticonQueryWrapper` with exactly one `{Query}` | Example: `.gateway.run[{Query};{TimeWindowStart};{TimeWindowEnd}]`. |
 | Existing panel passes a full request object into a q function | Config-only if the function can accept AsyncQ's request dict; otherwise adapter needed | Set `panopticonRequestFunction` | AsyncQ passes a request dictionary with `Query`, `Panopticon`, top-level time aliases, datasource, user, and execution metadata. Proprietary envelopes need mapping. |
@@ -162,7 +164,7 @@ Use Grafana's Dashboard datasource when a Panopticon dashboard used one shared d
 4. In each dependent panel, set `Use results from panel` to the source panel.
 5. Apply panel-specific Grafana transformations, field overrides, filters, thresholds, and visualization settings.
 
-Do not paste the same expensive AsyncQ query into every dependent panel unless you intentionally want separate q requests. Direct duplicate AsyncQ targets are independent Grafana queries: sync targets serialize through the datasource's sync IPC path, and `pluginAsync` targets use separate plugin-managed IPC calls rather than a shared result.
+Do not paste the same expensive AsyncQ query into every dependent panel unless you intentionally want separate q requests. Direct duplicate AsyncQ targets are independent Grafana queries: sync targets run through the datasource's bounded sync IPC pool, and `pluginAsync` targets use separate plugin-managed IPC calls rather than a shared result.
 
 ## Mode Selection
 

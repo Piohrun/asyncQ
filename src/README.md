@@ -4,7 +4,9 @@ AsyncQ is a Grafana 13 backend datasource for kdb+ derived from AquaQ Analytics'
 
 ## Query modes
 
-Sync mode is the default and matches the upstream datasource behavior. Variables and alerting use sync mode.
+Sync mode is the default and keeps the upstream request envelope. Variables and alerting use sync mode.
+
+Each datasource instance has a bounded sync IPC connection pool. `Sync Max Connections` defaults to `4`, allowing independent sync panels on the same datasource to run concurrently. Set it to `1` for strict legacy serial behavior or gateways with per-handle state/low connection limits.
 
 Helper Async mode uses Grafana Live and calls q helper functions:
 

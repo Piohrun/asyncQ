@@ -20,6 +20,7 @@ datasources:
       compatibilityMode: native
       panopticonQueryWrapper: ""
       panopticonRequestFunction: ""
+      syncMaxConnections: 4
       asyncMaxJobs: 16
       diagnosticsEnabled: true
       diagnosticsLogQueryText: false

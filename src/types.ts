@@ -38,6 +38,7 @@ export interface MyDataSourceOptions extends DataSourceJsonData {
   panopticonQueryWrapper?: string;
   panopticonRequestFunction?: string;
   asyncMaxJobs?: number;
+  syncMaxConnections?: number;
   diagnosticsEnabled?: boolean;
   diagnosticsLogQueryText?: boolean;
 }
@@ -50,6 +51,7 @@ export const defaultConfig: Partial<MyDataSourceOptions> = {
   enableStreaming: true,
   executionMode: 'sync',
   compatibilityMode: 'native',
+  syncMaxConnections: 4,
   diagnosticsEnabled: false,
   diagnosticsLogQueryText: false,
 };

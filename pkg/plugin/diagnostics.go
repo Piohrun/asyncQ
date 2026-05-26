@@ -35,6 +35,10 @@ func (d *KdbDatasource) diagnosticQueryFields(pCtx backend.PluginContext, query 
 	if originalQuery == "" {
 		originalQuery = model.QueryText
 	}
+	syncMaxConnections := 0
+	if d != nil {
+		syncMaxConnections = d.SyncMaxConnections
+	}
 	fields := []interface{}{
 		"requestID", requestID,
 		"refID", query.RefID,
@@ -46,6 +50,7 @@ func (d *KdbDatasource) diagnosticQueryFields(pCtx backend.PluginContext, query 
 		"queryLen", len(model.QueryText),
 		"originalQueryLen", len(originalQuery),
 		"timeoutMs", model.Timeout,
+		"syncMaxConnections", syncMaxConnections,
 		"pollIntervalMs", model.PollIntervalMs,
 		"maxStreamRows", model.MaxStreamRows,
 		"streamRetentionMs", model.StreamRetentionMs,

@@ -157,6 +157,12 @@ export class ConfigEditor extends PureComponent<Props> {
     }
   };
 
+  onSyncMaxConnectionsChange = (event: ChangeEvent<HTMLInputElement>) => {
+    if (/^\d+$/.test(event.target.value) || event.target.value === '') {
+      this.updateJsonData({ syncMaxConnections: event.target.value === '' ? undefined : parseInt(event.target.value, 10) });
+    }
+  };
+
   onTlsCertificateChange = (event: FormEvent<HTMLTextAreaElement>) => {
     const { onOptionsChange, options } = this.props;
     onOptionsChange({
@@ -385,6 +391,16 @@ export class ConfigEditor extends PureComponent<Props> {
           </InlineField>
         </div>
         <div className="gf-form">
+          <FormField
+            name="SyncMaxConnectionsInputField"
+            label="Sync Max Connections"
+            labelWidth={18}
+            inputWidth={12}
+            onChange={this.onSyncMaxConnectionsChange}
+            value={jsonData.syncMaxConnections ?? ''}
+            placeholder="4"
+            tooltip="Maximum reusable synchronous kdb+ IPC connections for this datasource instance. Set to 1 for strict legacy serial behavior."
+          />
           <FormField
             name="AsyncMaxJobsInputField"
             label="Async Max Jobs"

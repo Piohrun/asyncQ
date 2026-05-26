@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
@@ -30,11 +31,12 @@ const (
 	CompatibilityModeAquaQ      = "aquaq"
 	CompatibilityModePanopticon = "panopticon"
 
-	defaultQueryTimeout     = 10000
-	defaultPollIntervalMs   = 1000
-	defaultMaxStreamRows    = 1000
-	defaultAsyncMaxJobs     = 16
-	asyncQHelperUnavailable = "async/stream queries require q/asyncq_grafana.q to be loaded in the target kdb+ process or gateway"
+	defaultQueryTimeout       = 10000
+	defaultPollIntervalMs     = 1000
+	defaultMaxStreamRows      = 1000
+	defaultAsyncMaxJobs       = 16
+	defaultSyncMaxConnections = 4
+	asyncQHelperUnavailable   = "async/stream queries require q/asyncq_grafana.q to be loaded in the target kdb+ process or gateway"
 )
 
 var (
@@ -95,6 +97,7 @@ type KdbDatasource struct {
 	PanopticonQueryWrapper    string `json:"panopticonQueryWrapper,omitempty"`
 	PanopticonRequestFunction string `json:"panopticonRequestFunction,omitempty"`
 	AsyncMaxJobs              int    `json:"asyncMaxJobs,omitempty"`
+	SyncMaxConnections        int    `json:"syncMaxConnections,omitempty"`
 	DiagnosticsEnabled        bool   `json:"diagnosticsEnabled,omitempty"`
 	DiagnosticsLogQueryText   bool   `json:"diagnosticsLogQueryText,omitempty"`
 	asyncConfigured           bool
@@ -109,6 +112,12 @@ type KdbDatasource struct {
 	DialTimeout     time.Duration
 	KdbHandle       *kdb.KDBConn
 	asyncJobs       chan struct{}
+	syncPool        chan *kdb.KDBConn
+	syncPoolSlots   chan struct{}
+	syncPoolActive  map[*kdb.KDBConn]struct{}
+	syncPoolMax     int
+	syncPoolMu      sync.Mutex
+	syncPoolClosed  bool
 
 	signals             chan int
 	syncQueue           chan *kdbSyncQuery
@@ -217,9 +226,7 @@ func NewKdbDatasource(_ context.Context, settings backend.DataSourceInstanceSett
 	log.DefaultLogger.Info("Making signals channel")
 	client.signals = make(chan int)
 
-	go client.syncQueryRunner()
-
-	log.DefaultLogger.Info("KDB Datasource created successfully")
+	log.DefaultLogger.Info("KDB Datasource created successfully", "syncMaxConnections", client.SyncMaxConnections, "asyncMaxJobs", client.AsyncMaxJobs)
 	return &client, nil
 }
 
@@ -233,6 +240,9 @@ func (d *KdbDatasource) normalizeDatasourceDefaults() {
 	if d.AsyncMaxJobs < 1 {
 		d.AsyncMaxJobs = defaultAsyncMaxJobs
 	}
+	if d.SyncMaxConnections < 1 {
+		d.SyncMaxConnections = defaultSyncMaxConnections
+	}
 	if d.asyncJobs == nil {
 		d.asyncJobs = make(chan struct{}, d.AsyncMaxJobs)
 	}
@@ -240,6 +250,7 @@ func (d *KdbDatasource) normalizeDatasourceDefaults() {
 
 func (d *KdbDatasource) Dispose() {
 	log.DefaultLogger.Info("Dispose called")
+	d.closeSyncPool()
 	if d.IsOpen {
 		log.DefaultLogger.Info("Handle open when dispose called, closing handle")
 		if err := d.CloseConnection(); err != nil {
@@ -332,10 +343,19 @@ func (d *KdbDatasource) closeConnection() error {
 func (d *KdbDatasource) QueryData(ctx context.Context, req *backend.QueryDataRequest) (*backend.QueryDataResponse, error) {
 	response := backend.NewQueryDataResponse()
 
+	var wg sync.WaitGroup
+	var mu sync.Mutex
 	for index, q := range req.Queries {
-		res := d.query(ctx, req.PluginContext, q, syncDiagnosticRequestID(req, q, index))
-		response.Responses[q.RefID] = res
+		wg.Add(1)
+		go func(index int, q backend.DataQuery) {
+			defer wg.Done()
+			res := d.query(ctx, req.PluginContext, q, syncDiagnosticRequestID(req, q, index))
+			mu.Lock()
+			response.Responses[q.RefID] = res
+			mu.Unlock()
+		}(index, q)
 	}
+	wg.Wait()
 	return response, nil
 }
 
@@ -623,6 +643,7 @@ func (d *KdbDatasource) CheckHealth(_ context.Context, req *backend.CheckHealthR
 		"port", d.Port,
 		"withTLS", d.WithTls,
 		"timeoutMs", int64(d.DialTimeout / time.Millisecond),
+		"syncMaxConnections", d.SyncMaxConnections,
 	}
 	if pCtx.DataSourceInstanceSettings != nil {
 		healthFields = append(healthFields,

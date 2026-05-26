@@ -35,6 +35,8 @@ The local starter downloads Grafana OSS `13.0.1` into `demo/runtime/` on first r
 
 The demo datasource enables safe backend diagnostics by default. Grafana logs include request IDs, ref IDs, query hashes, q worker/result metadata, frame schemas, async job or stream IDs, and errors. Raw query text and q stack trace logging stays disabled.
 
+The provisioned datasource sets `syncMaxConnections: 4`, so multiple sync panels can exercise the per-datasource kdb+ connection pool. Lower this to `1` in `demo/grafana/provisioning/datasources/asyncq.yml` if you want to compare the original serial sync behavior.
+
 ## Start with Docker
 
 Docker is optional. It is useful when you want a fully disposable Grafana container:
