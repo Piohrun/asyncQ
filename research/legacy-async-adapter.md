@@ -78,10 +78,10 @@ Implemented modes: `queryText`, `compiledQueryText`, `requestDict`, and `panopti
 3. Call adapter submit function on a dedicated q connection.
 4. Extract job ID and initial status from submit response.
 5. Emit Grafana Live control frame with queued/running state.
-6. Poll status function until terminal state or panel cancellation.
+6. Poll status function until terminal state, configured timeout, or panel cancellation.
 7. On terminal success, call result function unless the terminal status already includes payload.
 8. Parse q result through the existing compatibility parser.
-9. On panel cancellation, call cancel function if configured, then close the connection.
+9. On panel cancellation or timeout, call cancel function if configured on a short separate IPC connection, then close the active connection.
 
 ## Submit Response Shapes
 
@@ -115,7 +115,7 @@ Status normalization maps configured legacy values to AsyncQ states:
 | `error` | Terminal failure |
 | `cancelled` | Terminal cancellation |
 
-Unknown status values should be treated as `running` but logged with diagnostics.
+Unknown status values should be treated as `running` but logged with diagnostics. Diagnostics preserve both `rawStatus` and `normalizedStatus`, plus whether the raw value matched a configured mapping.
 
 ## Result Response Shapes
 
@@ -133,8 +133,9 @@ Log these fields without raw query text unless `Log Query Text` is enabled:
 - adapter name or mode
 - submit/status/result/cancel function hashes or names
 - request ID and job ID
-- normalized status and raw status
+- normalized status, raw status, and status-mapping match flag
 - poll count and duration
+- timeout duration and whether cancellation was attempted
 - configured response paths used
 - q object shape for submit/status/result responses
 - parse errors with compatibility mode and result object shape
@@ -170,6 +171,8 @@ Implemented:
 5. Unit tests for defaults, path extraction, result payload extraction, request modes, and status normalization.
 6. Demo q process functions with one legacy-shaped async protocol that does not use `.grafana.asyncq.*` as the exposed protocol.
 7. Demo dashboard panel comparing helper async and legacy async adapter behavior.
+8. Total async timeout handling for submit, polling, result fetch, and best-effort cancel.
+9. Live integration coverage that starts the demo q process, exercises submit/status/result, and parses the returned frame.
 
 Still open:
 

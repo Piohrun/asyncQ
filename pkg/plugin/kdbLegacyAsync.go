@@ -114,23 +114,28 @@ func (a legacyAsyncAdapter) validate() error {
 }
 
 func (a legacyAsyncAdapter) normalizeStatus(raw string, fallback string) string {
+	status, _ := a.normalizeStatusDetail(raw, fallback)
+	return status
+}
+
+func (a legacyAsyncAdapter) normalizeStatusDetail(raw string, fallback string) (string, bool) {
 	status := strings.ToLower(strings.TrimSpace(raw))
 	if status == "" {
 		status = fallback
 	}
 	switch {
 	case a.queuedValues[status]:
-		return "queued"
+		return "queued", true
 	case a.runningValues[status]:
-		return "running"
+		return "running", true
 	case a.doneValues[status]:
-		return "done"
+		return "done", true
 	case a.errorValues[status]:
-		return "error"
+		return "error", true
 	case a.cancelledValues[status]:
-		return "cancelled"
+		return "cancelled", true
 	default:
-		return "running"
+		return "running", false
 	}
 }
 
@@ -174,12 +179,14 @@ func (a legacyAsyncAdapter) parseSubmitResponse(k *kdb.K, fallbackID string) (as
 	if k.Type == kdb.KC || k.Type == -kdb.KS {
 		status.ID = kdbString(k)
 		status.Status = "queued"
+		status.RawStatus = "queued"
 		return status, nil
 	}
 	if id, ok := legacyExtractPath(k, a.jobIDPath); ok {
 		status.ID = kdbString(id)
 	}
 	a.populateStatusFields(&status, k)
+	status.RawStatus = status.Status
 	if status.ID == "" {
 		return status, fmt.Errorf("legacy async submit response did not contain job id at path %q", a.jobIDPath)
 	}
@@ -193,12 +200,14 @@ func (a legacyAsyncAdapter) parseStatusResponse(k *kdb.K, fallbackID string) (as
 	}
 	if k.Type == kdb.KC || k.Type == -kdb.KS {
 		status.Status = kdbString(k)
+		status.RawStatus = status.Status
 		return status, nil
 	}
 	if id, ok := legacyExtractPath(k, a.jobIDPath); ok {
 		status.ID = kdbString(id)
 	}
 	a.populateStatusFields(&status, k)
+	status.RawStatus = status.Status
 	return status, nil
 }
 
@@ -330,14 +339,21 @@ func (d *KdbDatasource) runLegacyAsyncQueryStream(ctx context.Context, pCtx back
 	}
 	defer conn.Close()
 
+	timeout := asyncTimeoutDuration(model)
+	jobCtx, cancelJob := context.WithTimeout(ctx, timeout)
+	defer cancelJob()
+
 	submitArg, err := adapter.buildSubmitArg(pCtx, query, model, requestID)
 	if err != nil {
 		d.logDiagnosticError("legacy async request build failed", appendDiagnosticError(fields, err)...)
 		_ = sendControlFrame(sender, liveReq.RefID, ExecutionModeLegacyAsync, "error", requestID, "", err.Error(), 0, true)
 		return nil
 	}
-	submitRes, err := callKdbFunction(conn, legacyAsyncCallExpression(adapter.submit, 1), submitArg)
+	submitRes, err := callKdbFunctionWithContext(jobCtx, conn, legacyAsyncCallExpression(adapter.submit, 1), submitArg)
 	if err != nil {
+		if jobCtx.Err() != nil {
+			err = asyncContextError(jobCtx, "legacy async", timeout)
+		}
 		d.logDiagnosticError("legacy async submit failed", appendDiagnosticError(fields, err)...)
 		_ = sendControlFrame(sender, liveReq.RefID, ExecutionModeLegacyAsync, "error", requestID, "", err.Error(), 0, true)
 		return nil
@@ -350,9 +366,11 @@ func (d *KdbDatasource) runLegacyAsyncQueryStream(ctx context.Context, pCtx back
 		return nil
 	}
 	jobID := status.ID
-	jobFields := append(submitFields, "jobID", jobID)
-	state := adapter.normalizeStatus(status.Status, "queued")
+	rawStatus := status.Status
+	state, mapped := adapter.normalizeStatusDetail(rawStatus, "queued")
+	status.RawStatus = rawStatus
 	status.Status = state
+	jobFields := append(submitFields, "jobID", jobID, "legacyAsyncRawStatus", rawStatus, "legacyAsyncNormalizedStatus", state, "legacyAsyncStatusMapped", mapped)
 	d.logDiagnostics("legacy async submitted", d.appendDiagnosticAsyncStatus(append([]interface{}{}, jobFields...), status)...)
 	if err := sendControlFrame(sender, liveReq.RefID, ExecutionModeLegacyAsync, state, jobID, status.Message, status.Error, status.Progress, false); err != nil {
 		d.logDiagnosticError("legacy async status send failed", appendDiagnosticError(jobFields, err)...)
@@ -362,19 +380,36 @@ func (d *KdbDatasource) runLegacyAsyncQueryStream(ctx context.Context, pCtx back
 	ticker := time.NewTicker(time.Duration(model.PollIntervalMs) * time.Millisecond)
 	defer ticker.Stop()
 	lastState := state
+	cancelFn := ""
+	if adapter.cancel != "" {
+		cancelFn = legacyAsyncCallExpression(adapter.cancel, 1)
+	}
+	finishContext := func() error {
+		if ctx.Err() != nil {
+			d.bestEffortAsyncCancel(cancelFn, jobID)
+			d.logDiagnostics("legacy async cancelled", append(jobFields, "durationMs", time.Since(start).Milliseconds(), "error", ctx.Err().Error())...)
+			_ = sendControlFrame(sender, liveReq.RefID, ExecutionModeLegacyAsync, "cancelled", jobID, "", ctx.Err().Error(), 1, true)
+			return nil
+		}
+		err := asyncContextError(jobCtx, "legacy async", timeout)
+		d.bestEffortAsyncCancel(cancelFn, jobID)
+		d.logDiagnosticError("legacy async timed out", appendDiagnosticError(append(jobFields, "durationMs", time.Since(start).Milliseconds(), "timeoutMs", timeout.Milliseconds()), err)...)
+		_ = sendControlFrame(sender, liveReq.RefID, ExecutionModeLegacyAsync, "error", jobID, "", err.Error(), 1, true)
+		return nil
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
-			if adapter.cancel != "" {
-				_, _ = callKdbFunction(conn, legacyAsyncCallExpression(adapter.cancel, 1), kdb.Atom(kdb.KC, jobID))
-			}
-			d.logDiagnostics("legacy async cancelled", append(jobFields, "durationMs", time.Since(start).Milliseconds(), "error", ctx.Err().Error())...)
-			_ = sendControlFrame(sender, liveReq.RefID, ExecutionModeLegacyAsync, "cancelled", jobID, "", ctx.Err().Error(), 1, true)
-			return nil
+			return finishContext()
+		case <-jobCtx.Done():
+			return finishContext()
 		case <-ticker.C:
-			statusRes, err := callKdbFunction(conn, legacyAsyncCallExpression(adapter.status, 1), kdb.Atom(kdb.KC, jobID))
+			statusRes, err := callKdbFunctionWithContext(jobCtx, conn, legacyAsyncCallExpression(adapter.status, 1), kdb.Atom(kdb.KC, jobID))
 			if err != nil {
+				if jobCtx.Err() != nil {
+					return finishContext()
+				}
 				d.logDiagnosticError("legacy async status failed", appendDiagnosticError(jobFields, err)...)
 				_ = sendControlFrame(sender, liveReq.RefID, ExecutionModeLegacyAsync, "error", jobID, "", err.Error(), 0, true)
 				return nil
@@ -386,8 +421,11 @@ func (d *KdbDatasource) runLegacyAsyncQueryStream(ctx context.Context, pCtx back
 				_ = sendControlFrame(sender, liveReq.RefID, ExecutionModeLegacyAsync, "error", jobID, "", err.Error(), 0, true)
 				return nil
 			}
-			state = adapter.normalizeStatus(status.Status, "running")
+			rawStatus := status.Status
+			state, mapped := adapter.normalizeStatusDetail(rawStatus, "running")
+			status.RawStatus = rawStatus
 			status.Status = state
+			statusFields = append(statusFields, "legacyAsyncRawStatus", rawStatus, "legacyAsyncNormalizedStatus", state, "legacyAsyncStatusMapped", mapped)
 			if state != lastState {
 				d.logDiagnostics("legacy async status changed", d.appendDiagnosticAsyncStatus(append([]interface{}{}, statusFields...), status)...)
 				lastState = state
@@ -411,8 +449,11 @@ func (d *KdbDatasource) runLegacyAsyncQueryStream(ctx context.Context, pCtx back
 						_ = sendControlFrame(sender, liveReq.RefID, ExecutionModeLegacyAsync, "error", jobID, "", err.Error(), status.Progress, true)
 						return nil
 					}
-					resultRes, err := callKdbFunction(conn, legacyAsyncCallExpression(adapter.result, 1), kdb.Atom(kdb.KC, jobID))
+					resultRes, err := callKdbFunctionWithContext(jobCtx, conn, legacyAsyncCallExpression(adapter.result, 1), kdb.Atom(kdb.KC, jobID))
 					if err != nil {
+						if jobCtx.Err() != nil {
+							return finishContext()
+						}
 						d.logDiagnosticError("legacy async result failed", appendDiagnosticError(statusFields, err)...)
 						_ = sendControlFrame(sender, liveReq.RefID, ExecutionModeLegacyAsync, "error", jobID, "", err.Error(), status.Progress, true)
 						return nil

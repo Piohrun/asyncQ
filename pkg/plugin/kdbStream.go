@@ -38,6 +38,7 @@ type liveTimeRange struct {
 type asyncQStatus struct {
 	ID         string
 	Status     string
+	RawStatus  string
 	Message    string
 	Error      string
 	ErrorClass string
@@ -203,9 +204,16 @@ func (d *KdbDatasource) runAsyncQueryStream(ctx context.Context, req *backend.Ru
 	}
 	defer conn.Close()
 
+	timeout := asyncTimeoutDuration(model)
+	jobCtx, cancelJob := context.WithTimeout(ctx, timeout)
+	defer cancelJob()
+
 	helperReq := buildHelperRequest(req.PluginContext, query, model, requestID, "")
-	submitRes, err := callKdbFunction(conn, asyncSubmitFn, helperReq)
+	submitRes, err := callKdbFunctionWithContext(jobCtx, conn, asyncSubmitFn, helperReq)
 	if err != nil {
+		if jobCtx.Err() != nil {
+			err = asyncContextError(jobCtx, "helper async", timeout)
+		}
 		err = fmt.Errorf("%s: %w", asyncQHelperUnavailable, err)
 		d.logDiagnosticError("helper async submit failed", appendDiagnosticError(fields, err)...)
 		return err
@@ -228,16 +236,32 @@ func (d *KdbDatasource) runAsyncQueryStream(ctx context.Context, req *backend.Ru
 	defer ticker.Stop()
 	start := time.Now()
 	lastState := strings.ToLower(statusWithDefault(status.Status, "queued"))
+	finishContext := func() error {
+		if ctx.Err() != nil {
+			d.bestEffortAsyncCancel(asyncCancelFn, jobID)
+			d.logDiagnostics("helper async cancelled", append(jobFields, "durationMs", time.Since(start).Milliseconds(), "error", ctx.Err().Error())...)
+			_ = sendControlFrame(sender, liveReq.RefID, ExecutionModeAsync, "cancelled", jobID, "", ctx.Err().Error(), 1, true)
+			return ctx.Err()
+		}
+		err := asyncContextError(jobCtx, "helper async", timeout)
+		d.bestEffortAsyncCancel(asyncCancelFn, jobID)
+		d.logDiagnosticError("helper async timed out", appendDiagnosticError(append(jobFields, "durationMs", time.Since(start).Milliseconds(), "timeoutMs", timeout.Milliseconds()), err)...)
+		_ = sendControlFrame(sender, liveReq.RefID, ExecutionModeAsync, "error", jobID, "", err.Error(), 1, true)
+		return nil
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
-			_, _ = callKdbFunction(conn, asyncCancelFn, kdb.Atom(kdb.KC, jobID))
-			d.logDiagnostics("helper async cancelled", append(jobFields, "durationMs", time.Since(start).Milliseconds(), "error", ctx.Err().Error())...)
-			return ctx.Err()
+			return finishContext()
+		case <-jobCtx.Done():
+			return finishContext()
 		case <-ticker.C:
-			statusRes, err := callKdbFunction(conn, asyncStatusFn, kdb.Atom(kdb.KC, jobID))
+			statusRes, err := callKdbFunctionWithContext(jobCtx, conn, asyncStatusFn, kdb.Atom(kdb.KC, jobID))
 			if err != nil {
+				if jobCtx.Err() != nil {
+					return finishContext()
+				}
 				d.logDiagnosticError("helper async status failed", appendDiagnosticError(jobFields, err)...)
 				_ = sendControlFrame(sender, liveReq.RefID, ExecutionModeAsync, "error", jobID, "", err.Error(), 0, true)
 				return nil
@@ -262,8 +286,11 @@ func (d *KdbDatasource) runAsyncQueryStream(ctx context.Context, req *backend.Ru
 				return nil
 			}
 			if state == "done" || state == "complete" || state == "completed" {
-				result, err := callKdbFunction(conn, asyncResultFn, kdb.Atom(kdb.KC, jobID))
+				result, err := callKdbFunctionWithContext(jobCtx, conn, asyncResultFn, kdb.Atom(kdb.KC, jobID))
 				if err != nil {
+					if jobCtx.Err() != nil {
+						return finishContext()
+					}
 					d.logDiagnosticError("helper async result failed", appendDiagnosticError(jobFields, err)...)
 					_ = sendControlFrame(sender, liveReq.RefID, ExecutionModeAsync, "error", jobID, "", err.Error(), status.Progress, true)
 					return nil
@@ -346,6 +373,9 @@ func (d *KdbDatasource) runPluginManagedAsyncQueryStream(ctx context.Context, pC
 
 	ticker := time.NewTicker(time.Duration(model.PollIntervalMs) * time.Millisecond)
 	defer ticker.Stop()
+	timeout := asyncTimeoutDuration(model)
+	timeoutTimer := time.NewTimer(timeout)
+	defer timeoutTimer.Stop()
 
 	for {
 		select {
@@ -353,6 +383,12 @@ func (d *KdbDatasource) runPluginManagedAsyncQueryStream(ctx context.Context, pC
 			_ = conn.Close()
 			d.logDiagnostics("plugin async cancelled", append(fields, "durationMs", time.Since(start).Milliseconds(), "error", ctx.Err().Error())...)
 			_ = sendControlFrame(sender, liveReq.RefID, model.ExecutionMode, "cancelled", requestID, "", ctx.Err().Error(), 1, true)
+			return nil
+		case <-timeoutTimer.C:
+			err := fmt.Errorf("%s query timed out after %v", model.ExecutionMode, timeout)
+			_ = conn.Close()
+			d.logDiagnosticError("plugin async timed out", appendDiagnosticError(append(fields, "durationMs", time.Since(start).Milliseconds(), "timeoutMs", timeout.Milliseconds()), err)...)
+			_ = sendControlFrame(sender, liveReq.RefID, model.ExecutionMode, "error", requestID, "", err.Error(), 1, true)
 			return nil
 		case err := <-errCh:
 			d.logDiagnosticError("plugin async query failed", appendDiagnosticError(fields, err)...)
@@ -385,6 +421,33 @@ func (d *KdbDatasource) runPluginManagedAsyncQueryStream(ctx context.Context, pC
 				return err
 			}
 		}
+	}
+}
+
+func asyncTimeoutDuration(model QueryModel) time.Duration {
+	timeoutMs := model.Timeout
+	if timeoutMs < 1 {
+		timeoutMs = defaultQueryTimeout
+	}
+	return time.Duration(timeoutMs) * time.Millisecond
+}
+
+func (d *KdbDatasource) bestEffortAsyncCancel(fn string, jobID string) {
+	fn = strings.TrimSpace(fn)
+	if fn == "" || jobID == "" {
+		return
+	}
+	conn, err := d.newConnection()
+	if err != nil {
+		d.logDiagnostics("async cancel connection failed", "functionHash", diagnosticHash(fn), "jobID", jobID, "error", err.Error())
+		return
+	}
+	defer conn.Close()
+
+	cancelCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := callKdbFunctionWithContext(cancelCtx, conn, fn, kdb.Atom(kdb.KC, jobID)); err != nil {
+		d.logDiagnostics("async cancel failed", "functionHash", diagnosticHash(fn), "jobID", jobID, "error", err.Error())
 	}
 }
 
@@ -544,6 +607,33 @@ func callKdbFunction(conn *kdb.KDBConn, fn string, args ...*kdb.K) (*kdb.K, erro
 	return res, nil
 }
 
+func callKdbFunctionWithContext(ctx context.Context, conn *kdb.KDBConn, fn string, args ...*kdb.K) (*kdb.K, error) {
+	type callResult struct {
+		res *kdb.K
+		err error
+	}
+	done := make(chan callResult, 1)
+	go func() {
+		res, err := callKdbFunction(conn, fn, args...)
+		done <- callResult{res: res, err: err}
+	}()
+
+	select {
+	case result := <-done:
+		return result.res, result.err
+	case <-ctx.Done():
+		_ = conn.Close()
+		return nil, ctx.Err()
+	}
+}
+
+func asyncContextError(ctx context.Context, mode string, timeout time.Duration) error {
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("%s query timed out after %v", mode, timeout)
+	}
+	return ctx.Err()
+}
+
 func buildHelperRequest(pCtx backend.PluginContext, query backend.DataQuery, model QueryModel, requestID string, streamID string) *kdb.K {
 	baseKeys, baseValues := buildMasterKdbLists(pCtx, query, model)
 	keys := append(append([]string{}, baseKeys.Data.([]string)...),
@@ -566,6 +656,7 @@ func parseAsyncQStatus(k *kdb.K, fallbackID string) asyncQStatus {
 		if k.Type == kdb.KC || k.Type == -kdb.KS {
 			status.ID = kdbString(k)
 			status.Status = "queued"
+			status.RawStatus = "queued"
 		}
 		return status
 	}
@@ -574,6 +665,7 @@ func parseAsyncQStatus(k *kdb.K, fallbackID string) asyncQStatus {
 	}
 	if v, ok := dictLookup(k, "Status", "State", "MessageType"); ok {
 		status.Status = kdbString(v)
+		status.RawStatus = status.Status
 	}
 	if v, ok := dictLookup(k, "Message"); ok {
 		status.Message = kdbString(v)

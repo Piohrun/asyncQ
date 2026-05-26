@@ -34,7 +34,7 @@ AsyncQ can also cache successful sync query results in the datasource instance. 
 | Multiple panels share one base query/result | Config-only | One AsyncQ source panel or `asyncq-masterdata-panel`, dependent panels use Grafana datasource `-- Dashboard --` and `Use results from panel` | Do not duplicate the same AsyncQ target in each dependent panel; duplicate targets produce repeated kdb+ requests. The companion master-data panel also exposes freshness and cache controls. |
 | Dashboard reopens should use warm server-side results | Config-only if stale data is acceptable | Use datasource `queryCacheEnabled`, `queryCacheDiskEnabled`, `queryCacheTTLSeconds`, optionally set `queryCacheStaleTTLSeconds` and `queryCacheTimeBucketSeconds`, and keep Dashboard datasource sharing for dependent panels | This approximates Panopticon query result cache. Cache only successful sync results and is local to the Grafana server/datasource instance. Disk cache persists across plugin restarts; stale-while-revalidate makes reopen feel instant, but the refreshed result appears on the next Grafana query/refresh unless the panel uses a live path. |
 | Duplicated panels should share the same cached q result | Config-only if the q path ignores ref ID | Set datasource or query `queryCacheKeyMode=shared`; prefer Dashboard datasource when a panel explicitly derives from a source panel | Shared cache mode omits ref ID from the cache key. Do not use it when a Panopticon request function branches on panel/ref ID. |
-| Panopticon server-side async submit/status/result/cancel | Config-only when the gateway exposes callable functions and parseable envelopes; otherwise adapter needed | Use `executionMode="legacyAsync"` and configure submit/status/result/cancel functions, request mode, response paths, and status value mappings. Use `executionMode="async"` only for the `.grafana.asyncq.async.*` helper contract | Discover job ID field, status values, result function, error fields, expiry, and cancel semantics before configuring. Callback/deferred protocols still need a specific adapter. |
+| Panopticon server-side async submit/status/result/cancel | Config-only when the gateway exposes callable functions and parseable envelopes; otherwise adapter needed | Use `executionMode="legacyAsync"` and configure submit/status/result/cancel functions, request mode, response paths, status value mappings, poll interval, and timeout. Use `executionMode="async"` only for the `.grafana.asyncq.async.*` helper contract | Discover job ID field, status values, result function, error fields, expiry, and cancel semantics before configuring. `Timeout (ms)` is the full lifecycle budget. Callback/deferred protocols still need a specific adapter. |
 | Deferred response or callback over IPC handle | Adapter needed | Current `deferredAsync` only wraps a query then runs Plugin Async | True q `neg` callback/deferred protocols need a plugin adapter that registers the callback handle and translates returned messages. |
 | Gateway only accepts serialized/proprietary Panopticon envelopes | Adapter needed | Implement envelope builder in plugin or q shim | Do not claim copy/paste until the envelope schema is known. |
 | Streaming subscription/push panel | Adapter needed | `executionMode="stream"` requires `.grafana.asyncq.stream.start/stop` or equivalent adapter | Panopticon stream definitions do not copy directly unless their protocol is implemented. |
@@ -326,7 +326,7 @@ Return an explicit table from q for these cases.
 
 ## Troubleshooting
 
-Current logging is enough for common failures but not yet a full migration observability layer.
+Diagnostics are structured enough for common migration failures when enabled at datasource level.
 
 Useful Grafana backend log signals:
 
@@ -338,6 +338,9 @@ Useful Grafana backend log signals:
 - `Panopticon query wrapper must contain exactly one {Query}`
 - `asyncQ helper unavailable`
 - `async job limit reached`
+- `legacy async submit/status/result failed`
+- `legacyAsyncRawStatus`, `legacyAsyncNormalizedStatus`, and `legacyAsyncStatusMapped`
+- `helper async query timed out` or `legacy async query timed out`
 
 Common fixes:
 
@@ -348,6 +351,8 @@ Common fixes:
 | Table panel says no data | Async first load pending or result shape unsupported | Try `sync`; return a flat table adapter |
 | Missing time column error | `useTimeColumn=true` but returned frame lacks that column | Disable custom time column or return a real time column |
 | Helper async never completes | q helper contract mismatch | Test `.grafana.asyncq.async.submit/status/result/cancel` directly |
+| Legacy async never reaches done | Status values or paths do not match the gateway envelope | Inspect `legacyAsyncRawStatus`, `legacyAsyncNormalizedStatus`, and `legacyAsyncStatusMapped`; update status paths or value mappings |
+| Legacy async times out | Gateway did not complete within the panel timeout, or a blocking status/result call hung | Raise `Timeout (ms)` only after confirming q-side job duration; check q logs for job ID and result availability |
 | Request function fails | Expects different request envelope | Use top-level aliases or `req\`Panopticon`; add a small q shim |
 | Panels still resolve one by one after raising `syncMaxConnections` | Target q gateway/process serializes requests or datasource config was not applied | Inspect diagnostics: high `syncPoolAcquireWaitMs` means plugin pool saturation; low acquire wait with high `syncTransportMs` means the target q side is taking/serializing the work |
 | Reopened dashboard still hits kdb+ | Query cache disabled, cache TTL expired, exact relative `now` timestamps changed, query key changed, ref ID differs under strict key mode, or query contains cache bypass marker | Enable `queryCacheEnabled`, increase `queryCacheTTLSeconds`, set `queryCacheTimeBucketSeconds` for relative ranges, use `queryCacheKeyMode=shared` only for ref-ID-independent queries, keep variables stable, and inspect `queryCacheStatus` diagnostics |

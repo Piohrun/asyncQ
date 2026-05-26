@@ -10,6 +10,8 @@ type Props = QueryEditorProps<DataSource, MyQuery, MyDataSourceOptions>;
 const sectionStyle: React.CSSProperties = { marginTop: 12 };
 const headingStyle: React.CSSProperties = { fontWeight: 500, marginBottom: 4 };
 const blockStyle: React.CSSProperties = { paddingBottom: 4 };
+const detailsStyle: React.CSSProperties = { marginTop: 6, marginBottom: 6 };
+const summaryStyle: React.CSSProperties = { cursor: 'pointer', fontWeight: 500, marginBottom: 6 };
 
 function QuerySection({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -128,6 +130,16 @@ export class QueryEditor extends PureComponent<Props> {
     onChange({ ...query, legacyAsyncPayloadPath: event.target.value });
   };
 
+  onLegacyAsyncQueuedValuesChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const { onChange, query } = this.props;
+    onChange({ ...query, legacyAsyncQueuedValues: event.target.value });
+  };
+
+  onLegacyAsyncRunningValuesChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const { onChange, query } = this.props;
+    onChange({ ...query, legacyAsyncRunningValues: event.target.value });
+  };
+
   onLegacyAsyncDoneValuesChange = (event: ChangeEvent<HTMLInputElement>) => {
     const { onChange, query } = this.props;
     onChange({ ...query, legacyAsyncDoneValues: event.target.value });
@@ -136,6 +148,11 @@ export class QueryEditor extends PureComponent<Props> {
   onLegacyAsyncErrorValuesChange = (event: ChangeEvent<HTMLInputElement>) => {
     const { onChange, query } = this.props;
     onChange({ ...query, legacyAsyncErrorValues: event.target.value });
+  };
+
+  onLegacyAsyncCancelledValuesChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const { onChange, query } = this.props;
+    onChange({ ...query, legacyAsyncCancelledValues: event.target.value });
   };
 
   onStreamNameChange = (event: ChangeEvent<HTMLInputElement>) => {
@@ -447,36 +464,50 @@ export class QueryEditor extends PureComponent<Props> {
             <option value="queryText">Original Query Text</option>
           </select>
         </div>
-        <InlineFieldRow>
-          <InlineField label="Job ID" labelWidth={13} tooltip="Submit/status envelope path that contains the job id.">
-            <Input width={16} value={query.legacyAsyncJobIDPath || ''} onChange={this.onLegacyAsyncJobIDPathChange} placeholder="jobId" />
-          </InlineField>
-          <InlineField label="Status" labelWidth={13} tooltip="Status envelope path.">
-            <Input width={16} value={query.legacyAsyncStatusPath || ''} onChange={this.onLegacyAsyncStatusPathChange} placeholder="status" />
-          </InlineField>
-          <InlineField label="Progress" labelWidth={13} tooltip="Optional numeric progress envelope path.">
-            <Input width={16} value={query.legacyAsyncProgressPath || ''} onChange={this.onLegacyAsyncProgressPathChange} placeholder="progress" />
-          </InlineField>
-        </InlineFieldRow>
-        <InlineFieldRow>
-          <InlineField label="Message" labelWidth={13} tooltip="Optional status message envelope path.">
-            <Input width={16} value={query.legacyAsyncMessagePath || ''} onChange={this.onLegacyAsyncMessagePathChange} placeholder="message" />
-          </InlineField>
-          <InlineField label="Error" labelWidth={13} tooltip="Optional q-side error envelope path.">
-            <Input width={16} value={query.legacyAsyncErrorPath || ''} onChange={this.onLegacyAsyncErrorPathChange} placeholder="error" />
-          </InlineField>
-          <InlineField label="Payload" labelWidth={13} tooltip="Result payload path in status or result envelopes. Raw table results can leave this at the default.">
-            <Input width={16} value={query.legacyAsyncPayloadPath || ''} onChange={this.onLegacyAsyncPayloadPathChange} placeholder="result" />
-          </InlineField>
-        </InlineFieldRow>
-        <InlineFieldRow>
-          <InlineField label="Done Values" labelWidth={13} tooltip="Comma-separated legacy statuses treated as done.">
-            <Input width={24} value={query.legacyAsyncDoneValues || ''} onChange={this.onLegacyAsyncDoneValuesChange} placeholder="done,complete,completed" />
-          </InlineField>
-          <InlineField label="Error Values" labelWidth={13} tooltip="Comma-separated legacy statuses treated as error.">
-            <Input width={24} value={query.legacyAsyncErrorValues || ''} onChange={this.onLegacyAsyncErrorValuesChange} placeholder="error,failed" />
-          </InlineField>
-        </InlineFieldRow>
+        <details style={detailsStyle}>
+          <summary style={summaryStyle}>Response mapping</summary>
+          <InlineFieldRow>
+            <InlineField label="Job ID" labelWidth={13} tooltip="Submit/status envelope path that contains the job id.">
+              <Input width={16} value={query.legacyAsyncJobIDPath || ''} onChange={this.onLegacyAsyncJobIDPathChange} placeholder="jobId" />
+            </InlineField>
+            <InlineField label="Status" labelWidth={13} tooltip="Status envelope path.">
+              <Input width={16} value={query.legacyAsyncStatusPath || ''} onChange={this.onLegacyAsyncStatusPathChange} placeholder="status" />
+            </InlineField>
+            <InlineField label="Progress" labelWidth={13} tooltip="Optional numeric progress envelope path.">
+              <Input width={16} value={query.legacyAsyncProgressPath || ''} onChange={this.onLegacyAsyncProgressPathChange} placeholder="progress" />
+            </InlineField>
+          </InlineFieldRow>
+          <InlineFieldRow>
+            <InlineField label="Message" labelWidth={13} tooltip="Optional status message envelope path.">
+              <Input width={16} value={query.legacyAsyncMessagePath || ''} onChange={this.onLegacyAsyncMessagePathChange} placeholder="message" />
+            </InlineField>
+            <InlineField label="Error" labelWidth={13} tooltip="Optional q-side error envelope path.">
+              <Input width={16} value={query.legacyAsyncErrorPath || ''} onChange={this.onLegacyAsyncErrorPathChange} placeholder="error" />
+            </InlineField>
+            <InlineField label="Payload" labelWidth={13} tooltip="Result payload path in status or result envelopes. Raw table results can leave this at the default.">
+              <Input width={16} value={query.legacyAsyncPayloadPath || ''} onChange={this.onLegacyAsyncPayloadPathChange} placeholder="result" />
+            </InlineField>
+          </InlineFieldRow>
+          <InlineFieldRow>
+            <InlineField label="Queued" labelWidth={13} tooltip="Comma-separated legacy statuses treated as queued.">
+              <Input width={24} value={query.legacyAsyncQueuedValues || ''} onChange={this.onLegacyAsyncQueuedValuesChange} placeholder="queued,pending" />
+            </InlineField>
+            <InlineField label="Running" labelWidth={13} tooltip="Comma-separated legacy statuses treated as running.">
+              <Input width={24} value={query.legacyAsyncRunningValues || ''} onChange={this.onLegacyAsyncRunningValuesChange} placeholder="running,executing" />
+            </InlineField>
+          </InlineFieldRow>
+          <InlineFieldRow>
+            <InlineField label="Done" labelWidth={13} tooltip="Comma-separated legacy statuses treated as done.">
+              <Input width={24} value={query.legacyAsyncDoneValues || ''} onChange={this.onLegacyAsyncDoneValuesChange} placeholder="done,complete,completed" />
+            </InlineField>
+            <InlineField label="Error" labelWidth={13} tooltip="Comma-separated legacy statuses treated as error.">
+              <Input width={24} value={query.legacyAsyncErrorValues || ''} onChange={this.onLegacyAsyncErrorValuesChange} placeholder="error,failed" />
+            </InlineField>
+            <InlineField label="Cancelled" labelWidth={13} tooltip="Comma-separated legacy statuses treated as cancelled.">
+              <Input width={24} value={query.legacyAsyncCancelledValues || ''} onChange={this.onLegacyAsyncCancelledValuesChange} placeholder="cancelled,canceled" />
+            </InlineField>
+          </InlineFieldRow>
+        </details>
       </QuerySection>
     );
   }

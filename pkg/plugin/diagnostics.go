@@ -177,6 +177,7 @@ func diagnosticFieldsMap(fields []interface{}) map[string]interface{} {
 func (d *KdbDatasource) appendDiagnosticAsyncStatus(fields []interface{}, status asyncQStatus) []interface{} {
 	fields = append(fields,
 		"status", status.Status,
+		"normalizedStatus", status.Status,
 		"progress", status.Progress,
 		"message", status.Message,
 		"errorText", status.Error,
@@ -186,6 +187,9 @@ func (d *KdbDatasource) appendDiagnosticAsyncStatus(fields []interface{}, status
 		"finished", status.Finished,
 		"resultType", status.ResultType,
 	)
+	if status.RawStatus != "" {
+		fields = append(fields, "rawStatus", status.RawStatus)
+	}
 	if status.StackTrace != "" {
 		fields = append(fields,
 			"qStackTraceHash", diagnosticHash(status.StackTrace),

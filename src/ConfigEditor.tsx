@@ -9,6 +9,8 @@ interface Props extends DataSourcePluginOptionsEditorProps<MyDataSourceOptions> 
 
 const sectionStyle: React.CSSProperties = { marginTop: 16 };
 const headingStyle: React.CSSProperties = { fontWeight: 500, marginBottom: 4 };
+const detailsStyle: React.CSSProperties = { marginTop: 6, marginBottom: 6 };
+const summaryStyle: React.CSSProperties = { cursor: 'pointer', fontWeight: 500, marginBottom: 6 };
 
 function ConfigSection({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -776,25 +778,28 @@ export class ConfigEditor extends PureComponent<Props> {
             <option value="queryText">Original Query Text</option>
           </select>
         </div>
-        <div className="gf-form">
-          <FormField name="LegacyAsyncJobIDPathInputField" label="Job ID Path" labelWidth={14} inputWidth={16} onChange={this.onLegacyAsyncJobIDPathChange} value={jsonData.legacyAsyncJobIDPath || ''} placeholder="jobId" />
-          <FormField name="LegacyAsyncStatusPathInputField" label="Status Path" labelWidth={14} inputWidth={16} onChange={this.onLegacyAsyncStatusPathChange} value={jsonData.legacyAsyncStatusPath || ''} placeholder="status" />
-          <FormField name="LegacyAsyncProgressPathInputField" label="Progress Path" labelWidth={14} inputWidth={16} onChange={this.onLegacyAsyncProgressPathChange} value={jsonData.legacyAsyncProgressPath || ''} placeholder="progress" />
-        </div>
-        <div className="gf-form">
-          <FormField name="LegacyAsyncMessagePathInputField" label="Message Path" labelWidth={14} inputWidth={16} onChange={this.onLegacyAsyncMessagePathChange} value={jsonData.legacyAsyncMessagePath || ''} placeholder="message" />
-          <FormField name="LegacyAsyncErrorPathInputField" label="Error Path" labelWidth={14} inputWidth={16} onChange={this.onLegacyAsyncErrorPathChange} value={jsonData.legacyAsyncErrorPath || ''} placeholder="error" />
-          <FormField name="LegacyAsyncPayloadPathInputField" label="Payload Path" labelWidth={14} inputWidth={16} onChange={this.onLegacyAsyncPayloadPathChange} value={jsonData.legacyAsyncPayloadPath || ''} placeholder="result" />
-        </div>
-        <div className="gf-form">
-          <FormField name="LegacyAsyncQueuedValuesInputField" label="Queued" labelWidth={14} inputWidth={20} onChange={this.onLegacyAsyncQueuedValuesChange} value={jsonData.legacyAsyncQueuedValues || ''} placeholder="queued,pending" />
-          <FormField name="LegacyAsyncRunningValuesInputField" label="Running" labelWidth={14} inputWidth={20} onChange={this.onLegacyAsyncRunningValuesChange} value={jsonData.legacyAsyncRunningValues || ''} placeholder="running,executing" />
-        </div>
-        <div className="gf-form">
-          <FormField name="LegacyAsyncDoneValuesInputField" label="Done" labelWidth={14} inputWidth={20} onChange={this.onLegacyAsyncDoneValuesChange} value={jsonData.legacyAsyncDoneValues || ''} placeholder="done,complete,completed" />
-          <FormField name="LegacyAsyncErrorValuesInputField" label="Error" labelWidth={14} inputWidth={20} onChange={this.onLegacyAsyncErrorValuesChange} value={jsonData.legacyAsyncErrorValues || ''} placeholder="error,failed" />
-          <FormField name="LegacyAsyncCancelledValuesInputField" label="Cancelled" labelWidth={14} inputWidth={20} onChange={this.onLegacyAsyncCancelledValuesChange} value={jsonData.legacyAsyncCancelledValues || ''} placeholder="cancelled,canceled" />
-        </div>
+        <details style={detailsStyle}>
+          <summary style={summaryStyle}>Response mapping</summary>
+          <div className="gf-form">
+            <FormField name="LegacyAsyncJobIDPathInputField" label="Job ID Path" labelWidth={14} inputWidth={16} onChange={this.onLegacyAsyncJobIDPathChange} value={jsonData.legacyAsyncJobIDPath || ''} placeholder="jobId" />
+            <FormField name="LegacyAsyncStatusPathInputField" label="Status Path" labelWidth={14} inputWidth={16} onChange={this.onLegacyAsyncStatusPathChange} value={jsonData.legacyAsyncStatusPath || ''} placeholder="status" />
+            <FormField name="LegacyAsyncProgressPathInputField" label="Progress Path" labelWidth={14} inputWidth={16} onChange={this.onLegacyAsyncProgressPathChange} value={jsonData.legacyAsyncProgressPath || ''} placeholder="progress" />
+          </div>
+          <div className="gf-form">
+            <FormField name="LegacyAsyncMessagePathInputField" label="Message Path" labelWidth={14} inputWidth={16} onChange={this.onLegacyAsyncMessagePathChange} value={jsonData.legacyAsyncMessagePath || ''} placeholder="message" />
+            <FormField name="LegacyAsyncErrorPathInputField" label="Error Path" labelWidth={14} inputWidth={16} onChange={this.onLegacyAsyncErrorPathChange} value={jsonData.legacyAsyncErrorPath || ''} placeholder="error" />
+            <FormField name="LegacyAsyncPayloadPathInputField" label="Payload Path" labelWidth={14} inputWidth={16} onChange={this.onLegacyAsyncPayloadPathChange} value={jsonData.legacyAsyncPayloadPath || ''} placeholder="result" />
+          </div>
+          <div className="gf-form">
+            <FormField name="LegacyAsyncQueuedValuesInputField" label="Queued" labelWidth={14} inputWidth={20} onChange={this.onLegacyAsyncQueuedValuesChange} value={jsonData.legacyAsyncQueuedValues || ''} placeholder="queued,pending" />
+            <FormField name="LegacyAsyncRunningValuesInputField" label="Running" labelWidth={14} inputWidth={20} onChange={this.onLegacyAsyncRunningValuesChange} value={jsonData.legacyAsyncRunningValues || ''} placeholder="running,executing" />
+          </div>
+          <div className="gf-form">
+            <FormField name="LegacyAsyncDoneValuesInputField" label="Done" labelWidth={14} inputWidth={20} onChange={this.onLegacyAsyncDoneValuesChange} value={jsonData.legacyAsyncDoneValues || ''} placeholder="done,complete,completed" />
+            <FormField name="LegacyAsyncErrorValuesInputField" label="Error" labelWidth={14} inputWidth={20} onChange={this.onLegacyAsyncErrorValuesChange} value={jsonData.legacyAsyncErrorValues || ''} placeholder="error,failed" />
+            <FormField name="LegacyAsyncCancelledValuesInputField" label="Cancelled" labelWidth={14} inputWidth={20} onChange={this.onLegacyAsyncCancelledValuesChange} value={jsonData.legacyAsyncCancelledValues || ''} placeholder="cancelled,canceled" />
+          </div>
+        </details>
       </ConfigSection>
     );
   }

@@ -71,6 +71,8 @@ For the compatibility matrix, detailed mappings, and examples, read [references/
    - Run the panel as `sync` first.
    - Check Grafana backend logs for connection, wrapper, parse, and result-shape errors.
    - For async, check job ID/status/result/cancel behavior in q.
+   - For `legacyAsync`, compare `rawStatus`, `normalizedStatus`, and `legacyAsyncStatusMapped` diagnostics before changing q or plugin code.
+   - Treat `Timeout (ms)` as the full async lifecycle budget, not just the initial submit call.
    - If the q process returns an error, reproduce the compiled query or request-function call in q with the same time range.
 
 ## Output Format

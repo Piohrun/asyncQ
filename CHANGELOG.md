@@ -1,8 +1,12 @@
 # Changelog
 
-## Unreleased
+## 1.0.5
 
 - Added `legacyAsync` execution mode for same-port legacy q gateway async protocols with configurable submit, status, result, cancel, response paths, request mode, and status value mappings.
+- Added total async timeout enforcement for helper async and legacy async submit/status/result flows, with best-effort cancel on timeout.
+- Added legacy async diagnostics for raw status, normalized status, and status-mapping matches.
+- Added live integration coverage that starts the demo q process and exercises the legacy async submit/status/result flow.
+- Tidied the legacy async datasource and panel editors by moving advanced response mapping into an expandable section.
 - Added demo q functions and a dashboard panel that exercise a legacy-shaped async protocol without calling the `.grafana.asyncq.async.*` helper contract directly.
 
 ## 1.0.4
