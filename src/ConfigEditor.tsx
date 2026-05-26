@@ -185,6 +185,16 @@ export class ConfigEditor extends PureComponent<Props> {
     }
   };
 
+  onQueryCacheStaleTTLChange = (event: ChangeEvent<HTMLInputElement>) => {
+    if (/^\d+$/.test(event.target.value) || event.target.value === '') {
+      this.updateJsonData({ queryCacheStaleTTLSeconds: event.target.value === '' ? undefined : parseInt(event.target.value, 10) });
+    }
+  };
+
+  onQueryCacheKeyModeChange = (event: ChangeEvent<HTMLSelectElement>) => {
+    this.updateJsonData({ queryCacheKeyMode: event.target.value as MyDataSourceOptions['queryCacheKeyMode'] });
+  };
+
   onTlsCertificateChange = (event: FormEvent<HTMLTextAreaElement>) => {
     const { onOptionsChange, options } = this.props;
     onOptionsChange({
@@ -449,6 +459,16 @@ export class ConfigEditor extends PureComponent<Props> {
             tooltip="How long a successful sync query result can be reused before the plugin asks kdb+ again."
           />
           <FormField
+            name="QueryCacheStaleTTLInputField"
+            label="Stale TTL (s)"
+            labelWidth={14}
+            inputWidth={12}
+            onChange={this.onQueryCacheStaleTTLChange}
+            value={jsonData.queryCacheStaleTTLSeconds ?? ''}
+            placeholder="0"
+            tooltip="Optional stale-while-revalidate window. Stale results return immediately while the backend refreshes the cache for the next query."
+          />
+          <FormField
             name="QueryCacheMaxEntriesInputField"
             label="Cache Entries"
             labelWidth={14}
@@ -460,6 +480,11 @@ export class ConfigEditor extends PureComponent<Props> {
           />
         </div>
         <div className="gf-form">
+          <span className="gf-form-label width-18">Cache Key</span>
+          <select className="gf-form-input width-14" value={jsonData.queryCacheKeyMode || 'strict'} onChange={this.onQueryCacheKeyModeChange}>
+            <option value="strict">Strict</option>
+            <option value="shared">Shared</option>
+          </select>
           <FormField
             name="QueryCacheTimeBucketInputField"
             label="Cache Time Bucket (s)"

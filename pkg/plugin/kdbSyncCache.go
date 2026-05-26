@@ -20,12 +20,22 @@ type syncQueryResult struct {
 	errorMessage string
 }
 
+type syncQueryCachePolicy struct {
+	enabled    bool
+	read       bool
+	store      bool
+	mode       string
+	keyMode    string
+	ttl        time.Duration
+	staleTTL   time.Duration
+	timeBucket time.Duration
+}
+
 type syncQueryCache struct {
 	mu         sync.Mutex
 	entries    map[string]*syncQueryCacheEntry
+	refreshing map[string]struct{}
 	maxEntries int
-	ttl        time.Duration
-	timeBucket time.Duration
 	group      singleflight.Group
 }
 
@@ -40,13 +50,14 @@ type syncQueryCacheLookup struct {
 	frames []*data.Frame
 	age    time.Duration
 	key    string
+	stale  bool
 }
 
 type syncQueryCacheKeyPayload struct {
 	OrgID           int64              `json:"orgID"`
 	User            syncQueryCacheUser `json:"user"`
 	Datasource      syncQueryCacheDS   `json:"datasource"`
-	RefID           string             `json:"refID"`
+	RefID           string             `json:"refID,omitempty"`
 	QueryType       string             `json:"queryType"`
 	MaxDataPoints   int64              `json:"maxDataPoints"`
 	IntervalNs      int64              `json:"intervalNs"`
@@ -62,6 +73,7 @@ type syncQueryCacheKeyPayload struct {
 	IncludeKeys     bool               `json:"includeKeys"`
 	PanoWrapper     string             `json:"panoWrapper"`
 	PanoRequestFunc string             `json:"panoRequestFunc"`
+	CacheKeyMode    string             `json:"cacheKeyMode"`
 }
 
 type syncQueryCacheUser struct {
@@ -80,17 +92,19 @@ type syncQueryCacheDS struct {
 }
 
 func (d *KdbDatasource) runSyncQueryWithCache(pCtx backend.PluginContext, query backend.DataQuery, model QueryModel, fields []interface{}) (syncQueryResult, error) {
-	cache := d.syncQueryCache()
+	policy := d.syncQueryCachePolicy(model)
+	cache := d.syncQueryCache(policy)
 	if cache == nil {
-		return d.runSyncQueryUncached(pCtx, query, model, appendSyncQueryCacheDiagnosticFields(fields, false, "disabled", "", 0, false, false))
-	}
-	if syncQueryCacheBypassed(model) {
-		return d.runSyncQueryUncached(pCtx, query, model, appendSyncQueryCacheDiagnosticFields(fields, false, "bypassed", "", 0, false, false))
+		status := "disabled"
+		if policy.mode == QueryCacheModeBypass {
+			status = "bypassed"
+		}
+		return d.runSyncQueryUncached(pCtx, query, model, appendSyncQueryCacheDiagnosticFields(fields, policy, status, "", 0, false, false, false))
 	}
 
-	cacheKey, err := syncQueryCacheKey(pCtx, query, model, cache.timeBucket)
+	cacheKey, err := syncQueryCacheKey(pCtx, query, model, policy)
 	if err != nil {
-		cacheFields := appendSyncQueryCacheDiagnosticFields(fields, true, "key-error", "", 0, false, false)
+		cacheFields := appendSyncQueryCacheDiagnosticFields(fields, policy, "key-error", "", 0, false, false, false)
 		result, runErr := d.runSyncQueryUncached(pCtx, query, model, cacheFields)
 		if runErr != nil {
 			return result, runErr
@@ -100,30 +114,47 @@ func (d *KdbDatasource) runSyncQueryWithCache(pCtx backend.PluginContext, query 
 		return result, nil
 	}
 
-	if hit, ok := cache.get(cacheKey, query.RefID); ok {
-		cacheFields := appendSyncQueryCacheDiagnosticFields(fields, true, "hit", cacheKey, hit.age, false, false)
-		d.logDiagnostics("sync query cache hit", cacheFields...)
-		return syncQueryResult{frames: hit.frames, fields: cacheFields}, nil
+	if policy.read {
+		if hit, ok := cache.get(cacheKey, query.RefID, policy); ok {
+			status := "hit"
+			refreshStarted := false
+			if hit.stale {
+				status = "stale"
+				refreshStarted = d.refreshSyncQueryCache(cache, pCtx, query, model, policy, cacheKey, fields)
+			}
+			cacheFields := appendSyncQueryCacheDiagnosticFields(fields, policy, status, cacheKey, hit.age, false, false, refreshStarted)
+			d.logDiagnostics("sync query cache "+status, cacheFields...)
+			return syncQueryResult{frames: hit.frames, fields: cacheFields}, nil
+		}
 	}
 
 	value, err, shared := cache.group.Do(cacheKey, func() (interface{}, error) {
-		if hit, ok := cache.get(cacheKey, query.RefID); ok {
-			return syncQueryCacheLookup{frames: hit.frames, age: hit.age, key: cacheKey}, nil
+		if policy.read {
+			if hit, ok := cache.get(cacheKey, query.RefID, policy); ok {
+				return hit, nil
+			}
 		}
-		result, err := d.runSyncQueryUncached(pCtx, query, model, appendSyncQueryCacheDiagnosticFields(fields, true, "miss", cacheKey, 0, false, false))
+
+		status := "miss"
+		if !policy.read {
+			status = "refresh"
+		}
+		result, err := d.runSyncQueryUncached(pCtx, query, model, appendSyncQueryCacheDiagnosticFields(fields, policy, status, cacheKey, 0, false, false, false))
 		if err != nil {
 			return result, err
 		}
-		cache.put(cacheKey, result.frames, query.RefID)
-		result.frames = cloneFramesForRefID(result.frames, query.RefID, query.RefID)
-		result.fields = appendSyncQueryCacheDiagnosticFields(result.fields, true, "stored", cacheKey, 0, false, true)
+		if policy.store {
+			cache.put(cacheKey, result.frames, query.RefID)
+			result.frames = cloneFramesForRefID(result.frames, query.RefID, query.RefID)
+			result.fields = appendSyncQueryCacheDiagnosticFields(result.fields, policy, "stored", cacheKey, 0, false, true, false)
+		}
 		return result, nil
 	})
 	if err != nil {
 		if result, ok := value.(syncQueryResult); ok {
 			return result, err
 		}
-		return syncQueryResult{fields: appendSyncQueryCacheDiagnosticFields(fields, true, "miss", cacheKey, 0, shared, false), errorMessage: "sync query failed"}, err
+		return syncQueryResult{fields: appendSyncQueryCacheDiagnosticFields(fields, policy, "miss", cacheKey, 0, shared, false, false), errorMessage: "sync query failed"}, err
 	}
 
 	switch result := value.(type) {
@@ -132,11 +163,18 @@ func (d *KdbDatasource) runSyncQueryWithCache(pCtx backend.PluginContext, query 
 		if shared {
 			frames = cloneFramesForRefID(frames, query.RefID, query.RefID)
 		}
-		cacheFields := appendSyncQueryCacheDiagnosticFields(fields, true, "hit", cacheKey, result.age, shared, false)
-		d.logDiagnostics("sync query cache hit", cacheFields...)
+		status := "hit"
+		refreshStarted := false
+		if result.stale {
+			status = "stale"
+			refreshStarted = d.refreshSyncQueryCache(cache, pCtx, query, model, policy, cacheKey, fields)
+		}
+		cacheFields := appendSyncQueryCacheDiagnosticFields(fields, policy, status, cacheKey, result.age, shared, false, refreshStarted)
+		d.logDiagnostics("sync query cache "+status, cacheFields...)
 		return syncQueryResult{frames: frames, fields: cacheFields}, nil
 	case syncQueryResult:
 		if shared {
+			result.fields = cloneDiagnosticFields(result.fields)
 			result.fields = append(result.fields, "queryCacheShared", true)
 			result.frames = cloneFramesForRefID(result.frames, query.RefID, query.RefID)
 		}
@@ -144,6 +182,39 @@ func (d *KdbDatasource) runSyncQueryWithCache(pCtx backend.PluginContext, query 
 	default:
 		return syncQueryResult{fields: fields, errorMessage: "sync query failed"}, fmt.Errorf("unexpected sync query cache result type %T", value)
 	}
+}
+
+func (d *KdbDatasource) refreshSyncQueryCache(cache *syncQueryCache, pCtx backend.PluginContext, query backend.DataQuery, model QueryModel, policy syncQueryCachePolicy, cacheKey string, fields []interface{}) bool {
+	if !policy.store || !cache.startRefresh(cacheKey) {
+		return false
+	}
+
+	go func() {
+		defer cache.finishRefresh(cacheKey)
+		refreshFields := cloneDiagnosticFields(fields)
+		value, err, _ := cache.group.Do(cacheKey, func() (interface{}, error) {
+			result, runErr := d.runSyncQueryUncached(pCtx, query, model, appendSyncQueryCacheDiagnosticFields(refreshFields, policy, "refresh", cacheKey, 0, false, false, false))
+			if runErr != nil {
+				return result, runErr
+			}
+			cache.put(cacheKey, result.frames, query.RefID)
+			result.frames = cloneFramesForRefID(result.frames, query.RefID, query.RefID)
+			result.fields = appendSyncQueryCacheDiagnosticFields(result.fields, policy, "stored", cacheKey, 0, false, true, false)
+			return result, nil
+		})
+		if err != nil {
+			if result, ok := value.(syncQueryResult); ok {
+				d.logDiagnosticError("sync query cache refresh failed", appendDiagnosticError(result.fields, err)...)
+				return
+			}
+			d.logDiagnosticError("sync query cache refresh failed", appendDiagnosticError(appendSyncQueryCacheDiagnosticFields(refreshFields, policy, "refresh", cacheKey, 0, false, false, false), err)...)
+			return
+		}
+		if result, ok := value.(syncQueryResult); ok {
+			d.logDiagnostics("sync query cache refreshed", appendDiagnosticFrames(result.fields, result.frames)...)
+		}
+	}()
+	return true
 }
 
 func (d *KdbDatasource) runSyncQueryUncached(pCtx backend.PluginContext, query backend.DataQuery, model QueryModel, fields []interface{}) (syncQueryResult, error) {
@@ -160,22 +231,76 @@ func (d *KdbDatasource) runSyncQueryUncached(pCtx backend.PluginContext, query b
 	return syncQueryResult{frames: frames, fields: fields}, nil
 }
 
-func (d *KdbDatasource) syncQueryCache() *syncQueryCache {
+func (d *KdbDatasource) syncQueryCachePolicy(model QueryModel) syncQueryCachePolicy {
 	d.normalizeDatasourceDefaults()
-	if !d.QueryCacheEnabled {
+
+	mode := normalizeSyncQueryCacheMode(model.QueryCacheMode)
+	if directive := syncQueryCacheDirective(model); directive != "" {
+		mode = directive
+	}
+
+	enabled := d.QueryCacheEnabled
+	read := true
+	store := true
+	switch mode {
+	case QueryCacheModeEnabled:
+		enabled = true
+	case QueryCacheModeDisabled:
+		enabled = false
+		store = false
+	case QueryCacheModeBypass:
+		enabled = false
+		read = false
+		store = false
+	case QueryCacheModeRefresh:
+		enabled = true
+		read = false
+	default:
+		mode = QueryCacheModeDefault
+	}
+
+	ttlSeconds := queryCacheIntOverride(model.QueryCacheTTLSeconds, d.QueryCacheTTLSeconds)
+	if ttlSeconds < 1 {
+		ttlSeconds = defaultQueryCacheTTL
+	}
+	staleSeconds := queryCacheIntOverride(model.QueryCacheStaleTTLSeconds, d.QueryCacheStaleTTLSeconds)
+	if staleSeconds < 0 {
+		staleSeconds = defaultQueryCacheStaleTTL
+	}
+	timeBucketSeconds := queryCacheIntOverride(model.QueryCacheTimeBucketSeconds, d.QueryCacheTimeBucketSeconds)
+	if timeBucketSeconds < 0 {
+		timeBucketSeconds = defaultQueryCacheTimeBucket
+	}
+
+	keyMode := d.QueryCacheKeyMode
+	if normalized := normalizeSyncQueryCacheKeyMode(model.QueryCacheKeyMode); normalized != "" {
+		keyMode = normalized
+	}
+
+	return syncQueryCachePolicy{
+		enabled:    enabled,
+		read:       read,
+		store:      store,
+		mode:       mode,
+		keyMode:    keyMode,
+		ttl:        time.Duration(ttlSeconds) * time.Second,
+		staleTTL:   time.Duration(staleSeconds) * time.Second,
+		timeBucket: time.Duration(timeBucketSeconds) * time.Second,
+	}
+}
+
+func (d *KdbDatasource) syncQueryCache(policy syncQueryCachePolicy) *syncQueryCache {
+	if !policy.enabled {
 		return nil
 	}
 
 	d.queryCacheMu.Lock()
 	defer d.queryCacheMu.Unlock()
-	ttl := time.Duration(d.QueryCacheTTLSeconds) * time.Second
-	timeBucket := time.Duration(d.QueryCacheTimeBucketSeconds) * time.Second
-	if d.queryCache == nil || d.queryCache.maxEntries != d.QueryCacheMaxEntries || d.queryCache.ttl != ttl || d.queryCache.timeBucket != timeBucket {
+	if d.queryCache == nil || d.queryCache.maxEntries != d.QueryCacheMaxEntries {
 		d.queryCache = &syncQueryCache{
 			entries:    make(map[string]*syncQueryCacheEntry),
+			refreshing: make(map[string]struct{}),
 			maxEntries: d.QueryCacheMaxEntries,
-			ttl:        ttl,
-			timeBucket: timeBucket,
 		}
 	}
 	return d.queryCache
@@ -191,7 +316,7 @@ func (d *KdbDatasource) closeSyncQueryCache() {
 	}
 }
 
-func (c *syncQueryCache) get(key string, refID string) (syncQueryCacheLookup, bool) {
+func (c *syncQueryCache) get(key string, refID string, policy syncQueryCachePolicy) (syncQueryCacheLookup, bool) {
 	now := time.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -200,15 +325,21 @@ func (c *syncQueryCache) get(key string, refID string) (syncQueryCacheLookup, bo
 	if !ok {
 		return syncQueryCacheLookup{}, false
 	}
-	if now.Sub(entry.createdAt) > c.ttl {
-		delete(c.entries, key)
-		return syncQueryCacheLookup{}, false
+	age := now.Sub(entry.createdAt)
+	stale := false
+	if age > policy.ttl {
+		if policy.staleTTL <= 0 || age > policy.ttl+policy.staleTTL {
+			delete(c.entries, key)
+			return syncQueryCacheLookup{}, false
+		}
+		stale = true
 	}
 	entry.lastAccess = now
 	return syncQueryCacheLookup{
 		frames: cloneFramesForRefID(entry.frames, entry.refID, refID),
-		age:    now.Sub(entry.createdAt),
+		age:    age,
 		key:    key,
+		stale:  stale,
 	}, true
 }
 
@@ -230,6 +361,26 @@ func (c *syncQueryCache) clear() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.entries = make(map[string]*syncQueryCacheEntry)
+	c.refreshing = make(map[string]struct{})
+}
+
+func (c *syncQueryCache) startRefresh(key string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.refreshing == nil {
+		c.refreshing = make(map[string]struct{})
+	}
+	if _, ok := c.refreshing[key]; ok {
+		return false
+	}
+	c.refreshing[key] = struct{}{}
+	return true
+}
+
+func (c *syncQueryCache) finishRefresh(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.refreshing, key)
 }
 
 func (c *syncQueryCache) evictLocked() {
@@ -248,23 +399,22 @@ func (c *syncQueryCache) evictLocked() {
 	}
 }
 
-func syncQueryCacheKey(pCtx backend.PluginContext, query backend.DataQuery, model QueryModel, timeBucket time.Duration) (string, error) {
+func syncQueryCacheKey(pCtx backend.PluginContext, query backend.DataQuery, model QueryModel, policy syncQueryCachePolicy) (string, error) {
 	originalQuery := model.OriginalQueryText
 	if originalQuery == "" {
 		originalQuery = model.QueryText
 	}
 	timeBucketSeconds := int64(0)
-	if timeBucket > 0 {
-		timeBucketSeconds = int64(timeBucket / time.Second)
+	if policy.timeBucket > 0 {
+		timeBucketSeconds = int64(policy.timeBucket / time.Second)
 	}
 	payload := syncQueryCacheKeyPayload{
 		OrgID:           pCtx.OrgID,
-		RefID:           query.RefID,
 		QueryType:       query.QueryType,
 		MaxDataPoints:   query.MaxDataPoints,
 		IntervalNs:      int64(query.Interval),
-		TimeFrom:        syncQueryCacheTime(query.TimeRange.From, timeBucket),
-		TimeTo:          syncQueryCacheTime(query.TimeRange.To, timeBucket),
+		TimeFrom:        syncQueryCacheTime(query.TimeRange.From, policy.timeBucket),
+		TimeTo:          syncQueryCacheTime(query.TimeRange.To, policy.timeBucket),
 		TimeBucketSec:   timeBucketSeconds,
 		QueryText:       model.QueryText,
 		OriginalQuery:   originalQuery,
@@ -275,6 +425,10 @@ func syncQueryCacheKey(pCtx backend.PluginContext, query backend.DataQuery, mode
 		IncludeKeys:     model.IncludeKeyColumns,
 		PanoWrapper:     model.PanopticonQueryWrapper,
 		PanoRequestFunc: model.PanopticonRequestFunction,
+		CacheKeyMode:    policy.keyMode,
+	}
+	if policy.keyMode == QueryCacheKeyModeStrict {
+		payload.RefID = query.RefID
 	}
 	if pCtx.User != nil {
 		payload.User = syncQueryCacheUser{
@@ -301,11 +455,55 @@ func syncQueryCacheKey(pCtx backend.PluginContext, query backend.DataQuery, mode
 	return hex.EncodeToString(hash[:]), nil
 }
 
-func syncQueryCacheBypassed(model QueryModel) bool {
-	return strings.Contains(model.QueryText, "asyncq:cache=off") ||
-		strings.Contains(model.QueryText, "asyncq:cache=bypass") ||
-		strings.Contains(model.OriginalQueryText, "asyncq:cache=off") ||
-		strings.Contains(model.OriginalQueryText, "asyncq:cache=bypass")
+func syncQueryCacheDirective(model QueryModel) string {
+	text := model.QueryText + "\n" + model.OriginalQueryText
+	if strings.Contains(text, "asyncq:cache=off") || strings.Contains(text, "asyncq:cache=bypass") {
+		return QueryCacheModeBypass
+	}
+	if strings.Contains(text, "asyncq:cache=refresh") {
+		return QueryCacheModeRefresh
+	}
+	if strings.Contains(text, "asyncq:cache=on") || strings.Contains(text, "asyncq:cache=enabled") {
+		return QueryCacheModeEnabled
+	}
+	return ""
+}
+
+func normalizeSyncQueryCacheMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", QueryCacheModeDefault:
+		return QueryCacheModeDefault
+	case QueryCacheModeEnabled, "on", "true":
+		return QueryCacheModeEnabled
+	case QueryCacheModeDisabled, "off", "false":
+		return QueryCacheModeDisabled
+	case QueryCacheModeBypass:
+		return QueryCacheModeBypass
+	case QueryCacheModeRefresh:
+		return QueryCacheModeRefresh
+	default:
+		return QueryCacheModeDefault
+	}
+}
+
+func normalizeSyncQueryCacheKeyMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", QueryCacheModeDefault:
+		return ""
+	case QueryCacheKeyModeStrict:
+		return QueryCacheKeyModeStrict
+	case QueryCacheKeyModeShared:
+		return QueryCacheKeyModeShared
+	default:
+		return ""
+	}
+}
+
+func queryCacheIntOverride(value *int, fallback int) int {
+	if value == nil {
+		return fallback
+	}
+	return *value
 }
 
 func syncQueryCacheTime(t time.Time, bucket time.Duration) string {
@@ -318,10 +516,15 @@ func syncQueryCacheTime(t time.Time, bucket time.Duration) string {
 	return t.UTC().Truncate(bucket).Format(time.RFC3339Nano)
 }
 
-func appendSyncQueryCacheDiagnosticFields(fields []interface{}, enabled bool, status string, key string, age time.Duration, shared bool, stored bool) []interface{} {
+func appendSyncQueryCacheDiagnosticFields(fields []interface{}, policy syncQueryCachePolicy, status string, key string, age time.Duration, shared bool, stored bool, refreshStarted bool) []interface{} {
 	fields = append(fields,
-		"queryCacheEnabled", enabled,
+		"queryCacheEnabled", policy.enabled,
+		"queryCacheMode", policy.mode,
+		"queryCacheKeyMode", policy.keyMode,
 		"queryCacheStatus", status,
+		"queryCacheTTLSeconds", int64(policy.ttl/time.Second),
+		"queryCacheStaleTTLSeconds", int64(policy.staleTTL/time.Second),
+		"queryCacheTimeBucketSeconds", int64(policy.timeBucket/time.Second),
 	)
 	if key != "" {
 		fields = append(fields, "queryCacheKey", diagnosticIDPart(key))
@@ -335,7 +538,16 @@ func appendSyncQueryCacheDiagnosticFields(fields []interface{}, enabled bool, st
 	if stored {
 		fields = append(fields, "queryCacheStored", stored)
 	}
+	if refreshStarted {
+		fields = append(fields, "queryCacheRefreshStarted", refreshStarted)
+	}
 	return fields
+}
+
+func cloneDiagnosticFields(fields []interface{}) []interface{} {
+	cloned := make([]interface{}, len(fields))
+	copy(cloned, fields)
+	return cloned
 }
 
 func cloneFramesForRefID(frames []*data.Frame, storedRefID string, refID string) []*data.Frame {

@@ -2,6 +2,8 @@ import { DataQuery, DataSourceJsonData } from '@grafana/data';
 
 export type ExecutionMode = 'sync' | 'async' | 'pluginAsync' | 'deferredAsync' | 'stream';
 export type CompatibilityMode = 'native' | 'aquaq' | 'panopticon';
+export type QueryCacheMode = 'default' | 'enabled' | 'disabled' | 'bypass' | 'refresh';
+export type QueryCacheKeyMode = 'default' | 'strict' | 'shared';
 
 export interface MyQuery extends DataQuery {
   queryText?: string;
@@ -18,6 +20,11 @@ export interface MyQuery extends DataQuery {
   pollIntervalMs?: number;
   maxStreamRows?: number;
   streamRetentionMs?: number;
+  queryCacheMode?: QueryCacheMode;
+  queryCacheKeyMode?: QueryCacheKeyMode;
+  queryCacheTTLSeconds?: number;
+  queryCacheStaleTTLSeconds?: number;
+  queryCacheTimeBucketSeconds?: number;
 }
 
 /**
@@ -43,6 +50,8 @@ export interface MyDataSourceOptions extends DataSourceJsonData {
   queryCacheTTLSeconds?: number;
   queryCacheMaxEntries?: number;
   queryCacheTimeBucketSeconds?: number;
+  queryCacheStaleTTLSeconds?: number;
+  queryCacheKeyMode?: 'strict' | 'shared';
   diagnosticsEnabled?: boolean;
   diagnosticsLogQueryText?: boolean;
 }
@@ -60,6 +69,8 @@ export const defaultConfig: Partial<MyDataSourceOptions> = {
   queryCacheTTLSeconds: 60,
   queryCacheMaxEntries: 128,
   queryCacheTimeBucketSeconds: 0,
+  queryCacheStaleTTLSeconds: 0,
+  queryCacheKeyMode: 'strict',
   diagnosticsEnabled: false,
   diagnosticsLogQueryText: false,
 };

@@ -99,6 +99,37 @@ export class QueryEditor extends PureComponent<Props> {
     }
   };
 
+  onQueryCacheModeChange = (event: ChangeEvent<HTMLSelectElement>) => {
+    const { onChange, query } = this.props;
+    onChange({ ...query, queryCacheMode: event.target.value as MyQuery['queryCacheMode'] });
+  };
+
+  onQueryCacheKeyModeChange = (event: ChangeEvent<HTMLSelectElement>) => {
+    const { onChange, query } = this.props;
+    onChange({ ...query, queryCacheKeyMode: event.target.value as MyQuery['queryCacheKeyMode'] });
+  };
+
+  onQueryCacheTTLChange = (event: ChangeEvent<HTMLInputElement>) => {
+    if (/^\d+$/.test(event.target.value) || event.target.value === '') {
+      const { onChange, query } = this.props;
+      onChange({ ...query, queryCacheTTLSeconds: event.target.value === '' ? undefined : parseInt(event.target.value, 10) });
+    }
+  };
+
+  onQueryCacheStaleTTLChange = (event: ChangeEvent<HTMLInputElement>) => {
+    if (/^\d+$/.test(event.target.value) || event.target.value === '') {
+      const { onChange, query } = this.props;
+      onChange({ ...query, queryCacheStaleTTLSeconds: event.target.value === '' ? undefined : parseInt(event.target.value, 10) });
+    }
+  };
+
+  onQueryCacheTimeBucketChange = (event: ChangeEvent<HTMLInputElement>) => {
+    if (/^\d+$/.test(event.target.value) || event.target.value === '') {
+      const { onChange, query } = this.props;
+      onChange({ ...query, queryCacheTimeBucketSeconds: event.target.value === '' ? undefined : parseInt(event.target.value, 10) });
+    }
+  };
+
   renderExecutionFields(mode: MyQuery['executionMode'], compat: MyQuery['compatibilityMode']) {
     return (
       <QuerySection title="Execution">
@@ -209,6 +240,50 @@ export class QueryEditor extends PureComponent<Props> {
     );
   }
 
+  renderCacheFields(
+    mode: MyQuery['executionMode'],
+    queryCacheMode?: MyQuery['queryCacheMode'],
+    queryCacheKeyMode?: MyQuery['queryCacheKeyMode'],
+    queryCacheTTLSeconds?: number,
+    queryCacheStaleTTLSeconds?: number,
+    queryCacheTimeBucketSeconds?: number
+  ) {
+    if (mode !== 'sync') {
+      return null;
+    }
+    return (
+      <QuerySection title="Cache">
+        <div className="gf-form" style={blockStyle}>
+          <span className="gf-form-label width-13">Mode</span>
+          <select className="gf-form-input width-18" value={queryCacheMode || 'default'} onChange={this.onQueryCacheModeChange}>
+            <option value="default">Datasource Default</option>
+            <option value="enabled">Enabled</option>
+            <option value="disabled">Disabled</option>
+            <option value="bypass">Bypass</option>
+            <option value="refresh">Refresh</option>
+          </select>
+          <span className="gf-form-label width-13">Key</span>
+          <select className="gf-form-input width-18" value={queryCacheKeyMode || 'default'} onChange={this.onQueryCacheKeyModeChange}>
+            <option value="default">Datasource Default</option>
+            <option value="strict">Strict</option>
+            <option value="shared">Shared</option>
+          </select>
+        </div>
+        <InlineFieldRow>
+          <InlineField label="TTL (s)" labelWidth={13} tooltip="Optional per-query cache TTL. Blank uses the datasource cache TTL.">
+            <Input width={15} value={queryCacheTTLSeconds ?? ''} onChange={this.onQueryCacheTTLChange} placeholder="default" />
+          </InlineField>
+          <InlineField label="Stale TTL (s)" labelWidth={13} tooltip="Optional stale-while-revalidate window. Stale results are returned immediately while the backend refreshes the cache for the next query.">
+            <Input width={15} value={queryCacheStaleTTLSeconds ?? ''} onChange={this.onQueryCacheStaleTTLChange} placeholder="default" />
+          </InlineField>
+          <InlineField label="Bucket (s)" labelWidth={13} tooltip="Optional per-query time range bucket. Use 0 for exact time ranges.">
+            <Input width={15} value={queryCacheTimeBucketSeconds ?? ''} onChange={this.onQueryCacheTimeBucketChange} placeholder="default" />
+          </InlineField>
+        </InlineFieldRow>
+      </QuerySection>
+    );
+  }
+
   renderPanopticonFields(compat: MyQuery['compatibilityMode'], panopticonQueryWrapper?: string, panopticonRequestFunction?: string) {
     if (compat !== 'panopticon') {
       return null;
@@ -294,6 +369,11 @@ export class QueryEditor extends PureComponent<Props> {
       pollIntervalMs,
       maxStreamRows,
       streamRetentionMs,
+      queryCacheMode,
+      queryCacheKeyMode,
+      queryCacheTTLSeconds,
+      queryCacheStaleTTLSeconds,
+      queryCacheTimeBucketSeconds,
     } = query;
     const mode = executionMode || 'sync';
     const compat = compatibilityMode || 'native';
@@ -302,6 +382,7 @@ export class QueryEditor extends PureComponent<Props> {
       <>
         {this.renderExecutionFields(mode, compat)}
         {this.renderQueryText(queryText)}
+        {this.renderCacheFields(mode, queryCacheMode, queryCacheKeyMode, queryCacheTTLSeconds, queryCacheStaleTTLSeconds, queryCacheTimeBucketSeconds)}
         {this.renderDeferredFields(mode, deferredQueryWrapper)}
         {mode === 'stream' && this.renderStreamFields(streamName, maxStreamRows, streamRetentionMs)}
         {this.renderPanopticonFields(compat, panopticonQueryWrapper, panopticonRequestFunction)}

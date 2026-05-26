@@ -36,7 +36,7 @@ The local starter downloads Grafana OSS `13.0.1` into `demo/runtime/` on first r
 
 The demo datasource enables safe backend diagnostics by default. Grafana logs include request IDs, ref IDs, query hashes, q worker/result metadata, frame schemas, async job or stream IDs, and errors. Raw query text and q stack trace logging stays disabled.
 
-The provisioned datasource sets `syncMaxConnections: 4`, so multiple sync panels can exercise the per-datasource kdb+ connection pool. Lower this to `1` in `demo/grafana/provisioning/datasources/asyncq.yml` if you want to compare the original serial sync behavior. Query caching is provisioned but disabled; set `queryCacheEnabled: true` in the same file to test warm dashboard reloads with a 60-second sync result TTL. For relative `now` ranges, also set `queryCacheTimeBucketSeconds: 60` if you want near-identical reloads to share cached results.
+The provisioned datasource sets `syncMaxConnections: 4`, so multiple sync panels can exercise the per-datasource kdb+ connection pool. Lower this to `1` in `demo/grafana/provisioning/datasources/asyncq.yml` if you want to compare the original serial sync behavior. Query caching is provisioned but disabled; set `queryCacheEnabled: true` in the same file to test warm dashboard reloads with a 60-second sync result TTL. For relative `now` ranges, also set `queryCacheTimeBucketSeconds: 60` if you want near-identical reloads to share cached results. Set `queryCacheStaleTTLSeconds` to return stale data immediately while the backend refreshes the cache for the next query.
 
 ## Start with Docker
 

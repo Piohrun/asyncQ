@@ -31,6 +31,15 @@ const (
 	CompatibilityModeAquaQ      = "aquaq"
 	CompatibilityModePanopticon = "panopticon"
 
+	QueryCacheModeDefault  = "default"
+	QueryCacheModeEnabled  = "enabled"
+	QueryCacheModeDisabled = "disabled"
+	QueryCacheModeBypass   = "bypass"
+	QueryCacheModeRefresh  = "refresh"
+
+	QueryCacheKeyModeStrict = "strict"
+	QueryCacheKeyModeShared = "shared"
+
 	defaultQueryTimeout         = 10000
 	defaultPollIntervalMs       = 1000
 	defaultMaxStreamRows        = 1000
@@ -39,6 +48,7 @@ const (
 	defaultQueryCacheTTL        = 60
 	defaultQueryCacheMax        = 128
 	defaultQueryCacheTimeBucket = 0
+	defaultQueryCacheStaleTTL   = 0
 	asyncQHelperUnavailable     = "async/stream queries require q/asyncq_grafana.q to be loaded in the target kdb+ process or gateway"
 )
 
@@ -50,21 +60,26 @@ var (
 )
 
 type QueryModel struct {
-	QueryText                 string `json:"queryText"`
-	Timeout                   int    `json:"timeOut"`
-	UseTimeColumn             bool   `json:"useTimeColumn"`
-	TimeColumn                string `json:"timeColumn"`
-	IncludeKeyColumns         bool   `json:"includeKeyColumns"`
-	ExecutionMode             string `json:"executionMode,omitempty"`
-	CompatibilityMode         string `json:"compatibilityMode,omitempty"`
-	DeferredQueryWrapper      string `json:"deferredQueryWrapper,omitempty"`
-	PanopticonQueryWrapper    string `json:"panopticonQueryWrapper,omitempty"`
-	PanopticonRequestFunction string `json:"panopticonRequestFunction,omitempty"`
-	StreamName                string `json:"streamName,omitempty"`
-	PollIntervalMs            int    `json:"pollIntervalMs,omitempty"`
-	MaxStreamRows             int    `json:"maxStreamRows,omitempty"`
-	StreamRetentionMs         int    `json:"streamRetentionMs,omitempty"`
-	OriginalQueryText         string `json:"-"`
+	QueryText                   string `json:"queryText"`
+	Timeout                     int    `json:"timeOut"`
+	UseTimeColumn               bool   `json:"useTimeColumn"`
+	TimeColumn                  string `json:"timeColumn"`
+	IncludeKeyColumns           bool   `json:"includeKeyColumns"`
+	ExecutionMode               string `json:"executionMode,omitempty"`
+	CompatibilityMode           string `json:"compatibilityMode,omitempty"`
+	DeferredQueryWrapper        string `json:"deferredQueryWrapper,omitempty"`
+	PanopticonQueryWrapper      string `json:"panopticonQueryWrapper,omitempty"`
+	PanopticonRequestFunction   string `json:"panopticonRequestFunction,omitempty"`
+	StreamName                  string `json:"streamName,omitempty"`
+	PollIntervalMs              int    `json:"pollIntervalMs,omitempty"`
+	MaxStreamRows               int    `json:"maxStreamRows,omitempty"`
+	StreamRetentionMs           int    `json:"streamRetentionMs,omitempty"`
+	QueryCacheMode              string `json:"queryCacheMode,omitempty"`
+	QueryCacheKeyMode           string `json:"queryCacheKeyMode,omitempty"`
+	QueryCacheTTLSeconds        *int   `json:"queryCacheTTLSeconds,omitempty"`
+	QueryCacheStaleTTLSeconds   *int   `json:"queryCacheStaleTTLSeconds,omitempty"`
+	QueryCacheTimeBucketSeconds *int   `json:"queryCacheTimeBucketSeconds,omitempty"`
+	OriginalQueryText           string `json:"-"`
 }
 
 type kdbSyncQuery struct {
@@ -105,6 +120,8 @@ type KdbDatasource struct {
 	QueryCacheTTLSeconds        int    `json:"queryCacheTTLSeconds,omitempty"`
 	QueryCacheMaxEntries        int    `json:"queryCacheMaxEntries,omitempty"`
 	QueryCacheTimeBucketSeconds int    `json:"queryCacheTimeBucketSeconds,omitempty"`
+	QueryCacheStaleTTLSeconds   int    `json:"queryCacheStaleTTLSeconds,omitempty"`
+	QueryCacheKeyMode           string `json:"queryCacheKeyMode,omitempty"`
 	DiagnosticsEnabled          bool   `json:"diagnosticsEnabled,omitempty"`
 	DiagnosticsLogQueryText     bool   `json:"diagnosticsLogQueryText,omitempty"`
 	asyncConfigured             bool
@@ -260,6 +277,15 @@ func (d *KdbDatasource) normalizeDatasourceDefaults() {
 	}
 	if d.QueryCacheTimeBucketSeconds < 0 {
 		d.QueryCacheTimeBucketSeconds = defaultQueryCacheTimeBucket
+	}
+	if d.QueryCacheStaleTTLSeconds < 0 {
+		d.QueryCacheStaleTTLSeconds = defaultQueryCacheStaleTTL
+	}
+	if d.QueryCacheKeyMode == "" {
+		d.QueryCacheKeyMode = QueryCacheKeyModeStrict
+	}
+	if d.QueryCacheKeyMode != QueryCacheKeyModeStrict && d.QueryCacheKeyMode != QueryCacheKeyModeShared {
+		d.QueryCacheKeyMode = QueryCacheKeyModeStrict
 	}
 	if d.asyncJobs == nil {
 		d.asyncJobs = make(chan struct{}, d.AsyncMaxJobs)

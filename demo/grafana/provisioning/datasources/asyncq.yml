@@ -26,5 +26,7 @@ datasources:
       queryCacheTTLSeconds: 60
       queryCacheMaxEntries: 128
       queryCacheTimeBucketSeconds: 0
+      queryCacheStaleTTLSeconds: 0
+      queryCacheKeyMode: strict
       diagnosticsEnabled: true
       diagnosticsLogQueryText: false
