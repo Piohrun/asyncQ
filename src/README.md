@@ -1,6 +1,6 @@
 # AsyncQ kdb+ Grafana datasource
 
-AsyncQ is a Grafana 13 backend datasource for kdb+ derived from AquaQ Analytics' community kdb+ backend datasource. The synchronous query path is intentionally kept compatible with the original plugin, while panel queries can opt into helper async, plugin-managed async, deferred-wrapper async, or q-driven streaming through Grafana Live.
+AsyncQ is a Grafana 13 backend datasource for kdb+ derived from AquaQ Analytics' community kdb+ backend datasource. The synchronous query path is intentionally kept compatible with the original plugin, while panel queries can opt into helper async, plugin-managed async, legacy gateway async adapters, deferred-wrapper async, or q-driven streaming through Grafana Live.
 
 ## Query modes
 
@@ -22,6 +22,8 @@ Helper Async mode uses Grafana Live and calls q helper functions:
 Plugin Async mode uses Grafana Live but does not require q helper functions. The backend opens a dedicated IPC connection, evaluates the query in a goroutine, emits status frames while waiting, and returns the final q result when it arrives.
 
 Deferred Async mode first expands a wrapper containing exactly one `{Query}` placeholder, then runs that expression through Plugin Async. Use this for q gateways that already support deferred responses or wrapper-based submission.
+
+Legacy Async mode targets existing same-port q gateway protocols that already have submit/status/result/cancel functions but use different names or envelopes from the AsyncQ helper. Configure `legacyAsyncSubmit`, `legacyAsyncStatus`, optional `legacyAsyncResult`/`legacyAsyncCancel`, request mode, response paths, and comma-separated status value mappings at datasource or query level. The adapter can submit the full request dict, Panopticon dict, original query text, or compiled query text.
 
 Stream mode uses Grafana Live and calls:
 
@@ -74,4 +76,4 @@ Successful sync, async, and stream result frames include `frame.meta.custom.asyn
 
 ## Diagnostics
 
-Enable datasource `Diagnostics` to write structured backend logs for sync, async, deferred, and stream lifecycles. By default the logs contain request IDs, ref IDs, mode, query hashes, kdb+ object shapes, frame schemas, q worker/result metadata, status transitions, durations, and errors, but not raw query text. Sync logs also include pool acquire wait, opened/reused connections, active/idle pool state, release/discard action, transport duration, and cache disabled/bypass/miss/refresh/store/stale/hit status. q stack traces are hashed by default. `Log Query Text` is a separate opt-in switch for trusted debugging sessions only.
+Enable datasource `Diagnostics` to write structured backend logs for sync, async, legacy async, deferred, and stream lifecycles. By default the logs contain request IDs, ref IDs, mode, query hashes, adapter function hashes, kdb+ object shapes, frame schemas, q worker/result metadata, status transitions, durations, and errors, but not raw query text. Sync logs also include pool acquire wait, opened/reused connections, active/idle pool state, release/discard action, transport duration, and cache disabled/bypass/miss/refresh/store/stale/hit status. q stack traces are hashed by default. `Log Query Text` is a separate opt-in switch for trusted debugging sessions only.

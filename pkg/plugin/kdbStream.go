@@ -173,6 +173,15 @@ func (d *KdbDatasource) runAsyncQueryStream(ctx context.Context, req *backend.Ru
 		fields = append(d.diagnosticQueryFields(req.PluginContext, query, model, requestID), "path", req.Path)
 		d.logDiagnostics("deferred async query prepared", fields...)
 		return d.runPluginManagedAsyncQueryStream(ctx, req.PluginContext, liveReq, query, model, requestID, sender)
+	case ExecutionModeLegacyAsync:
+		if err := prepareQueryForExecution(req.PluginContext, query, &model); err != nil {
+			d.logDiagnosticError("legacy async query preparation failed", appendDiagnosticError(fields, err)...)
+			_ = sendControlFrame(sender, liveReq.RefID, model.ExecutionMode, "error", requestID, "", err.Error(), 0, true)
+			return nil
+		}
+		fields = append(d.diagnosticQueryFields(req.PluginContext, query, model, requestID), "path", req.Path)
+		d.logDiagnostics("legacy async query prepared", fields...)
+		return d.runLegacyAsyncQueryStream(ctx, req.PluginContext, liveReq, query, model, requestID, sender)
 	case ExecutionModeAsync, "":
 	default:
 		err := fmt.Errorf("unsupported async execution mode: %s", model.ExecutionMode)

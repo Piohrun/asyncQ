@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Added `legacyAsync` execution mode for same-port legacy q gateway async protocols with configurable submit, status, result, cancel, response paths, request mode, and status value mappings.
+- Added demo q functions and a dashboard panel that exercise a legacy-shaped async protocol without calling the `.grafana.asyncq.async.*` helper contract directly.
+
 ## 1.0.4
 
 - Added self-contained local disk persistence for successful sync query cache entries, with datasource settings for disk enablement, path, entry cap, and byte budget.

@@ -22,44 +22,42 @@ Current AsyncQ modes:
 | `sync` | q accepts direct expression/function call | Good for validation and fast queries |
 | `pluginAsync` | q accepts direct blocking expression/function call | Good for long-running legacy calls; no q helper needed |
 | `deferredAsync` | q accepts wrapper-expanded blocking expression/function call | Good for wrapper-based gateways; not true callback async |
+| `legacyAsync` | q exposes configurable submit/status/result/cancel functions with parseable envelopes | Good for unchanged pull-style legacy async gateways |
 | `async` | q exposes `.grafana.asyncq.async.submit/status/result/cancel` | Good only when the helper contract is available |
 | `stream` | q exposes `.grafana.asyncq.stream.start/stop` and pushes payloads | Good only when the stream helper contract is available |
 
-The gap is a gateway that already has async functions, but with different names, argument shapes, status values, and result envelopes.
+The implemented gap coverage is a gateway that already has pull-style async functions, but with different names, argument shapes, status values, and result envelopes. Callback/deferred/pushed-result protocols still need protocol-specific adapter work.
 
-## Proposed Datasource Configuration
+## Datasource And Query Configuration
 
-Add a new execution mode or compatibility subtype for legacy server-side async. A conservative first implementation can reuse `executionMode="async"` with an adapter config, but a separate `legacyAsync` value would make behavior more explicit in panel JSON.
+Use `executionMode="legacyAsync"` with adapter fields at datasource or query level.
 
-Datasource-level defaults:
+Datasource-level defaults and query-level overrides use the same shape:
 
 ```json
 {
-  "legacyAsync": {
-    "enabled": true,
-    "submit": ".gw.submit",
-    "status": ".gw.status",
-    "result": ".gw.result",
-    "cancel": ".gw.cancel",
-    "requestMode": "requestDict",
-    "jobIdPath": "jobId",
-    "statusPath": "status",
-    "progressPath": "progress",
-    "messagePath": "message",
-    "errorPath": "error",
-    "payloadPath": "result",
-    "queuedValues": ["queued", "pending"],
-    "runningValues": ["running", "executing"],
-    "doneValues": ["done", "complete", "completed"],
-    "errorValues": ["error", "failed"],
-    "cancelledValues": ["cancelled", "canceled"],
-    "pollIntervalMs": 1000,
-    "submitReturnsResult": false
-  }
+  "executionMode": "legacyAsync",
+  "legacyAsyncSubmit": ".gw.submit",
+  "legacyAsyncStatus": ".gw.status",
+  "legacyAsyncResult": ".gw.result",
+  "legacyAsyncCancel": ".gw.cancel",
+  "legacyAsyncRequestMode": "requestDict",
+  "legacyAsyncJobIDPath": "jobId",
+  "legacyAsyncStatusPath": "status",
+  "legacyAsyncProgressPath": "progress",
+  "legacyAsyncMessagePath": "message",
+  "legacyAsyncErrorPath": "error",
+  "legacyAsyncPayloadPath": "result",
+  "legacyAsyncQueuedValues": "queued,pending",
+  "legacyAsyncRunningValues": "running,executing",
+  "legacyAsyncDoneValues": "done,complete,completed",
+  "legacyAsyncErrorValues": "error,failed",
+  "legacyAsyncCancelledValues": "cancelled,canceled",
+  "pollIntervalMs": 1000
 }
 ```
 
-Panel-level overrides should allow changing function names and request mode per target, because some migrated dashboards may call different gateway routes on the same q port.
+Panel-level overrides allow changing function names and request mode per target, because some migrated dashboards may call different gateway routes on the same q port.
 
 ## Request Modes
 
@@ -71,7 +69,7 @@ Panel-level overrides should allow changing function names and request mode per 
 | `panopticonDict` | `.gw.submit requestDict\`Panopticon` | Gateway expects only a Panopticon-style context dict |
 | `functionArgs` | `.gw.submit[arg0;arg1;...]` | Gateway accepts positional args derived from query/context fields |
 
-Start with `queryText`, `compiledQueryText`, `requestDict`, and `panopticonDict`. Add `functionArgs` only after a real gateway requires it, because positional mapping needs a schema.
+Implemented modes: `queryText`, `compiledQueryText`, `requestDict`, and `panopticonDict`. Add `functionArgs` only after a real gateway requires it, because positional mapping needs a schema.
 
 ## Call Sequence
 
@@ -161,15 +159,23 @@ Legacy async config is powerful because it points the plugin at q functions by n
 - Avoid creating symbols from Grafana variable text.
 - Keep cancellation best-effort and do not assume it stops remote worker execution unless the gateway contract says so.
 
-## Implementation Phases
+## Implementation Status
 
-1. Add Go structs for datasource and query-level legacy async adapter config.
-2. Add query editor and datasource editor fields behind an "Advanced legacy async adapter" section.
-3. Implement response extraction helpers for dictionary, symbol/char, and one-row table responses.
-4. Implement `legacyAsync` RunStream path using the same Live control/data frame flow as helper async.
-5. Add unit tests for status normalization, path extraction, missing fields, and terminal states.
-6. Extend the demo q process with one legacy-shaped async protocol that does not use `.grafana.asyncq.*`.
-7. Add a demo dashboard comparing helper async and legacy async adapter behavior.
+Implemented:
+
+1. Go structs for datasource and query-level legacy async adapter config.
+2. Query editor and datasource editor fields for `legacyAsync`.
+3. Response extraction helpers for dictionaries, char/symbol atoms, nested paths, and one-row table responses.
+4. `legacyAsync` RunStream path using the same Grafana Live control/data frame flow as helper async.
+5. Unit tests for defaults, path extraction, result payload extraction, request modes, and status normalization.
+6. Demo q process functions with one legacy-shaped async protocol that does not use `.grafana.asyncq.*` as the exposed protocol.
+7. Demo dashboard panel comparing helper async and legacy async adapter behavior.
+
+Still open:
+
+- Positional function-argument mapping.
+- Callback/deferred result delivery where the gateway stores a client handle and pushes later.
+- Proprietary serialized Panopticon envelopes.
 
 ## Open Questions For Real Gateway Discovery
 

@@ -176,6 +176,26 @@ Grafana Live demos.
     .demo.asyncq.status jobId
   };
 
+.demo.legacy.submit:{[req]
+    s:.demo.asyncq.submit req;
+    `id`state`pct`note`err!(s`JobID;s`Status;s`Progress;s`Message;s`Error)
+  };
+
+.demo.legacy.status:{[jobId]
+    s:.demo.asyncq.status jobId;
+    `id`state`pct`note`err!(s`JobID;s`Status;s`Progress;s`Message;s`Error)
+  };
+
+.demo.legacy.result:{[jobId]
+    payload:.demo.asyncq.result jobId;
+    `payload`kind!(payload;.grafana.asyncq.util.describe payload)
+  };
+
+.demo.legacy.cancel:{[jobId]
+    s:.demo.asyncq.cancel jobId;
+    `id`state`pct`note`err!(s`JobID;s`Status;s`Progress;s`Message;s`Error)
+  };
+
 .demo.asyncq.completeJob:{[idx]
     row:first select from .demo.asyncq.JOBS where i=idx;
     req:row`request;
@@ -233,3 +253,4 @@ Grafana Live demos.
 -1 "Try Panopticon-style dict: .demo.asyncq.panopticonSummary[]";
 -1 "Try Panopticon request function: {[req] .demo.asyncq.panopticonRequest req}";
 -1 "Try compatibility matrix direct fixture: .demo.asyncq.compatMatrixDirect[]";
+-1 "Try legacy async adapter functions: .demo.legacy.submit/status/result/cancel";

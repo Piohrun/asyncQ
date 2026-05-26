@@ -25,6 +25,7 @@ const (
 	ExecutionModeAsync         = "async"
 	ExecutionModePluginAsync   = "pluginAsync"
 	ExecutionModeDeferredAsync = "deferredAsync"
+	ExecutionModeLegacyAsync   = "legacyAsync"
 	ExecutionModeStream        = "stream"
 
 	CompatibilityModeNative     = "native"
@@ -40,6 +41,11 @@ const (
 	QueryCacheKeyModeStrict = "strict"
 	QueryCacheKeyModeShared = "shared"
 
+	LegacyAsyncRequestModeQueryText         = "queryText"
+	LegacyAsyncRequestModeCompiledQueryText = "compiledQueryText"
+	LegacyAsyncRequestModeRequestDict       = "requestDict"
+	LegacyAsyncRequestModePanopticonDict    = "panopticonDict"
+
 	defaultQueryTimeout         = 10000
 	defaultPollIntervalMs       = 1000
 	defaultMaxStreamRows        = 1000
@@ -53,6 +59,12 @@ const (
 	defaultQueryCacheDisk       = true
 	defaultQueryCacheDiskBytes  = int64(1024 * 1024 * 1024)
 	defaultQueryCacheDiskMax    = 10000
+	defaultLegacyAsyncJobIDPath = "jobId"
+	defaultLegacyAsyncStatus    = "status"
+	defaultLegacyAsyncProgress  = "progress"
+	defaultLegacyAsyncMessage   = "message"
+	defaultLegacyAsyncError     = "error"
+	defaultLegacyAsyncPayload   = "result"
 	asyncQHelperUnavailable     = "async/stream queries require q/asyncq_grafana.q to be loaded in the target kdb+ process or gateway"
 )
 
@@ -75,6 +87,22 @@ type QueryModel struct {
 	DeferredQueryWrapper        string `json:"deferredQueryWrapper,omitempty"`
 	PanopticonQueryWrapper      string `json:"panopticonQueryWrapper,omitempty"`
 	PanopticonRequestFunction   string `json:"panopticonRequestFunction,omitempty"`
+	LegacyAsyncSubmit           string `json:"legacyAsyncSubmit,omitempty"`
+	LegacyAsyncStatus           string `json:"legacyAsyncStatus,omitempty"`
+	LegacyAsyncResult           string `json:"legacyAsyncResult,omitempty"`
+	LegacyAsyncCancel           string `json:"legacyAsyncCancel,omitempty"`
+	LegacyAsyncRequestMode      string `json:"legacyAsyncRequestMode,omitempty"`
+	LegacyAsyncJobIDPath        string `json:"legacyAsyncJobIDPath,omitempty"`
+	LegacyAsyncStatusPath       string `json:"legacyAsyncStatusPath,omitempty"`
+	LegacyAsyncProgressPath     string `json:"legacyAsyncProgressPath,omitempty"`
+	LegacyAsyncMessagePath      string `json:"legacyAsyncMessagePath,omitempty"`
+	LegacyAsyncErrorPath        string `json:"legacyAsyncErrorPath,omitempty"`
+	LegacyAsyncPayloadPath      string `json:"legacyAsyncPayloadPath,omitempty"`
+	LegacyAsyncQueuedValues     string `json:"legacyAsyncQueuedValues,omitempty"`
+	LegacyAsyncRunningValues    string `json:"legacyAsyncRunningValues,omitempty"`
+	LegacyAsyncDoneValues       string `json:"legacyAsyncDoneValues,omitempty"`
+	LegacyAsyncErrorValues      string `json:"legacyAsyncErrorValues,omitempty"`
+	LegacyAsyncCancelledValues  string `json:"legacyAsyncCancelledValues,omitempty"`
 	StreamName                  string `json:"streamName,omitempty"`
 	PollIntervalMs              int    `json:"pollIntervalMs,omitempty"`
 	MaxStreamRows               int    `json:"maxStreamRows,omitempty"`
@@ -119,6 +147,22 @@ type KdbDatasource struct {
 	DeferredQueryWrapper        string `json:"deferredQueryWrapper,omitempty"`
 	PanopticonQueryWrapper      string `json:"panopticonQueryWrapper,omitempty"`
 	PanopticonRequestFunction   string `json:"panopticonRequestFunction,omitempty"`
+	LegacyAsyncSubmit           string `json:"legacyAsyncSubmit,omitempty"`
+	LegacyAsyncStatus           string `json:"legacyAsyncStatus,omitempty"`
+	LegacyAsyncResult           string `json:"legacyAsyncResult,omitempty"`
+	LegacyAsyncCancel           string `json:"legacyAsyncCancel,omitempty"`
+	LegacyAsyncRequestMode      string `json:"legacyAsyncRequestMode,omitempty"`
+	LegacyAsyncJobIDPath        string `json:"legacyAsyncJobIDPath,omitempty"`
+	LegacyAsyncStatusPath       string `json:"legacyAsyncStatusPath,omitempty"`
+	LegacyAsyncProgressPath     string `json:"legacyAsyncProgressPath,omitempty"`
+	LegacyAsyncMessagePath      string `json:"legacyAsyncMessagePath,omitempty"`
+	LegacyAsyncErrorPath        string `json:"legacyAsyncErrorPath,omitempty"`
+	LegacyAsyncPayloadPath      string `json:"legacyAsyncPayloadPath,omitempty"`
+	LegacyAsyncQueuedValues     string `json:"legacyAsyncQueuedValues,omitempty"`
+	LegacyAsyncRunningValues    string `json:"legacyAsyncRunningValues,omitempty"`
+	LegacyAsyncDoneValues       string `json:"legacyAsyncDoneValues,omitempty"`
+	LegacyAsyncErrorValues      string `json:"legacyAsyncErrorValues,omitempty"`
+	LegacyAsyncCancelledValues  string `json:"legacyAsyncCancelledValues,omitempty"`
 	AsyncMaxJobs                int    `json:"asyncMaxJobs,omitempty"`
 	SyncMaxConnections          int    `json:"syncMaxConnections,omitempty"`
 	QueryCacheEnabled           bool   `json:"queryCacheEnabled,omitempty"`
@@ -332,6 +376,20 @@ func (d *KdbDatasource) normalizeDatasourceDefaults() {
 	if d.QueryCacheDiskMaxEntries < 1 {
 		d.QueryCacheDiskMaxEntries = defaultQueryCacheDiskMax
 	}
+	normalizeLegacyAsyncDefaults(
+		&d.LegacyAsyncRequestMode,
+		&d.LegacyAsyncJobIDPath,
+		&d.LegacyAsyncStatusPath,
+		&d.LegacyAsyncProgressPath,
+		&d.LegacyAsyncMessagePath,
+		&d.LegacyAsyncErrorPath,
+		&d.LegacyAsyncPayloadPath,
+		&d.LegacyAsyncQueuedValues,
+		&d.LegacyAsyncRunningValues,
+		&d.LegacyAsyncDoneValues,
+		&d.LegacyAsyncErrorValues,
+		&d.LegacyAsyncCancelledValues,
+	)
 	if d.asyncJobs == nil {
 		d.asyncJobs = make(chan struct{}, d.AsyncMaxJobs)
 	}
@@ -496,6 +554,68 @@ func normalizeQueryModel(model *QueryModel) {
 func (d *KdbDatasource) normalizeQueryModel(model *QueryModel) {
 	d.normalizeDatasourceDefaults()
 	normalizeQueryModelWithDefaults(model, d.ExecutionMode, d.CompatibilityMode, d.DeferredQueryWrapper, d.PanopticonQueryWrapper, d.PanopticonRequestFunction)
+	if model.LegacyAsyncSubmit == "" {
+		model.LegacyAsyncSubmit = d.LegacyAsyncSubmit
+	}
+	if model.LegacyAsyncStatus == "" {
+		model.LegacyAsyncStatus = d.LegacyAsyncStatus
+	}
+	if model.LegacyAsyncResult == "" {
+		model.LegacyAsyncResult = d.LegacyAsyncResult
+	}
+	if model.LegacyAsyncCancel == "" {
+		model.LegacyAsyncCancel = d.LegacyAsyncCancel
+	}
+	if model.LegacyAsyncRequestMode == "" {
+		model.LegacyAsyncRequestMode = d.LegacyAsyncRequestMode
+	}
+	if model.LegacyAsyncJobIDPath == "" {
+		model.LegacyAsyncJobIDPath = d.LegacyAsyncJobIDPath
+	}
+	if model.LegacyAsyncStatusPath == "" {
+		model.LegacyAsyncStatusPath = d.LegacyAsyncStatusPath
+	}
+	if model.LegacyAsyncProgressPath == "" {
+		model.LegacyAsyncProgressPath = d.LegacyAsyncProgressPath
+	}
+	if model.LegacyAsyncMessagePath == "" {
+		model.LegacyAsyncMessagePath = d.LegacyAsyncMessagePath
+	}
+	if model.LegacyAsyncErrorPath == "" {
+		model.LegacyAsyncErrorPath = d.LegacyAsyncErrorPath
+	}
+	if model.LegacyAsyncPayloadPath == "" {
+		model.LegacyAsyncPayloadPath = d.LegacyAsyncPayloadPath
+	}
+	if model.LegacyAsyncQueuedValues == "" {
+		model.LegacyAsyncQueuedValues = d.LegacyAsyncQueuedValues
+	}
+	if model.LegacyAsyncRunningValues == "" {
+		model.LegacyAsyncRunningValues = d.LegacyAsyncRunningValues
+	}
+	if model.LegacyAsyncDoneValues == "" {
+		model.LegacyAsyncDoneValues = d.LegacyAsyncDoneValues
+	}
+	if model.LegacyAsyncErrorValues == "" {
+		model.LegacyAsyncErrorValues = d.LegacyAsyncErrorValues
+	}
+	if model.LegacyAsyncCancelledValues == "" {
+		model.LegacyAsyncCancelledValues = d.LegacyAsyncCancelledValues
+	}
+	normalizeLegacyAsyncDefaults(
+		&model.LegacyAsyncRequestMode,
+		&model.LegacyAsyncJobIDPath,
+		&model.LegacyAsyncStatusPath,
+		&model.LegacyAsyncProgressPath,
+		&model.LegacyAsyncMessagePath,
+		&model.LegacyAsyncErrorPath,
+		&model.LegacyAsyncPayloadPath,
+		&model.LegacyAsyncQueuedValues,
+		&model.LegacyAsyncRunningValues,
+		&model.LegacyAsyncDoneValues,
+		&model.LegacyAsyncErrorValues,
+		&model.LegacyAsyncCancelledValues,
+	)
 }
 
 func normalizeQueryModelWithDefaults(model *QueryModel, executionMode string, compatibilityMode string, deferredWrapper string, panopticonWrapper string, panopticonRequestFunction string) {

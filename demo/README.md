@@ -5,7 +5,7 @@ This demo runs:
 - a local q process on port `5000`
 - Grafana 13 on `http://localhost:3000`
 - a provisioned `AsyncQ Demo` datasource
-- a provisioned `AsyncQ kdb+ demo` dashboard with sync, helper async, plugin async, deferred wrapper, Panopticon compatibility, and stream panels
+- a provisioned `AsyncQ kdb+ demo` dashboard with sync, helper async, plugin async, legacy async adapter, deferred wrapper, Panopticon compatibility, and stream panels
 
 ## Start without Docker
 
@@ -28,6 +28,7 @@ http://localhost:3000/d/asyncq-compat-matrix/asyncq-panopticon-compatibility-mat
 http://localhost:3000/d/asyncq-pano-compat/asyncq-panopticon-compatibility-tests
 http://localhost:3000/d/asyncq-async-tests/asyncq-async-execution-tests
 http://localhost:3000/d/asyncq-sync-pool/asyncq-sync-connection-pool
+http://localhost:3000/d/asyncq-masterdata-cache/asyncq-master-data-and-cache-controls
 ```
 
 Grafana is configured with anonymous admin access for the demo. The explicit login is `admin` / `admin`.
@@ -59,7 +60,7 @@ Docker is optional. It is useful when you want a fully disposable Grafana contai
 - `Demo process counters` shows row, stream, and job counts from the q process.
 - `AsyncQ Panopticon compatibility tests` exercises macro expansion, dashboard-parameter expansion from Grafana variables, `Pano Wrapper`, `Pano Fn`, scalar/vector/string returns, keyed tables, lists of row dictionaries, sparse row dictionaries, and mixed numeric row values.
 - `AsyncQ Panopticon compatibility matrix` maps the migration matrix to demo panels: direct sync, plugin async, wrapper, request function, macros, keyed table, dictionary, row dictionaries, an expected adapter-needed failure, and its table-shaped replacement.
-- `AsyncQ async execution tests` compares sync, helper async, plugin async, deferred async, streaming, and Panopticon request-function execution.
+- `AsyncQ async execution tests` compares sync, helper async, plugin async, legacy async adapter, deferred async, streaming, and Panopticon request-function execution. The legacy panel uses `.demo.legacy.submit/status/result/cancel`, which deliberately return `id/state/pct/payload` envelopes instead of the `.grafana.asyncq.async.*` helper contract.
 - `AsyncQ sync connection pool` runs four slow sync probes against the same datasource. With the single local q process, q itself may serialize execution; inspect Grafana diagnostics for `syncPoolAcquireWaitMs`, `syncPoolAcquireSource`, `syncPoolActive`, and `syncTransportMs` to distinguish plugin pool wait from target q processing time.
 - `AsyncQ master data and cache controls` demonstrates the companion `asyncq-masterdata-panel`: one master data panel runs the AsyncQ query, a freshness widget and table reuse that result through Grafana's `-- Dashboard --` datasource, and cache-control buttons call the datasource cache resources.
 

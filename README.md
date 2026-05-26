@@ -1,6 +1,6 @@
 # AsyncQ kdb+ Grafana datasource
 
-AsyncQ is a Grafana 13 backend datasource for kdb+ derived from AquaQ Analytics' community kdb+ backend datasource. The synchronous query path is intentionally kept compatible with the original plugin, while panel queries can opt into helper-backed async, plugin-managed async, deferred-wrapper async, or q-driven streaming through Grafana Live.
+AsyncQ is a Grafana 13 backend datasource for kdb+ derived from AquaQ Analytics' community kdb+ backend datasource. The synchronous query path is intentionally kept compatible with the original plugin, while panel queries can opt into helper-backed async, plugin-managed async, legacy gateway async adapters, deferred-wrapper async, or q-driven streaming through Grafana Live.
 
 ## Compatibility goals
 
@@ -68,6 +68,29 @@ Deferred Async mode uses the plugin-managed async path after first expanding a w
 ```
 
 Use this when an existing q gateway can accept a wrapped call and eventually return a deferred response on the same IPC request. The plugin still reports the work through Grafana Live, so the panel does not block the normal synchronous query path.
+
+### Legacy Async
+
+Legacy Async mode is for existing q gateways that already expose server-side async functions but do not use the AsyncQ helper names. Configure the submit, status, result, and optional cancel functions at datasource or query level, then map the gateway's response fields:
+
+```json
+{
+  "executionMode": "legacyAsync",
+  "legacyAsyncSubmit": ".gw.submit",
+  "legacyAsyncStatus": ".gw.status",
+  "legacyAsyncResult": ".gw.result",
+  "legacyAsyncCancel": ".gw.cancel",
+  "legacyAsyncRequestMode": "requestDict",
+  "legacyAsyncJobIDPath": "jobId",
+  "legacyAsyncStatusPath": "status",
+  "legacyAsyncProgressPath": "progress",
+  "legacyAsyncMessagePath": "message",
+  "legacyAsyncErrorPath": "error",
+  "legacyAsyncPayloadPath": "result"
+}
+```
+
+Function settings can be q function names such as `.gw.submit` or lambdas such as `{[req] .gw.submit req}`. Request mode can submit the full request dict, only the Panopticon context dict, original query text, or compiled query text after macro/wrapper expansion. Status values are configurable with comma-separated mappings for queued, running, done, error, and cancelled states. Result functions may return a raw table or an envelope containing the configured payload path.
 
 ### Stream
 
@@ -156,16 +179,16 @@ The current compatibility matrix is captured in the skill reference and mirrored
 http://localhost:3000/d/asyncq-compat-matrix/asyncq-panopticon-compatibility-matrix
 ```
 
-The proposed design for configurable same-port legacy async adapters lives in [research/legacy-async-adapter.md](research/legacy-async-adapter.md). That design is intentionally separate from the current runtime until real gateway protocols can be compared against it.
+The same-port legacy async adapter design and implementation notes live in [research/legacy-async-adapter.md](research/legacy-async-adapter.md).
 
 ## Diagnostics
 
 Datasource config includes two diagnostic switches:
 
-- `Diagnostics` writes structured backend logs for query receipt, preparation, q execution, result parsing, frame send, cancellation, and completion across sync, helper async, plugin async, deferred async, and stream paths.
+- `Diagnostics` writes structured backend logs for query receipt, preparation, q execution, result parsing, frame send, cancellation, and completion across sync, helper async, plugin async, legacy async, deferred async, and stream paths.
 - `Log Query Text` additionally writes raw query and wrapper text to backend logs. It is disabled by default because q text can contain sensitive table names, filters, identifiers, or credentials.
 
-Safe diagnostics logs include request IDs, Grafana ref IDs, execution and compatibility modes, time-range metadata, query and wrapper SHA-256 hashes, kdb+ object descriptions, Grafana frame schemas, durations, job IDs, stream IDs, q worker IDs, q result metadata, status changes, and errors. Sync diagnostics also include pool acquire wait, opened/reused connections, active/idle pool state, release/discard action, transport duration, query-cache status (`disabled`, `bypassed`, `miss`, `refresh`, `stored`, `stale`, or `hit`), and cache storage (`memory`, `disk`, or `memory+disk`). These fields help distinguish plugin-side pool saturation, q-side gateway serialization, and warm-cache reuse. The same diagnostics are attached to returned frames under `frame.meta.custom.asyncqDiagnostics`, so panels can display freshness/cache state without scraping logs. q stack traces are hashed by default and logged verbatim only with `Log Query Text`. The local demo provisions `diagnosticsEnabled: true` and `diagnosticsLogQueryText: false` so you can inspect behavior without exposing raw q text.
+Safe diagnostics logs include request IDs, Grafana ref IDs, execution and compatibility modes, time-range metadata, query and wrapper SHA-256 hashes, kdb+ object descriptions, Grafana frame schemas, durations, job IDs, stream IDs, q worker IDs, q result metadata, status changes, and errors. Sync diagnostics also include pool acquire wait, opened/reused connections, active/idle pool state, release/discard action, transport duration, query-cache status (`disabled`, `bypassed`, `miss`, `refresh`, `stored`, `stale`, or `hit`), and cache storage (`memory`, `disk`, or `memory+disk`). Legacy async diagnostics include adapter function hashes, request mode, response paths, submit/status/result object shapes, normalized status, raw status message/error fields, and job ID extraction failures. These fields help distinguish plugin-side pool saturation, q-side gateway serialization, async protocol mismatches, and warm-cache reuse. The same diagnostics are attached to returned frames under `frame.meta.custom.asyncqDiagnostics`, so panels can display freshness/cache state without scraping logs. q stack traces and adapter function bodies are logged verbatim only with `Log Query Text`. The local demo provisions `diagnosticsEnabled: true` and `diagnosticsLogQueryText: false` so you can inspect behavior without exposing raw q text.
 
 ## Cache And Master Data Panel
 

@@ -36,11 +36,12 @@ For the compatibility matrix, detailed mappings, and examples, read [references/
    - Tune datasource `syncMaxConnections` for the legacy port: keep the default `4` for parallel sync panels when the gateway supports concurrent handles, or set `1` for strict serial behavior/per-handle state.
    - Use `executionMode: "pluginAsync"` when the gateway only supports blocking sync IPC but the query should not block Grafana. This works with legacy gateways without q-side helper functions.
    - Use `executionMode: "async"` only when the target q process exposes `.grafana.asyncq.async.submit/status/result/cancel`.
+   - Use `executionMode: "legacyAsync"` when the unchanged gateway already exposes pull-style submit/status/result/cancel functions with configurable request mode, response paths, and status values.
    - For shared Panopticon base-query results, create one AsyncQ source panel and point dependent panels at Grafana's `-- Dashboard --` datasource with `Use results from panel`; do not duplicate the same AsyncQ query in every dependent panel.
    - Use `asyncq-masterdata-panel` as the source panel when the migrated dashboard should show data freshness, cache diagnostics, or cache-control buttons.
    - Use `panopticonRequestFunction` when the Panopticon panel used pass-to-function or the q side expects a full request dictionary.
    - Use `panopticonQueryWrapper` when the original query must be wrapped around `{Query}`.
-   - For a legacy async protocol with different function names or fields, identify the submit/status/result/cancel mapping and state whether AsyncQ needs a custom adapter patch.
+   - For a legacy async protocol with different function names or fields, configure `legacyAsyncSubmit`, `legacyAsyncStatus`, optional `legacyAsyncResult`/`legacyAsyncCancel`, request mode, response paths, and status value mappings. Only call for a custom adapter patch when the gateway uses callback handles, proprietary serialization, or side-channel result delivery.
 
 5. Translate parameters conservatively.
    - Keep Panopticon time parameters in the pasted query where possible: `{TimeWindowStart}`, `{TimeWindowEnd}`, `{Snapshot}`, `{FocusTime}`, `$TimeWindowStart`, `$TimeWindowEnd`, `$Snapshot`, `$FocusTime`.

@@ -34,7 +34,7 @@ AsyncQ can also cache successful sync query results in the datasource instance. 
 | Multiple panels share one base query/result | Config-only | One AsyncQ source panel or `asyncq-masterdata-panel`, dependent panels use Grafana datasource `-- Dashboard --` and `Use results from panel` | Do not duplicate the same AsyncQ target in each dependent panel; duplicate targets produce repeated kdb+ requests. The companion master-data panel also exposes freshness and cache controls. |
 | Dashboard reopens should use warm server-side results | Config-only if stale data is acceptable | Use datasource `queryCacheEnabled`, `queryCacheDiskEnabled`, `queryCacheTTLSeconds`, optionally set `queryCacheStaleTTLSeconds` and `queryCacheTimeBucketSeconds`, and keep Dashboard datasource sharing for dependent panels | This approximates Panopticon query result cache. Cache only successful sync results and is local to the Grafana server/datasource instance. Disk cache persists across plugin restarts; stale-while-revalidate makes reopen feel instant, but the refreshed result appears on the next Grafana query/refresh unless the panel uses a live path. |
 | Duplicated panels should share the same cached q result | Config-only if the q path ignores ref ID | Set datasource or query `queryCacheKeyMode=shared`; prefer Dashboard datasource when a panel explicitly derives from a source panel | Shared cache mode omits ref ID from the cache key. Do not use it when a Panopticon request function branches on panel/ref ID. |
-| Panopticon server-side async submit/status/result/cancel | Adapter needed unless it already matches `.grafana.asyncq.async.*` | `executionMode="async"` only for the AsyncQ helper contract | Discover job ID field, status values, result function, error fields, expiry, and cancel semantics before patching. |
+| Panopticon server-side async submit/status/result/cancel | Config-only when the gateway exposes callable functions and parseable envelopes; otherwise adapter needed | Use `executionMode="legacyAsync"` and configure submit/status/result/cancel functions, request mode, response paths, and status value mappings. Use `executionMode="async"` only for the `.grafana.asyncq.async.*` helper contract | Discover job ID field, status values, result function, error fields, expiry, and cancel semantics before configuring. Callback/deferred protocols still need a specific adapter. |
 | Deferred response or callback over IPC handle | Adapter needed | Current `deferredAsync` only wraps a query then runs Plugin Async | True q `neg` callback/deferred protocols need a plugin adapter that registers the callback handle and translates returned messages. |
 | Gateway only accepts serialized/proprietary Panopticon envelopes | Adapter needed | Implement envelope builder in plugin or q shim | Do not claim copy/paste until the envelope schema is known. |
 | Streaming subscription/push panel | Adapter needed | `executionMode="stream"` requires `.grafana.asyncq.stream.start/stop` or equivalent adapter | Panopticon stream definitions do not copy directly unless their protocol is implemented. |
@@ -126,7 +126,7 @@ Feasible without modifying the gateway/RDB:
 
 Not automatically feasible without discovering and reproducing the existing client protocol:
 
-- True server-side async where Panopticon submits a job, receives an ID, polls status, fetches results, or receives deferred/callback messages.
+- True server-side async where Panopticon submits a job, receives an ID, polls status, and fetches results can use `legacyAsync` if the gateway exposes callable submit/status/result/cancel functions and parseable envelopes. Deferred/callback-only protocols still need a specific adapter.
 - Push streaming or subscriptions unless the gateway exposes a known protocol the plugin can speak.
 - Session state, entitlements, callback handles, or request envelopes that are specific to Panopticon.
 - Gateways that only accept a proprietary Panopticon envelope rather than plain q text or a documented request dict.
@@ -141,11 +141,12 @@ Discovery workflow for source code and q ports:
    - existing full request dict function -> `panopticonRequestFunction`
    - wrapper around query -> `panopticonQueryWrapper`
    - `.grafana.asyncq.*` helper functions -> `async` or `stream`
-5. If the gateway has a different async protocol, document the adapter contract needed in the plugin: submit function, status function, result function, cancel function, job ID field, status values, result delivery mode, error fields, expiry behavior, and cancellation semantics.
+   - existing submit/status/result/cancel functions with envelopes -> `legacyAsync`
+5. If the gateway has a different async protocol, configure the legacy adapter when possible: submit function, status function, result function, cancel function, request mode, job ID path, status path, progress/message/error paths, payload path, and status value mappings. If the protocol uses callback handles, proprietary serialization, or side-channel delivery, document the missing adapter contract before patching.
 
-Do not claim the plugin can use arbitrary legacy async protocols by configuration unless the code already supports that adapter. It is acceptable to produce a plugin patch plan when the unchanged gateway contract is understood.
+Do not claim the plugin can use arbitrary legacy async protocols by configuration. `legacyAsync` covers pull-style submit/status/result/cancel protocols; callback/deferred/push-specific protocols require additional adapter work once the unchanged gateway contract is understood.
 
-For the proposed configurable adapter shape, see `research/legacy-async-adapter.md` in this repository.
+For configurable adapter details, see `research/legacy-async-adapter.md` in this repository.
 
 ## Query Target Template
 
@@ -169,6 +170,34 @@ For the proposed configurable adapter shape, see `research/legacy-async-adapter.
 ```
 
 Use `sync` while validating. Switch to `pluginAsync` when the query is correct and may be slow.
+
+For an unchanged q gateway that already exposes pull-style async functions, use the legacy adapter shape:
+
+```json
+{
+  "executionMode": "legacyAsync",
+  "compatibilityMode": "panopticon",
+  "queryText": "<pasted q query or function call>",
+  "legacyAsyncSubmit": ".gw.submit",
+  "legacyAsyncStatus": ".gw.status",
+  "legacyAsyncResult": ".gw.result",
+  "legacyAsyncCancel": ".gw.cancel",
+  "legacyAsyncRequestMode": "requestDict",
+  "legacyAsyncJobIDPath": "jobId",
+  "legacyAsyncStatusPath": "status",
+  "legacyAsyncProgressPath": "progress",
+  "legacyAsyncMessagePath": "message",
+  "legacyAsyncErrorPath": "error",
+  "legacyAsyncPayloadPath": "result",
+  "legacyAsyncQueuedValues": "queued,pending",
+  "legacyAsyncRunningValues": "running,executing",
+  "legacyAsyncDoneValues": "done,complete,completed",
+  "legacyAsyncErrorValues": "error,failed",
+  "legacyAsyncCancelledValues": "cancelled,canceled"
+}
+```
+
+Set `legacyAsyncRequestMode` to `compiledQueryText` if the gateway expects a q string after Panopticon macro expansion, `queryText` if it expects the original pasted text, or `panopticonDict` if it expects only Panopticon-style context fields. The result function can return either a raw table/keyed table accepted by the current compatibility mode or an envelope containing `legacyAsyncPayloadPath`.
 
 ## Shared Result Panels
 
@@ -202,7 +231,8 @@ Dashboard datasource target JSON shape:
 | Plain q expression/function call | `compatibilityMode="panopticon"`, `executionMode="sync"` first, then `pluginAsync` |
 | Long-running direct query | `executionMode="pluginAsync"` |
 | Shared result reused by several panels | One AsyncQ or `asyncq-masterdata-panel` source panel; dependent panels use datasource `-- Dashboard --` |
-| q gateway already has async submit/status/result/cancel | `executionMode="async"` |
+| q gateway already has AsyncQ helper functions | `executionMode="async"` |
+| q gateway already has non-AsyncQ submit/status/result/cancel functions | `executionMode="legacyAsync"` with configured function names, request mode, response paths, and status mappings |
 | Query must be wrapped before evaluation | Set `panopticonQueryWrapper`, exactly one `{Query}` |
 | Pass-to-function panel | Set `panopticonRequestFunction` to a q function/lambda accepting `req` |
 | True push stream | Requires AsyncQ streaming helper or a q-side adapter; do not assume Panopticon stream definitions copy directly |

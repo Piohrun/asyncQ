@@ -151,6 +151,70 @@ export class ConfigEditor extends PureComponent<Props> {
     this.updateJsonData({ panopticonRequestFunction: event.target.value });
   };
 
+  onLegacyAsyncSubmitChange = (event: ChangeEvent<HTMLInputElement>) => {
+    this.updateJsonData({ legacyAsyncSubmit: event.target.value });
+  };
+
+  onLegacyAsyncStatusChange = (event: ChangeEvent<HTMLInputElement>) => {
+    this.updateJsonData({ legacyAsyncStatus: event.target.value });
+  };
+
+  onLegacyAsyncResultChange = (event: ChangeEvent<HTMLInputElement>) => {
+    this.updateJsonData({ legacyAsyncResult: event.target.value });
+  };
+
+  onLegacyAsyncCancelChange = (event: ChangeEvent<HTMLInputElement>) => {
+    this.updateJsonData({ legacyAsyncCancel: event.target.value });
+  };
+
+  onLegacyAsyncRequestModeChange = (event: ChangeEvent<HTMLSelectElement>) => {
+    this.updateJsonData({ legacyAsyncRequestMode: event.target.value as MyDataSourceOptions['legacyAsyncRequestMode'] });
+  };
+
+  onLegacyAsyncJobIDPathChange = (event: ChangeEvent<HTMLInputElement>) => {
+    this.updateJsonData({ legacyAsyncJobIDPath: event.target.value });
+  };
+
+  onLegacyAsyncStatusPathChange = (event: ChangeEvent<HTMLInputElement>) => {
+    this.updateJsonData({ legacyAsyncStatusPath: event.target.value });
+  };
+
+  onLegacyAsyncProgressPathChange = (event: ChangeEvent<HTMLInputElement>) => {
+    this.updateJsonData({ legacyAsyncProgressPath: event.target.value });
+  };
+
+  onLegacyAsyncMessagePathChange = (event: ChangeEvent<HTMLInputElement>) => {
+    this.updateJsonData({ legacyAsyncMessagePath: event.target.value });
+  };
+
+  onLegacyAsyncErrorPathChange = (event: ChangeEvent<HTMLInputElement>) => {
+    this.updateJsonData({ legacyAsyncErrorPath: event.target.value });
+  };
+
+  onLegacyAsyncPayloadPathChange = (event: ChangeEvent<HTMLInputElement>) => {
+    this.updateJsonData({ legacyAsyncPayloadPath: event.target.value });
+  };
+
+  onLegacyAsyncQueuedValuesChange = (event: ChangeEvent<HTMLInputElement>) => {
+    this.updateJsonData({ legacyAsyncQueuedValues: event.target.value });
+  };
+
+  onLegacyAsyncRunningValuesChange = (event: ChangeEvent<HTMLInputElement>) => {
+    this.updateJsonData({ legacyAsyncRunningValues: event.target.value });
+  };
+
+  onLegacyAsyncDoneValuesChange = (event: ChangeEvent<HTMLInputElement>) => {
+    this.updateJsonData({ legacyAsyncDoneValues: event.target.value });
+  };
+
+  onLegacyAsyncErrorValuesChange = (event: ChangeEvent<HTMLInputElement>) => {
+    this.updateJsonData({ legacyAsyncErrorValues: event.target.value });
+  };
+
+  onLegacyAsyncCancelledValuesChange = (event: ChangeEvent<HTMLInputElement>) => {
+    this.updateJsonData({ legacyAsyncCancelledValues: event.target.value });
+  };
+
   onAsyncMaxJobsChange = (event: ChangeEvent<HTMLInputElement>) => {
     if (/^\d+$/.test(event.target.value) || event.target.value === '') {
       this.updateJsonData({ asyncMaxJobs: event.target.value === '' ? undefined : parseInt(event.target.value, 10) });
@@ -587,6 +651,7 @@ export class ConfigEditor extends PureComponent<Props> {
             <option value="async">Helper Async</option>
             <option value="pluginAsync">Plugin Async</option>
             <option value="deferredAsync">Deferred Async</option>
+            <option value="legacyAsync">Legacy Async</option>
             <option value="stream">Stream</option>
           </select>
           <span className="gf-form-label width-14">Compatibility</span>
@@ -642,6 +707,98 @@ export class ConfigEditor extends PureComponent<Props> {
     );
   }
 
+  renderLegacyAsync(jsonData: MyDataSourceOptions) {
+    const show =
+      jsonData.executionMode === 'legacyAsync' ||
+      !!jsonData.legacyAsyncSubmit ||
+      !!jsonData.legacyAsyncStatus ||
+      !!jsonData.legacyAsyncResult ||
+      !!jsonData.legacyAsyncCancel;
+    if (!show) {
+      return null;
+    }
+    return (
+      <ConfigSection title="Legacy Async Adapter">
+        <div className="gf-form">
+          <FormField
+            name="LegacyAsyncSubmitInputField"
+            label="Submit Fn"
+            labelWidth={14}
+            inputWidth={44}
+            onChange={this.onLegacyAsyncSubmitChange}
+            value={jsonData.legacyAsyncSubmit || ''}
+            placeholder=".gw.submit"
+            tooltip="Datasource default q function or lambda called once to submit a legacy server-side async request."
+          />
+        </div>
+        <div className="gf-form">
+          <FormField
+            name="LegacyAsyncStatusInputField"
+            label="Status Fn"
+            labelWidth={14}
+            inputWidth={44}
+            onChange={this.onLegacyAsyncStatusChange}
+            value={jsonData.legacyAsyncStatus || ''}
+            placeholder=".gw.status"
+            tooltip="Datasource default q function or lambda polled with the job id."
+          />
+        </div>
+        <div className="gf-form">
+          <FormField
+            name="LegacyAsyncResultInputField"
+            label="Result Fn"
+            labelWidth={14}
+            inputWidth={44}
+            onChange={this.onLegacyAsyncResultChange}
+            value={jsonData.legacyAsyncResult || ''}
+            placeholder=".gw.result"
+            tooltip="Optional datasource default q function or lambda called with the job id when status is done."
+          />
+        </div>
+        <div className="gf-form">
+          <FormField
+            name="LegacyAsyncCancelInputField"
+            label="Cancel Fn"
+            labelWidth={14}
+            inputWidth={44}
+            onChange={this.onLegacyAsyncCancelChange}
+            value={jsonData.legacyAsyncCancel || ''}
+            placeholder=".gw.cancel"
+            tooltip="Optional datasource default q function or lambda called with the job id when Grafana cancels the panel query."
+          />
+        </div>
+        <div className="gf-form">
+          <span className="gf-form-label width-14">Request Mode</span>
+          <select className="gf-form-input width-22" value={jsonData.legacyAsyncRequestMode || 'requestDict'} onChange={this.onLegacyAsyncRequestModeChange}>
+            <option value="requestDict">Request Dict</option>
+            <option value="panopticonDict">Panopticon Dict</option>
+            <option value="compiledQueryText">Compiled Query Text</option>
+            <option value="queryText">Original Query Text</option>
+          </select>
+        </div>
+        <div className="gf-form">
+          <FormField name="LegacyAsyncJobIDPathInputField" label="Job ID Path" labelWidth={14} inputWidth={16} onChange={this.onLegacyAsyncJobIDPathChange} value={jsonData.legacyAsyncJobIDPath || ''} placeholder="jobId" />
+          <FormField name="LegacyAsyncStatusPathInputField" label="Status Path" labelWidth={14} inputWidth={16} onChange={this.onLegacyAsyncStatusPathChange} value={jsonData.legacyAsyncStatusPath || ''} placeholder="status" />
+          <FormField name="LegacyAsyncProgressPathInputField" label="Progress Path" labelWidth={14} inputWidth={16} onChange={this.onLegacyAsyncProgressPathChange} value={jsonData.legacyAsyncProgressPath || ''} placeholder="progress" />
+        </div>
+        <div className="gf-form">
+          <FormField name="LegacyAsyncMessagePathInputField" label="Message Path" labelWidth={14} inputWidth={16} onChange={this.onLegacyAsyncMessagePathChange} value={jsonData.legacyAsyncMessagePath || ''} placeholder="message" />
+          <FormField name="LegacyAsyncErrorPathInputField" label="Error Path" labelWidth={14} inputWidth={16} onChange={this.onLegacyAsyncErrorPathChange} value={jsonData.legacyAsyncErrorPath || ''} placeholder="error" />
+          <FormField name="LegacyAsyncPayloadPathInputField" label="Payload Path" labelWidth={14} inputWidth={16} onChange={this.onLegacyAsyncPayloadPathChange} value={jsonData.legacyAsyncPayloadPath || ''} placeholder="result" />
+        </div>
+        <div className="gf-form">
+          <FormField name="LegacyAsyncQueuedValuesInputField" label="Queued" labelWidth={14} inputWidth={20} onChange={this.onLegacyAsyncQueuedValuesChange} value={jsonData.legacyAsyncQueuedValues || ''} placeholder="queued,pending" />
+          <FormField name="LegacyAsyncRunningValuesInputField" label="Running" labelWidth={14} inputWidth={20} onChange={this.onLegacyAsyncRunningValuesChange} value={jsonData.legacyAsyncRunningValues || ''} placeholder="running,executing" />
+        </div>
+        <div className="gf-form">
+          <FormField name="LegacyAsyncDoneValuesInputField" label="Done" labelWidth={14} inputWidth={20} onChange={this.onLegacyAsyncDoneValuesChange} value={jsonData.legacyAsyncDoneValues || ''} placeholder="done,complete,completed" />
+          <FormField name="LegacyAsyncErrorValuesInputField" label="Error" labelWidth={14} inputWidth={20} onChange={this.onLegacyAsyncErrorValuesChange} value={jsonData.legacyAsyncErrorValues || ''} placeholder="error,failed" />
+          <FormField name="LegacyAsyncCancelledValuesInputField" label="Cancelled" labelWidth={14} inputWidth={20} onChange={this.onLegacyAsyncCancelledValuesChange} value={jsonData.legacyAsyncCancelledValues || ''} placeholder="cancelled,canceled" />
+        </div>
+      </ConfigSection>
+    );
+  }
+
   renderDiagnostics(jsonData: MyDataSourceOptions) {
     return (
       <ConfigSection title="Diagnostics">
@@ -678,6 +835,7 @@ export class ConfigEditor extends PureComponent<Props> {
         {this.renderTLS(jsonData, secureJsonFields, secureJsonData)}
         {this.renderCapabilities(jsonData)}
         {this.renderDefaults(jsonData)}
+        {this.renderLegacyAsync(jsonData)}
         {this.renderDiagnostics(jsonData)}
       </div>
     );
