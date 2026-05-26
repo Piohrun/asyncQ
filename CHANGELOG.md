@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.3
+
+- Added per-datasource sync query result caching with TTL, max-entry bounds, diagnostics, and q comment cache directives.
+- Added per-query cache controls for mode, key mode, TTL, stale TTL, and time bucket.
+- Added stale-while-revalidate support so expired cached results can return immediately while the backend refreshes the cache for the next query.
+- Added strict/shared cache key modes; strict includes Grafana ref ID, while shared can reuse cached q results across panels when the q path is ref-ID independent.
+- Updated Panopticon migration skill guidance for cache policy, warm dashboard reloads, shared result reuse, and stale-refresh limitations.
+
 ## 1.0.2
 
 - Added a bounded reusable synchronous kdb+ IPC connection pool per datasource instance.
