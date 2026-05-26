@@ -22,5 +22,9 @@ datasources:
       panopticonRequestFunction: ""
       syncMaxConnections: 4
       asyncMaxJobs: 16
+      queryCacheEnabled: false
+      queryCacheTTLSeconds: 60
+      queryCacheMaxEntries: 128
+      queryCacheTimeBucketSeconds: 0
       diagnosticsEnabled: true
       diagnosticsLogQueryText: false

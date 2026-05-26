@@ -23,6 +23,8 @@ Variables and Grafana alerting use sync mode.
 
 Each datasource instance owns a bounded sync IPC connection pool. `Sync Max Connections` defaults to `4`, so independent sync panels against the same datasource can run concurrently instead of queueing behind one handle. Set it to `1` when a legacy gateway requires strict serial access, per-handle session state, or has a low connection limit.
 
+Sync query result caching is available but disabled by default. When `Query Cache` is enabled, successful sync query results are cached in memory inside the datasource instance for `Cache TTL (s)` seconds, bounded by `Cache Entries`. Cache keys include the compiled query text, time range, interval, max data points, execution/compatibility options, datasource identity, and Grafana user context, so user-specific gateway responses are not shared across users. `Cache Time Bucket (s)` defaults to `0` for exact time ranges; set it to a small value such as `5`, `30`, or `60` when relative `now` dashboards should reuse warm results briefly. Add a q comment containing `asyncq:cache=off` or `asyncq:cache=bypass` to a query to force that query to hit kdb+ even when datasource caching is enabled.
+
 ### Helper Async
 
 Helper Async mode is served through Grafana Live. The backend opens a dedicated kdb+ connection and calls q helper or gateway functions:
@@ -163,7 +165,7 @@ Datasource config includes two diagnostic switches:
 - `Diagnostics` writes structured backend logs for query receipt, preparation, q execution, result parsing, frame send, cancellation, and completion across sync, helper async, plugin async, deferred async, and stream paths.
 - `Log Query Text` additionally writes raw query and wrapper text to backend logs. It is disabled by default because q text can contain sensitive table names, filters, identifiers, or credentials.
 
-Safe diagnostics logs include request IDs, Grafana ref IDs, execution and compatibility modes, time-range metadata, query and wrapper SHA-256 hashes, kdb+ object descriptions, Grafana frame schemas, durations, job IDs, stream IDs, q worker IDs, q result metadata, status changes, and errors. Sync diagnostics also include pool acquire wait, opened/reused connections, active/idle pool state, release/discard action, and transport duration, which helps distinguish plugin-side pool saturation from q-side gateway serialization. q stack traces are hashed by default and logged verbatim only with `Log Query Text`. The local demo provisions `diagnosticsEnabled: true` and `diagnosticsLogQueryText: false` so you can inspect behavior without exposing raw q text.
+Safe diagnostics logs include request IDs, Grafana ref IDs, execution and compatibility modes, time-range metadata, query and wrapper SHA-256 hashes, kdb+ object descriptions, Grafana frame schemas, durations, job IDs, stream IDs, q worker IDs, q result metadata, status changes, and errors. Sync diagnostics also include pool acquire wait, opened/reused connections, active/idle pool state, release/discard action, transport duration, and query-cache status (`disabled`, `bypassed`, `miss`, `stored`, or `hit`). These fields help distinguish plugin-side pool saturation, q-side gateway serialization, and warm-cache reuse. q stack traces are hashed by default and logged verbatim only with `Log Query Text`. The local demo provisions `diagnosticsEnabled: true` and `diagnosticsLogQueryText: false` so you can inspect behavior without exposing raw q text.
 
 ## Security
 

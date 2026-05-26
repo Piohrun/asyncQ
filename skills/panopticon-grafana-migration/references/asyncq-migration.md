@@ -20,6 +20,8 @@ Verdict legend:
 
 AsyncQ sync execution uses a per-datasource kdb+ IPC connection pool. `syncMaxConnections` defaults to `4`, so direct sync panels can run concurrently against the same datasource instance. Set `syncMaxConnections=1` when validating old Panopticon-serving ports that rely on strict serial requests, per-handle session state, or limited connection capacity.
 
+AsyncQ can also cache successful sync query results in the datasource instance. Keep `queryCacheEnabled=false` while validating correctness. Enable it later for Panopticon dashboards that are safe to serve from a short-lived result cache. Cache keys include the compiled query, time range, interval, max data points, datasource identity, and Grafana user context. `queryCacheTimeBucketSeconds` defaults to `0` for exact time ranges; set it to a small bucket such as `5`, `30`, or `60` when relative `now` dashboard reloads should reuse warm results. Do not enable cache for writeback/action queries or gateway calls with side effects; add a q comment containing `asyncq:cache=off` or `asyncq:cache=bypass` to force a specific query to hit kdb+.
+
 ### Query And Execution
 
 | Panopticon behavior | AsyncQ status | AsyncQ configuration | Notes and limits |
@@ -30,6 +32,7 @@ AsyncQ sync execution uses a per-datasource kdb+ IPC connection pool. `syncMaxCo
 | Existing panel passes a full request object into a q function | Config-only if the function can accept AsyncQ's request dict; otherwise adapter needed | Set `panopticonRequestFunction` | AsyncQ passes a request dictionary with `Query`, `Panopticon`, top-level time aliases, datasource, user, and execution metadata. Proprietary envelopes need mapping. |
 | Panopticon source uses positional function args | Config-only or adapter needed | Prefer query text like `.fn[arg1;arg2]`; use wrapper/request function if args come from time range or variables | Works when args are expressible as q literals after macro/variable expansion. |
 | Multiple panels share one base query/result | Config-only | One AsyncQ source panel, dependent panels use Grafana datasource `-- Dashboard --` and `Use results from panel` | Do not duplicate the same AsyncQ target in each dependent panel; duplicate targets produce repeated kdb+ requests. |
+| Dashboard reopens should use warm server-side results | Config-only if stale data is acceptable | Enable datasource `queryCacheEnabled`, set `queryCacheTTLSeconds`, optionally set `queryCacheTimeBucketSeconds`, and keep Dashboard datasource sharing for dependent panels | This approximates Panopticon query result cache. Cache only successful sync results and is local to the Grafana plugin process/datasource instance. Time bucketing is important for relative `now` ranges because exact absolute times otherwise change on every reload. |
 | Panopticon server-side async submit/status/result/cancel | Adapter needed unless it already matches `.grafana.asyncq.async.*` | `executionMode="async"` only for the AsyncQ helper contract | Discover job ID field, status values, result function, error fields, expiry, and cancel semantics before patching. |
 | Deferred response or callback over IPC handle | Adapter needed | Current `deferredAsync` only wraps a query then runs Plugin Async | True q `neg` callback/deferred protocols need a plugin adapter that registers the callback handle and translates returned messages. |
 | Gateway only accepts serialized/proprietary Panopticon envelopes | Adapter needed | Implement envelope builder in plugin or q shim | Do not claim copy/paste until the envelope schema is known. |
@@ -291,6 +294,7 @@ Common fixes:
 | Helper async never completes | q helper contract mismatch | Test `.grafana.asyncq.async.submit/status/result/cancel` directly |
 | Request function fails | Expects different request envelope | Use top-level aliases or `req\`Panopticon`; add a small q shim |
 | Panels still resolve one by one after raising `syncMaxConnections` | Target q gateway/process serializes requests or datasource config was not applied | Inspect diagnostics: high `syncPoolAcquireWaitMs` means plugin pool saturation; low acquire wait with high `syncTransportMs` means the target q side is taking/serializing the work |
+| Reopened dashboard still hits kdb+ | Query cache disabled, cache TTL expired, exact relative `now` timestamps changed, query key changed, or query contains cache bypass marker | Enable `queryCacheEnabled`, increase `queryCacheTTLSeconds`, set `queryCacheTimeBucketSeconds` for relative ranges, keep variables stable, and inspect `queryCacheStatus` diagnostics |
 
 For production debugging, prefer adding a q adapter that logs job ID, ref ID, time range, query hash, and result type on the q side without logging sensitive query text.
 

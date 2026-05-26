@@ -163,6 +163,28 @@ export class ConfigEditor extends PureComponent<Props> {
     }
   };
 
+  onQueryCacheToggle = (event: SyntheticEvent) => {
+    this.updateJsonData({ queryCacheEnabled: !this.props.options.jsonData.queryCacheEnabled });
+  };
+
+  onQueryCacheTTLChange = (event: ChangeEvent<HTMLInputElement>) => {
+    if (/^\d+$/.test(event.target.value) || event.target.value === '') {
+      this.updateJsonData({ queryCacheTTLSeconds: event.target.value === '' ? undefined : parseInt(event.target.value, 10) });
+    }
+  };
+
+  onQueryCacheMaxEntriesChange = (event: ChangeEvent<HTMLInputElement>) => {
+    if (/^\d+$/.test(event.target.value) || event.target.value === '') {
+      this.updateJsonData({ queryCacheMaxEntries: event.target.value === '' ? undefined : parseInt(event.target.value, 10) });
+    }
+  };
+
+  onQueryCacheTimeBucketChange = (event: ChangeEvent<HTMLInputElement>) => {
+    if (/^\d+$/.test(event.target.value) || event.target.value === '') {
+      this.updateJsonData({ queryCacheTimeBucketSeconds: event.target.value === '' ? undefined : parseInt(event.target.value, 10) });
+    }
+  };
+
   onTlsCertificateChange = (event: FormEvent<HTMLTextAreaElement>) => {
     const { onOptionsChange, options } = this.props;
     onOptionsChange({
@@ -410,6 +432,43 @@ export class ConfigEditor extends PureComponent<Props> {
             value={jsonData.asyncMaxJobs ?? ''}
             placeholder="16"
             tooltip="Maximum plugin-managed async jobs for this datasource instance."
+          />
+        </div>
+        <div className="gf-form">
+          <InlineField label="Query Cache" labelWidth={18} tooltip="Caches successful sync query results in this datasource instance. Disable for writeback/action queries or panels that must always hit kdb+.">
+            <InlineSwitch checked={!!jsonData.queryCacheEnabled} onChange={this.onQueryCacheToggle} />
+          </InlineField>
+          <FormField
+            name="QueryCacheTTLInputField"
+            label="Cache TTL (s)"
+            labelWidth={14}
+            inputWidth={12}
+            onChange={this.onQueryCacheTTLChange}
+            value={jsonData.queryCacheTTLSeconds ?? ''}
+            placeholder="60"
+            tooltip="How long a successful sync query result can be reused before the plugin asks kdb+ again."
+          />
+          <FormField
+            name="QueryCacheMaxEntriesInputField"
+            label="Cache Entries"
+            labelWidth={14}
+            inputWidth={12}
+            onChange={this.onQueryCacheMaxEntriesChange}
+            value={jsonData.queryCacheMaxEntries ?? ''}
+            placeholder="128"
+            tooltip="Maximum cached sync query results kept in memory for this datasource instance."
+          />
+        </div>
+        <div className="gf-form">
+          <FormField
+            name="QueryCacheTimeBucketInputField"
+            label="Cache Time Bucket (s)"
+            labelWidth={18}
+            inputWidth={12}
+            onChange={this.onQueryCacheTimeBucketChange}
+            value={jsonData.queryCacheTimeBucketSeconds ?? ''}
+            placeholder="0"
+            tooltip="Rounds query time ranges in the cache key. Keep 0 for exact time ranges; use values like 5, 30, or 60 for relative now-based dashboards that should reuse warm results briefly."
           />
         </div>
       </ConfigSection>

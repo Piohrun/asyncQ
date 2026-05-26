@@ -36,8 +36,16 @@ func (d *KdbDatasource) diagnosticQueryFields(pCtx backend.PluginContext, query 
 		originalQuery = model.QueryText
 	}
 	syncMaxConnections := 0
+	queryCacheEnabled := false
+	queryCacheTTLSeconds := 0
+	queryCacheMaxEntries := 0
+	queryCacheTimeBucketSeconds := 0
 	if d != nil {
 		syncMaxConnections = d.SyncMaxConnections
+		queryCacheEnabled = d.QueryCacheEnabled
+		queryCacheTTLSeconds = d.QueryCacheTTLSeconds
+		queryCacheMaxEntries = d.QueryCacheMaxEntries
+		queryCacheTimeBucketSeconds = d.QueryCacheTimeBucketSeconds
 	}
 	fields := []interface{}{
 		"requestID", requestID,
@@ -51,6 +59,10 @@ func (d *KdbDatasource) diagnosticQueryFields(pCtx backend.PluginContext, query 
 		"originalQueryLen", len(originalQuery),
 		"timeoutMs", model.Timeout,
 		"syncMaxConnections", syncMaxConnections,
+		"queryCacheConfigured", queryCacheEnabled,
+		"queryCacheTTLSeconds", queryCacheTTLSeconds,
+		"queryCacheMaxEntries", queryCacheMaxEntries,
+		"queryCacheTimeBucketSeconds", queryCacheTimeBucketSeconds,
 		"pollIntervalMs", model.PollIntervalMs,
 		"maxStreamRows", model.MaxStreamRows,
 		"streamRetentionMs", model.StreamRetentionMs,

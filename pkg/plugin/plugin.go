@@ -31,12 +31,15 @@ const (
 	CompatibilityModeAquaQ      = "aquaq"
 	CompatibilityModePanopticon = "panopticon"
 
-	defaultQueryTimeout       = 10000
-	defaultPollIntervalMs     = 1000
-	defaultMaxStreamRows      = 1000
-	defaultAsyncMaxJobs       = 16
-	defaultSyncMaxConnections = 4
-	asyncQHelperUnavailable   = "async/stream queries require q/asyncq_grafana.q to be loaded in the target kdb+ process or gateway"
+	defaultQueryTimeout         = 10000
+	defaultPollIntervalMs       = 1000
+	defaultMaxStreamRows        = 1000
+	defaultAsyncMaxJobs         = 16
+	defaultSyncMaxConnections   = 4
+	defaultQueryCacheTTL        = 60
+	defaultQueryCacheMax        = 128
+	defaultQueryCacheTimeBucket = 0
+	asyncQHelperUnavailable     = "async/stream queries require q/asyncq_grafana.q to be loaded in the target kdb+ process or gateway"
 )
 
 var (
@@ -83,25 +86,29 @@ type kdbSyncRes struct {
 }
 
 type KdbDatasource struct {
-	Host                      string `json:"host"`
-	Port                      int    `json:"port"`
-	Timeout                   string `json:"timeout"`
-	WithTls                   bool   `json:"withTLS"`
-	SkipVertifyTLS            bool   `json:"skipVerifyTLS"`
-	WithCACert                bool   `json:"withCACert"`
-	EnableAsync               bool   `json:"enableAsync"`
-	EnableStreaming           bool   `json:"enableStreaming"`
-	ExecutionMode             string `json:"executionMode,omitempty"`
-	CompatibilityMode         string `json:"compatibilityMode,omitempty"`
-	DeferredQueryWrapper      string `json:"deferredQueryWrapper,omitempty"`
-	PanopticonQueryWrapper    string `json:"panopticonQueryWrapper,omitempty"`
-	PanopticonRequestFunction string `json:"panopticonRequestFunction,omitempty"`
-	AsyncMaxJobs              int    `json:"asyncMaxJobs,omitempty"`
-	SyncMaxConnections        int    `json:"syncMaxConnections,omitempty"`
-	DiagnosticsEnabled        bool   `json:"diagnosticsEnabled,omitempty"`
-	DiagnosticsLogQueryText   bool   `json:"diagnosticsLogQueryText,omitempty"`
-	asyncConfigured           bool
-	streamConfigured          bool
+	Host                        string `json:"host"`
+	Port                        int    `json:"port"`
+	Timeout                     string `json:"timeout"`
+	WithTls                     bool   `json:"withTLS"`
+	SkipVertifyTLS              bool   `json:"skipVerifyTLS"`
+	WithCACert                  bool   `json:"withCACert"`
+	EnableAsync                 bool   `json:"enableAsync"`
+	EnableStreaming             bool   `json:"enableStreaming"`
+	ExecutionMode               string `json:"executionMode,omitempty"`
+	CompatibilityMode           string `json:"compatibilityMode,omitempty"`
+	DeferredQueryWrapper        string `json:"deferredQueryWrapper,omitempty"`
+	PanopticonQueryWrapper      string `json:"panopticonQueryWrapper,omitempty"`
+	PanopticonRequestFunction   string `json:"panopticonRequestFunction,omitempty"`
+	AsyncMaxJobs                int    `json:"asyncMaxJobs,omitempty"`
+	SyncMaxConnections          int    `json:"syncMaxConnections,omitempty"`
+	QueryCacheEnabled           bool   `json:"queryCacheEnabled,omitempty"`
+	QueryCacheTTLSeconds        int    `json:"queryCacheTTLSeconds,omitempty"`
+	QueryCacheMaxEntries        int    `json:"queryCacheMaxEntries,omitempty"`
+	QueryCacheTimeBucketSeconds int    `json:"queryCacheTimeBucketSeconds,omitempty"`
+	DiagnosticsEnabled          bool   `json:"diagnosticsEnabled,omitempty"`
+	DiagnosticsLogQueryText     bool   `json:"diagnosticsLogQueryText,omitempty"`
+	asyncConfigured             bool
+	streamConfigured            bool
 
 	user            string
 	pass            string
@@ -118,6 +125,8 @@ type KdbDatasource struct {
 	syncPoolMax     int
 	syncPoolMu      sync.Mutex
 	syncPoolClosed  bool
+	queryCache      *syncQueryCache
+	queryCacheMu    sync.Mutex
 
 	signals             chan int
 	syncQueue           chan *kdbSyncQuery
@@ -243,6 +252,15 @@ func (d *KdbDatasource) normalizeDatasourceDefaults() {
 	if d.SyncMaxConnections < 1 {
 		d.SyncMaxConnections = defaultSyncMaxConnections
 	}
+	if d.QueryCacheTTLSeconds < 1 {
+		d.QueryCacheTTLSeconds = defaultQueryCacheTTL
+	}
+	if d.QueryCacheMaxEntries < 1 {
+		d.QueryCacheMaxEntries = defaultQueryCacheMax
+	}
+	if d.QueryCacheTimeBucketSeconds < 0 {
+		d.QueryCacheTimeBucketSeconds = defaultQueryCacheTimeBucket
+	}
 	if d.asyncJobs == nil {
 		d.asyncJobs = make(chan struct{}, d.AsyncMaxJobs)
 	}
@@ -251,6 +269,7 @@ func (d *KdbDatasource) normalizeDatasourceDefaults() {
 func (d *KdbDatasource) Dispose() {
 	log.DefaultLogger.Info("Dispose called")
 	d.closeSyncPool()
+	d.closeSyncQueryCache()
 	if d.IsOpen {
 		log.DefaultLogger.Info("Handle open when dispose called, closing handle")
 		if err := d.CloseConnection(); err != nil {
@@ -385,22 +404,14 @@ func (d *KdbDatasource) query(_ context.Context, pCtx backend.PluginContext, que
 	fields = d.diagnosticQueryFields(pCtx, query, model, requestID)
 	d.logDiagnostics("sync query prepared", fields...)
 
-	kdbResponse, err := d.RunKdbQuerySync(buildSyncQueryPayload(pCtx, query, model), time.Duration(model.Timeout)*time.Millisecond, fields...)
+	result, err := d.runSyncQueryWithCache(pCtx, query, model, fields)
 	if err != nil {
-		d.logDiagnosticError("sync query failed", appendDiagnosticError(fields, err)...)
+		d.logDiagnosticError(result.errorMessage, appendDiagnosticError(result.fields, err)...)
 		response.Error = err
 		return response
 	}
-	fields = appendDiagnosticKdbObject(fields, "kdbResponse", kdbResponse)
-
-	frames, err := parseKdbResponseToFrames(kdbResponse, model, query.RefID)
-	if err != nil {
-		d.logDiagnosticError("sync result parse failed", appendDiagnosticError(fields, err)...)
-		response.Error = err
-		return response
-	}
-	response.Frames = append(response.Frames, frames...)
-	fields = appendDiagnosticFrames(fields, frames)
+	response.Frames = append(response.Frames, result.frames...)
+	fields = appendDiagnosticFrames(result.fields, result.frames)
 	fields = append(fields, "durationMs", time.Since(start).Milliseconds())
 	d.logDiagnostics("sync query completed", fields...)
 	return response
