@@ -52,6 +52,11 @@ export interface MyDataSourceOptions extends DataSourceJsonData {
   queryCacheTimeBucketSeconds?: number;
   queryCacheStaleTTLSeconds?: number;
   queryCacheKeyMode?: 'strict' | 'shared';
+  queryCacheDiskEnabled?: boolean;
+  queryCacheDiskPath?: string;
+  queryCacheDiskMaxBytes?: number;
+  queryCacheDiskMaxEntries?: number;
+  queryCacheControlEnabled?: boolean;
   diagnosticsEnabled?: boolean;
   diagnosticsLogQueryText?: boolean;
 }
@@ -65,12 +70,16 @@ export const defaultConfig: Partial<MyDataSourceOptions> = {
   executionMode: 'sync',
   compatibilityMode: 'native',
   syncMaxConnections: 4,
-  queryCacheEnabled: false,
+  queryCacheEnabled: true,
   queryCacheTTLSeconds: 60,
   queryCacheMaxEntries: 128,
   queryCacheTimeBucketSeconds: 0,
   queryCacheStaleTTLSeconds: 0,
   queryCacheKeyMode: 'strict',
+  queryCacheDiskEnabled: true,
+  queryCacheDiskMaxBytes: 1073741824,
+  queryCacheDiskMaxEntries: 10000,
+  queryCacheControlEnabled: true,
   diagnosticsEnabled: false,
   diagnosticsLogQueryText: false,
 };

@@ -33,6 +33,7 @@ go.work.sum
 
 # Grafana frontend build output
 dist/
+dist-panel/
 
 # Local demo runtime state
 demo/logs/

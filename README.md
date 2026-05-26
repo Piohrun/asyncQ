@@ -23,7 +23,7 @@ Variables and Grafana alerting use sync mode.
 
 Each datasource instance owns a bounded sync IPC connection pool. `Sync Max Connections` defaults to `4`, so independent sync panels against the same datasource can run concurrently instead of queueing behind one handle. Set it to `1` when a legacy gateway requires strict serial access, per-handle session state, or has a low connection limit.
 
-Sync query result caching is available but disabled by default. When `Query Cache` is enabled, successful sync query results are cached in memory inside the datasource instance for `Cache TTL (s)` seconds, bounded by `Cache Entries`. Cache keys include the compiled query text, time range, interval, max data points, execution/compatibility options, datasource identity, and Grafana user context, so user-specific gateway responses are not shared across users. `Cache Time Bucket (s)` defaults to `0` for exact time ranges; set it to a small value such as `5`, `30`, or `60` when relative `now` dashboards should reuse warm results briefly. `Stale TTL (s)` enables stale-while-revalidate: expired cached data is returned immediately while the backend refreshes the cache for the next query. `Cache Key` defaults to `Strict`, which includes Grafana ref ID; `Shared` omits ref ID for panels that safely share one result. Per-query cache controls can override mode, key mode, TTL, stale TTL, and time bucket. Add a q comment containing `asyncq:cache=off`, `asyncq:cache=bypass`, `asyncq:cache=refresh`, or `asyncq:cache=on` to force query-level behavior from copied q text.
+Sync query result caching is enabled by default for new datasource configs and is intended for read-only gateway calls. Successful sync query results are cached in memory and, by default, on local disk for `Cache TTL (s)` seconds, bounded by the memory and disk cache limits. Explicit `queryCacheEnabled: false` or `queryCacheDiskEnabled: false` settings are still respected. Cache keys include the compiled query text, time range, interval, max data points, execution/compatibility options, datasource identity, and Grafana user context, so user-specific gateway responses are not shared across users. `Cache Time Bucket (s)` defaults to `0` for exact time ranges; set it to a small value such as `5`, `30`, or `60` when relative `now` dashboards should reuse warm results briefly. `Stale TTL (s)` enables stale-while-revalidate: expired cached data is returned immediately while the backend refreshes the cache for the next query. `Cache Key` defaults to `Strict`, which includes Grafana ref ID; `Shared` omits ref ID for panels that safely share one result. Per-query cache controls can override mode, key mode, TTL, stale TTL, and time bucket. Add a q comment containing `asyncq:cache=off`, `asyncq:cache=bypass`, `asyncq:cache=refresh`, or `asyncq:cache=on` to force query-level behavior from copied q text.
 
 ### Helper Async
 
@@ -165,7 +165,20 @@ Datasource config includes two diagnostic switches:
 - `Diagnostics` writes structured backend logs for query receipt, preparation, q execution, result parsing, frame send, cancellation, and completion across sync, helper async, plugin async, deferred async, and stream paths.
 - `Log Query Text` additionally writes raw query and wrapper text to backend logs. It is disabled by default because q text can contain sensitive table names, filters, identifiers, or credentials.
 
-Safe diagnostics logs include request IDs, Grafana ref IDs, execution and compatibility modes, time-range metadata, query and wrapper SHA-256 hashes, kdb+ object descriptions, Grafana frame schemas, durations, job IDs, stream IDs, q worker IDs, q result metadata, status changes, and errors. Sync diagnostics also include pool acquire wait, opened/reused connections, active/idle pool state, release/discard action, transport duration, and query-cache status (`disabled`, `bypassed`, `miss`, `refresh`, `stored`, `stale`, or `hit`). These fields help distinguish plugin-side pool saturation, q-side gateway serialization, and warm-cache reuse. q stack traces are hashed by default and logged verbatim only with `Log Query Text`. The local demo provisions `diagnosticsEnabled: true` and `diagnosticsLogQueryText: false` so you can inspect behavior without exposing raw q text.
+Safe diagnostics logs include request IDs, Grafana ref IDs, execution and compatibility modes, time-range metadata, query and wrapper SHA-256 hashes, kdb+ object descriptions, Grafana frame schemas, durations, job IDs, stream IDs, q worker IDs, q result metadata, status changes, and errors. Sync diagnostics also include pool acquire wait, opened/reused connections, active/idle pool state, release/discard action, transport duration, query-cache status (`disabled`, `bypassed`, `miss`, `refresh`, `stored`, `stale`, or `hit`), and cache storage (`memory`, `disk`, or `memory+disk`). These fields help distinguish plugin-side pool saturation, q-side gateway serialization, and warm-cache reuse. The same diagnostics are attached to returned frames under `frame.meta.custom.asyncqDiagnostics`, so panels can display freshness/cache state without scraping logs. q stack traces are hashed by default and logged verbatim only with `Log Query Text`. The local demo provisions `diagnosticsEnabled: true` and `diagnosticsLogQueryText: false` so you can inspect behavior without exposing raw q text.
+
+## Cache And Master Data Panel
+
+Sync query caching has an in-memory layer and an optional self-contained local disk layer. New datasource configs default to cache enabled, 60-second TTL, 128 memory entries, disk cache enabled, 10,000 disk entries, and a 1 GiB disk budget. Existing explicit `queryCacheEnabled: false` or `queryCacheDiskEnabled: false` settings remain respected. Disable cache for writeback/action queries or gateway calls with side effects.
+
+The backend exposes datasource resources for cache status and control:
+
+- `GET cache/status` and `GET cache/entries`
+- `POST cache/clear`, `POST cache/clear-entry`, and `POST cache/clear-expired`
+
+Cache status is read-only for any user who can query the datasource. Cache clear actions require `Cache Controls` to be enabled on the datasource and a Grafana `Admin` or `Editor` role.
+
+This repo also includes a companion panel plugin, `asyncq-masterdata-panel`. Use it as a master data panel that runs one AsyncQ query, exposes freshness/cache diagnostics, and can be referenced by dependent panels through Grafana's `-- Dashboard --` datasource. Freshness mode is a small widget-style view for main dashboard tabs.
 
 ## Security
 
@@ -186,8 +199,8 @@ Install dependencies and run checks:
 
 ```bash
 npm install
-npm run typecheck
-npm run build
+npm test
+npm run build:all
 go test ./pkg/...
 ```
 
@@ -197,7 +210,7 @@ Validate the q helper if a local `q` binary is available:
 printf '\\\\\n' | q q/asyncq_grafana.q -q -T 5 -w 1024 -u 1 -b
 ```
 
-The frontend build writes `dist/module.js` and copies plugin metadata. Backend binaries can be built with Mage once the target Grafana plugin packaging flow is set up.
+The datasource frontend build writes `dist/module.js` and copies datasource metadata. The companion panel build writes `dist-panel/asyncq-masterdata-panel/module.js`.
 
 ## Local demo
 

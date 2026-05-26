@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
+	"github.com/grafana/grafana-plugin-sdk-go/data"
 	kdb "github.com/sv/kdbgo"
 )
 
@@ -412,15 +413,211 @@ func TestQueryDataCacheCoalescesConcurrentMisses(t *testing.T) {
 	}
 }
 
+func TestQueryDataDiskCachePersistsAcrossDatasourceInstances(t *testing.T) {
+	cacheDir := t.TempDir()
+	req := cacheTestRequest(t, "A", "1", time.Time{}, time.Time{})
+
+	ds1 := diskCachedTestDatasource(cacheDir)
+	var calls1 int32
+	ds1.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
+		return kdb.Long(int64(atomic.AddInt32(&calls1, 1))), nil
+	}
+	first, err := ds1.QueryData(context.Background(), req)
+	if err != nil {
+		t.Fatalf("first QueryData returned error: %v", err)
+	}
+	if got := first.Responses["A"].Frames[0].At(0, 0).(int64); got != 1 {
+		t.Fatalf("expected first value 1, got %d", got)
+	}
+
+	ds2 := diskCachedTestDatasource(cacheDir)
+	var calls2 int32
+	ds2.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
+		return kdb.Long(int64(atomic.AddInt32(&calls2, 1))), nil
+	}
+	second, err := ds2.QueryData(context.Background(), req)
+	if err != nil {
+		t.Fatalf("second QueryData returned error: %v", err)
+	}
+	if got := second.Responses["A"].Frames[0].At(0, 0).(int64); got != 1 {
+		t.Fatalf("expected disk cached value 1, got %d", got)
+	}
+	if calls1 != 1 || calls2 != 0 {
+		t.Fatalf("expected first instance to call once and second to hit disk cache, got calls1=%d calls2=%d", calls1, calls2)
+	}
+
+	diagnostics := asyncQDiagnosticsFromFrame(t, second.Responses["A"].Frames[0])
+	if diagnostics["queryCacheStorage"] != "disk" {
+		t.Fatalf("expected disk cache diagnostic, got %#v", diagnostics["queryCacheStorage"])
+	}
+}
+
+func TestQueryDataAttachesDiagnosticsToFrames(t *testing.T) {
+	ds := cachedTestDatasource()
+	ds.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
+		return kdb.Long(1), nil
+	}
+
+	resp, err := ds.QueryData(context.Background(), cacheTestRequest(t, "A", "1", time.Time{}, time.Time{}))
+	if err != nil {
+		t.Fatalf("QueryData returned error: %v", err)
+	}
+
+	diagnostics := asyncQDiagnosticsFromFrame(t, resp.Responses["A"].Frames[0])
+	if diagnostics["requestID"] == "" {
+		t.Fatalf("expected requestID diagnostic, got %#v", diagnostics)
+	}
+	if diagnostics["queryCacheStatus"] != "stored" {
+		t.Fatalf("expected stored cache diagnostic, got %#v", diagnostics["queryCacheStatus"])
+	}
+}
+
+func TestCacheResourceClearEntryEvictsMemoryAndDisk(t *testing.T) {
+	ds := diskCachedTestDatasource(t.TempDir())
+	var calls int32
+	ds.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
+		return kdb.Long(int64(atomic.AddInt32(&calls, 1))), nil
+	}
+
+	req := cacheTestRequest(t, "A", "1", time.Time{}, time.Time{})
+	first, err := ds.QueryData(context.Background(), req)
+	if err != nil {
+		t.Fatalf("first QueryData returned error: %v", err)
+	}
+	diagnostics := asyncQDiagnosticsFromFrame(t, first.Responses["A"].Frames[0])
+	key, ok := diagnostics["queryCacheKey"].(string)
+	if !ok || key == "" {
+		t.Fatalf("expected queryCacheKey diagnostic, got %#v", diagnostics["queryCacheKey"])
+	}
+
+	raw, err := json.Marshal(cacheResourceRequest{Scope: "both", Key: key})
+	if err != nil {
+		t.Fatalf("failed to marshal resource body: %v", err)
+	}
+	var resourceResp *backend.CallResourceResponse
+	err = ds.CallResource(context.Background(), &backend.CallResourceRequest{
+		PluginContext: backend.PluginContext{User: &backend.User{Role: "Editor"}},
+		Path:          "cache/clear-entry",
+		Body:          raw,
+	}, backend.CallResourceResponseSenderFunc(func(resp *backend.CallResourceResponse) error {
+		resourceResp = resp
+		return nil
+	}))
+	if err != nil {
+		t.Fatalf("CallResource returned error: %v", err)
+	}
+	if resourceResp == nil || resourceResp.Status != 200 {
+		t.Fatalf("unexpected resource response: %#v", resourceResp)
+	}
+
+	if _, err := ds.QueryData(context.Background(), req); err != nil {
+		t.Fatalf("second QueryData returned error: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("expected cache clear-entry to force a second kdb call, got %d", calls)
+	}
+}
+
+func TestCacheResourceControlsRequireEditorOrAdmin(t *testing.T) {
+	ds := cachedTestDatasource()
+	raw, err := json.Marshal(cacheResourceRequest{Scope: "both"})
+	if err != nil {
+		t.Fatalf("failed to marshal resource body: %v", err)
+	}
+
+	var resourceResp *backend.CallResourceResponse
+	err = ds.CallResource(context.Background(), &backend.CallResourceRequest{
+		PluginContext: backend.PluginContext{User: &backend.User{Role: "Viewer"}},
+		Path:          "cache/clear",
+		Body:          raw,
+	}, backend.CallResourceResponseSenderFunc(func(resp *backend.CallResourceResponse) error {
+		resourceResp = resp
+		return nil
+	}))
+	if err != nil {
+		t.Fatalf("CallResource returned error: %v", err)
+	}
+	if resourceResp == nil || resourceResp.Status != 403 {
+		t.Fatalf("expected viewer cache clear to be forbidden, got %#v", resourceResp)
+	}
+
+	resourceResp = nil
+	err = ds.CallResource(context.Background(), &backend.CallResourceRequest{
+		PluginContext: backend.PluginContext{User: &backend.User{Role: "Viewer"}},
+		Path:          "cache/status",
+	}, backend.CallResourceResponseSenderFunc(func(resp *backend.CallResourceResponse) error {
+		resourceResp = resp
+		return nil
+	}))
+	if err != nil {
+		t.Fatalf("CallResource status returned error: %v", err)
+	}
+	if resourceResp == nil || resourceResp.Status != 200 {
+		t.Fatalf("expected viewer cache status to be allowed, got %#v", resourceResp)
+	}
+}
+
+func TestCacheResourceControlsCanBeDisabled(t *testing.T) {
+	ds := cachedTestDatasource()
+	ds.QueryCacheControlEnabled = false
+	ds.queryCacheControlConfigured = true
+
+	raw, err := json.Marshal(cacheResourceRequest{Scope: "both"})
+	if err != nil {
+		t.Fatalf("failed to marshal resource body: %v", err)
+	}
+	var resourceResp *backend.CallResourceResponse
+	err = ds.CallResource(context.Background(), &backend.CallResourceRequest{
+		PluginContext: backend.PluginContext{User: &backend.User{Role: "Admin"}},
+		Path:          "cache/clear",
+		Body:          raw,
+	}, backend.CallResourceResponseSenderFunc(func(resp *backend.CallResourceResponse) error {
+		resourceResp = resp
+		return nil
+	}))
+	if err != nil {
+		t.Fatalf("CallResource returned error: %v", err)
+	}
+	if resourceResp == nil || resourceResp.Status != 403 {
+		t.Fatalf("expected disabled cache controls to be forbidden, got %#v", resourceResp)
+	}
+}
+
 func cachedTestDatasource() *KdbDatasource {
 	ds := &KdbDatasource{
-		QueryCacheEnabled:    true,
-		QueryCacheTTLSeconds: 60,
-		QueryCacheMaxEntries: 8,
+		QueryCacheEnabled:        true,
+		QueryCacheTTLSeconds:     60,
+		QueryCacheMaxEntries:     8,
+		QueryCacheControlEnabled: true,
 	}
 	ds.setupKdbConnectionHandlers()
 	ds.normalizeDatasourceDefaults()
 	return ds
+}
+
+func diskCachedTestDatasource(cacheDir string) *KdbDatasource {
+	ds := cachedTestDatasource()
+	ds.QueryCacheDiskEnabled = true
+	ds.QueryCacheDiskPath = cacheDir
+	ds.QueryCacheDiskMaxBytes = 1024 * 1024
+	ds.QueryCacheDiskMaxEntries = 64
+	return ds
+}
+
+func asyncQDiagnosticsFromFrame(t *testing.T, frame *data.Frame) map[string]interface{} {
+	t.Helper()
+	if frame == nil || frame.Meta == nil {
+		t.Fatal("frame diagnostics metadata missing")
+	}
+	custom, ok := frame.Meta.Custom.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected metadata custom map, got %T", frame.Meta.Custom)
+	}
+	diagnostics, ok := custom[asyncQDiagnosticsMetaKey].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected %s map, got %#v", asyncQDiagnosticsMetaKey, custom[asyncQDiagnosticsMetaKey])
+	}
+	return diagnostics
 }
 
 func cacheTestRequest(t *testing.T, refID string, queryText string, from time.Time, to time.Time) *backend.QueryDataRequest {

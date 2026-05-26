@@ -8,7 +8,7 @@ Sync mode is the default and keeps the upstream request envelope. Variables and 
 
 Each datasource instance has a bounded sync IPC connection pool. `Sync Max Connections` defaults to `4`, allowing independent sync panels on the same datasource to run concurrently. Set it to `1` for strict legacy serial behavior or gateways with per-handle state/low connection limits.
 
-Datasource `Query Cache` can cache successful sync query results in memory for `Cache TTL (s)` seconds, up to `Cache Entries` per datasource instance. It is disabled by default. Cache keys include query text after macro expansion, time range, interval, max data points, datasource identity, and Grafana user context. `Cache Time Bucket (s)` defaults to exact time ranges (`0`); set it to a small bucket to reuse results for relative `now` dashboards. `Stale TTL (s)` returns expired cached data immediately while refreshing the cache in the background for the next query. `Cache Key` defaults to `Strict`; use `Shared` only when the q request does not depend on Grafana ref ID. Per-query cache controls can override mode, key mode, TTL, stale TTL, and time bucket. Put `asyncq:cache=off`, `asyncq:cache=bypass`, `asyncq:cache=refresh`, or `asyncq:cache=on` in a q comment to force query-level behavior.
+Datasource `Query Cache` is enabled by default for new datasource configs and can cache successful sync query results in memory and on local disk for `Cache TTL (s)`. Use it only for read-only gateway calls; explicit disabled settings remain respected. Cache keys include query text after macro expansion, time range, interval, max data points, datasource identity, and Grafana user context. `Cache Time Bucket (s)` defaults to exact time ranges (`0`); set it to a small bucket to reuse results for relative `now` dashboards. `Stale TTL (s)` returns expired cached data immediately while refreshing the cache in the background for the next query. `Cache Key` defaults to `Strict`; use `Shared` only when the q request does not depend on Grafana ref ID. Per-query cache controls can override mode, key mode, TTL, stale TTL, and time bucket. Put `asyncq:cache=off`, `asyncq:cache=bypass`, `asyncq:cache=refresh`, or `asyncq:cache=on` in a q comment to force query-level behavior.
 
 Helper Async mode uses Grafana Live and calls q helper functions:
 
@@ -58,6 +58,19 @@ The request dictionary preserves the upstream `AQUAQ_KDB_BACKEND_GRAF_DATASOURCE
 Panopticon query text and wrappers expand q-literal macros such as `{TimeWindowStart}`, `{TimeWindowEnd}`, `{Snapshot}`, `{FocusTime}`, `$TimeWindowStart`, `{TimeWindowStart:yyyy-MM-dd HH:mm:ss}`, `{IntervalMs}`, `{MaxDataPoints}`, `{RefID}`, and `{UserLogin}`. Panopticon dashboard parameters such as `{symbol}` and `{symbol:,}` are expanded from Grafana variables with matching names in Panopticon mode. `Pano Wrapper` rewrites query text with one `{Query}` placeholder. `Pano Fn` calls a q function or lambda with the full request dictionary instead of evaluating query text directly.
 
 For Panopticon dashboards where several panels share one base query and only apply different transforms or visual options, use one AsyncQ source panel and Grafana's `-- Dashboard --` datasource for dependent panels. Duplicating the same AsyncQ target in every panel sends repeated kdb+ requests.
+
+## Cache And Frame Diagnostics
+
+New datasource configs default to sync query caching enabled with a 60-second TTL and local disk persistence enabled. Existing explicit `queryCacheEnabled: false` or `queryCacheDiskEnabled: false` settings remain respected. Keep cache disabled for writeback/action queries or gateway calls with side effects.
+
+Cache status and controls are exposed as datasource resources:
+
+- `GET cache/status` and `GET cache/entries`
+- `POST cache/clear`, `POST cache/clear-entry`, and `POST cache/clear-expired`
+
+Status endpoints are read-only. Clear endpoints require datasource `Cache Controls` to be enabled and a Grafana `Admin` or `Editor` role.
+
+Successful sync, async, and stream result frames include `frame.meta.custom.asyncqDiagnostics`. The companion `asyncq-masterdata-panel` uses this metadata to show data freshness, cache state, and query diagnostics, and can serve as the master source panel for Dashboard datasource reuse.
 
 ## Diagnostics
 

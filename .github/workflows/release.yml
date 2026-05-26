@@ -21,7 +21,7 @@ jobs:
           cache: npm
 
       - run: npm ci
-      - run: npm run build
+      - run: npm run build:all
 
       - uses: actions/setup-go@v5
         with:
@@ -38,11 +38,17 @@ jobs:
         run: |
           mkdir -p release/asyncq-kdbbackend-datasource
           cp -R dist/. release/asyncq-kdbbackend-datasource/
+          mkdir -p release/asyncq-masterdata-panel
+          cp -R dist-panel/asyncq-masterdata-panel/. release/asyncq-masterdata-panel/
           cd release
           zip -qr "asyncq-kdbbackend-datasource-${GITHUB_REF_NAME}-linux.zip" asyncq-kdbbackend-datasource
           tar -czf "asyncq-kdbbackend-datasource-${GITHUB_REF_NAME}-linux.tar.gz" asyncq-kdbbackend-datasource
+          zip -qr "asyncq-masterdata-panel-${GITHUB_REF_NAME}.zip" asyncq-masterdata-panel
+          tar -czf "asyncq-masterdata-panel-${GITHUB_REF_NAME}.tar.gz" asyncq-masterdata-panel
           sha256sum "asyncq-kdbbackend-datasource-${GITHUB_REF_NAME}-linux.zip" > "asyncq-kdbbackend-datasource-${GITHUB_REF_NAME}-linux.zip.sha256"
           sha256sum "asyncq-kdbbackend-datasource-${GITHUB_REF_NAME}-linux.tar.gz" > "asyncq-kdbbackend-datasource-${GITHUB_REF_NAME}-linux.tar.gz.sha256"
+          sha256sum "asyncq-masterdata-panel-${GITHUB_REF_NAME}.zip" > "asyncq-masterdata-panel-${GITHUB_REF_NAME}.zip.sha256"
+          sha256sum "asyncq-masterdata-panel-${GITHUB_REF_NAME}.tar.gz" > "asyncq-masterdata-panel-${GITHUB_REF_NAME}.tar.gz.sha256"
 
       - name: Publish release
         env:
@@ -53,11 +59,15 @@ jobs:
             "release/asyncq-kdbbackend-datasource-${GITHUB_REF_NAME}-linux.zip.sha256"
             "release/asyncq-kdbbackend-datasource-${GITHUB_REF_NAME}-linux.tar.gz"
             "release/asyncq-kdbbackend-datasource-${GITHUB_REF_NAME}-linux.tar.gz.sha256"
+            "release/asyncq-masterdata-panel-${GITHUB_REF_NAME}.zip"
+            "release/asyncq-masterdata-panel-${GITHUB_REF_NAME}.zip.sha256"
+            "release/asyncq-masterdata-panel-${GITHUB_REF_NAME}.tar.gz"
+            "release/asyncq-masterdata-panel-${GITHUB_REF_NAME}.tar.gz.sha256"
           )
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
           else
             gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
               --title "$GITHUB_REF_NAME" \
-              --notes "AsyncQ kdb+ datasource ${GITHUB_REF_NAME}. Linux plugin package with fully static amd64 and arm64 backend binaries."
+              --notes "AsyncQ kdb+ datasource ${GITHUB_REF_NAME}. Linux datasource package with fully static amd64 and arm64 backend binaries, plus the companion AsyncQ master-data panel package."
           fi

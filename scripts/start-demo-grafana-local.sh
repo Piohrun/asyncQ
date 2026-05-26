@@ -61,6 +61,7 @@ if [[ ! -x "$INSTALL_DIR/bin/grafana" ]]; then
 fi
 
 ln -sfn "$ROOT_DIR/dist" "$PLUGIN_ROOT/asyncq-kdbbackend-datasource"
+ln -sfn "$ROOT_DIR/dist-panel/asyncq-masterdata-panel" "$PLUGIN_ROOT/asyncq-masterdata-panel"
 
 sed 's/host\.docker\.internal/localhost/g' \
   "$ROOT_DIR/demo/grafana/provisioning/datasources/asyncq.yml" \
@@ -89,7 +90,7 @@ GF_PATHS_DATA="$RUNTIME_DIR/data" \
 GF_PATHS_LOGS="$LOG_DIR" \
 GF_PATHS_PLUGINS="$PLUGIN_ROOT" \
 GF_PATHS_PROVISIONING="$PROVISIONING_DIR" \
-GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=asyncq-kdbbackend-datasource \
+GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=asyncq-kdbbackend-datasource,asyncq-masterdata-panel \
 GF_SECURITY_ADMIN_PASSWORD=admin \
 GF_SECURITY_ADMIN_USER=admin \
 GF_SERVER_HTTP_PORT="$PORT" \
@@ -105,5 +106,6 @@ echo "URL: http://localhost:$PORT/d/asyncq-kdb-demo/asyncq-kdb-demo"
 echo "Compatibility matrix: http://localhost:$PORT/d/asyncq-compat-matrix/asyncq-panopticon-compatibility-matrix"
 echo "Panopticon tests: http://localhost:$PORT/d/asyncq-pano-compat/asyncq-panopticon-compatibility-tests"
 echo "Async tests: http://localhost:$PORT/d/asyncq-async-tests/asyncq-async-execution-tests"
+echo "Master data/cache controls: http://localhost:$PORT/d/asyncq-masterdata-cache/asyncq-master-data-and-cache-controls"
 echo "Login: admin / admin, or use anonymous admin access."
 echo "Log: $LOG_FILE"

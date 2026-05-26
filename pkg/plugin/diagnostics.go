@@ -14,6 +14,7 @@ import (
 )
 
 const diagnosticHashLength = 16
+const asyncQDiagnosticsMetaKey = "asyncqDiagnostics"
 
 func (d *KdbDatasource) diagnosticsEnabled() bool {
 	return d != nil && d.DiagnosticsEnabled
@@ -42,6 +43,10 @@ func (d *KdbDatasource) diagnosticQueryFields(pCtx backend.PluginContext, query 
 	queryCacheTimeBucketSeconds := 0
 	queryCacheStaleTTLSeconds := 0
 	queryCacheKeyMode := ""
+	queryCacheDiskEnabled := false
+	queryCacheDiskMaxEntries := 0
+	queryCacheDiskMaxBytes := int64(0)
+	queryCacheControlEnabled := false
 	if d != nil {
 		syncMaxConnections = d.SyncMaxConnections
 		queryCacheEnabled = d.QueryCacheEnabled
@@ -50,6 +55,10 @@ func (d *KdbDatasource) diagnosticQueryFields(pCtx backend.PluginContext, query 
 		queryCacheTimeBucketSeconds = d.QueryCacheTimeBucketSeconds
 		queryCacheStaleTTLSeconds = d.QueryCacheStaleTTLSeconds
 		queryCacheKeyMode = d.QueryCacheKeyMode
+		queryCacheDiskEnabled = d.QueryCacheDiskEnabled
+		queryCacheDiskMaxEntries = d.QueryCacheDiskMaxEntries
+		queryCacheDiskMaxBytes = d.QueryCacheDiskMaxBytes
+		queryCacheControlEnabled = d.QueryCacheControlEnabled
 	}
 	fields := []interface{}{
 		"requestID", requestID,
@@ -69,6 +78,10 @@ func (d *KdbDatasource) diagnosticQueryFields(pCtx backend.PluginContext, query 
 		"queryCacheTimeBucketSeconds", queryCacheTimeBucketSeconds,
 		"queryCacheStaleTTLSeconds", queryCacheStaleTTLSeconds,
 		"queryCacheDefaultKeyMode", queryCacheKeyMode,
+		"queryCacheDiskConfigured", queryCacheDiskEnabled,
+		"queryCacheDiskMaxEntries", queryCacheDiskMaxEntries,
+		"queryCacheDiskMaxBytes", queryCacheDiskMaxBytes,
+		"queryCacheControlEnabled", queryCacheControlEnabled,
 		"pollIntervalMs", model.PollIntervalMs,
 		"maxStreamRows", model.MaxStreamRows,
 		"streamRetentionMs", model.StreamRetentionMs,
@@ -123,6 +136,42 @@ func appendDiagnosticKdbObject(fields []interface{}, name string, obj *kdb.K) []
 
 func appendDiagnosticFrames(fields []interface{}, frames []*data.Frame) []interface{} {
 	return append(fields, "frameCount", len(frames), "frameSchemas", diagnosticFrameSchemas(frames))
+}
+
+func attachAsyncQDiagnostics(frames []*data.Frame, fields []interface{}) {
+	if len(frames) == 0 || len(fields) == 0 {
+		return
+	}
+	diagnostics := diagnosticFieldsMap(fields)
+	for _, frame := range frames {
+		if frame == nil {
+			continue
+		}
+		if frame.Meta == nil {
+			frame.Meta = &data.FrameMeta{}
+		}
+		custom, ok := frame.Meta.Custom.(map[string]interface{})
+		if !ok || custom == nil {
+			custom = make(map[string]interface{})
+			if frame.Meta.Custom != nil {
+				custom["asyncqOriginalCustom"] = frame.Meta.Custom
+			}
+		}
+		custom[asyncQDiagnosticsMetaKey] = diagnostics
+		frame.Meta.Custom = custom
+	}
+}
+
+func diagnosticFieldsMap(fields []interface{}) map[string]interface{} {
+	result := make(map[string]interface{}, len(fields)/2)
+	for i := 0; i < len(fields)-1; i += 2 {
+		key, ok := fields[i].(string)
+		if !ok || key == "" {
+			key = fmt.Sprint(fields[i])
+		}
+		result[key] = fields[i+1]
+	}
+	return result
 }
 
 func (d *KdbDatasource) appendDiagnosticAsyncStatus(fields []interface{}, status asyncQStatus) []interface{} {

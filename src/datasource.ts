@@ -44,6 +44,22 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
     this.options = instanceSettings.jsonData || ({} as MyDataSourceOptions);
   }
 
+  getCacheStatus(includeEntries = false): Promise<any> {
+    return this.getResource(includeEntries ? 'cache/entries' : 'cache/status');
+  }
+
+  clearCache(scope: 'memory' | 'disk' | 'both' = 'both'): Promise<any> {
+    return this.postResource('cache/clear', { scope });
+  }
+
+  clearCacheEntry(key: string, scope: 'memory' | 'disk' | 'both' = 'both'): Promise<any> {
+    return this.postResource('cache/clear-entry', { key, scope });
+  }
+
+  clearExpiredCache(scope: 'memory' | 'disk' | 'both' = 'both'): Promise<any> {
+    return this.postResource('cache/clear-expired', { scope });
+  }
+
   applyTemplateVariables(query: MyQuery, scopedVars?: ScopedVars) {
     const templateSrv = getTemplateSrv();
     const dashboardVariables = templateSrv.getVariables();

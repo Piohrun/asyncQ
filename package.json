@@ -1,12 +1,16 @@
 {
   "name": "asyncq-kdbbackend-datasource",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "kdb+ datasource with async and streaming support",
   "scripts": {
-    "build": "npm run typecheck && webpack --config ./.config/webpack/webpack.config.js --mode production",
+    "build": "npm run build:datasource",
+    "build:datasource": "npm run typecheck && webpack --config ./.config/webpack/webpack.config.js --mode production",
+    "build:panel": "npm run typecheck:panel && webpack --config ./.config/webpack/panel.webpack.config.js --mode production",
+    "build:all": "npm run build:datasource && npm run build:panel",
     "dev": "webpack --watch --config ./.config/webpack/webpack.config.js --mode development",
-    "test": "npm run typecheck",
+    "test": "npm run typecheck && npm run typecheck:panel",
     "typecheck": "tsc --noEmit",
+    "typecheck:panel": "tsc --noEmit -p tsconfig.panel.json",
     "sign": "npx --yes @grafana/sign-plugin@latest"
   },
   "author": "AsyncQ contributors; derived from AquaQ Analytics' kdb+ backend datasource",

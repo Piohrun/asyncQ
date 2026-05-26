@@ -164,7 +164,15 @@ export class ConfigEditor extends PureComponent<Props> {
   };
 
   onQueryCacheToggle = (event: SyntheticEvent) => {
-    this.updateJsonData({ queryCacheEnabled: !this.props.options.jsonData.queryCacheEnabled });
+    this.updateJsonData({ queryCacheEnabled: !(this.props.options.jsonData.queryCacheEnabled !== false) });
+  };
+
+  onQueryCacheDiskToggle = (event: SyntheticEvent) => {
+    this.updateJsonData({ queryCacheDiskEnabled: !(this.props.options.jsonData.queryCacheDiskEnabled !== false) });
+  };
+
+  onQueryCacheControlToggle = (event: SyntheticEvent) => {
+    this.updateJsonData({ queryCacheControlEnabled: !(this.props.options.jsonData.queryCacheControlEnabled !== false) });
   };
 
   onQueryCacheTTLChange = (event: ChangeEvent<HTMLInputElement>) => {
@@ -193,6 +201,22 @@ export class ConfigEditor extends PureComponent<Props> {
 
   onQueryCacheKeyModeChange = (event: ChangeEvent<HTMLSelectElement>) => {
     this.updateJsonData({ queryCacheKeyMode: event.target.value as MyDataSourceOptions['queryCacheKeyMode'] });
+  };
+
+  onQueryCacheDiskPathChange = (event: ChangeEvent<HTMLInputElement>) => {
+    this.updateJsonData({ queryCacheDiskPath: event.target.value });
+  };
+
+  onQueryCacheDiskMaxBytesChange = (event: ChangeEvent<HTMLInputElement>) => {
+    if (/^\d+$/.test(event.target.value) || event.target.value === '') {
+      this.updateJsonData({ queryCacheDiskMaxBytes: event.target.value === '' ? undefined : parseInt(event.target.value, 10) });
+    }
+  };
+
+  onQueryCacheDiskMaxEntriesChange = (event: ChangeEvent<HTMLInputElement>) => {
+    if (/^\d+$/.test(event.target.value) || event.target.value === '') {
+      this.updateJsonData({ queryCacheDiskMaxEntries: event.target.value === '' ? undefined : parseInt(event.target.value, 10) });
+    }
   };
 
   onTlsCertificateChange = (event: FormEvent<HTMLTextAreaElement>) => {
@@ -495,6 +519,56 @@ export class ConfigEditor extends PureComponent<Props> {
             placeholder="0"
             tooltip="Rounds query time ranges in the cache key. Keep 0 for exact time ranges; use values like 5, 30, or 60 for relative now-based dashboards that should reuse warm results briefly."
           />
+        </div>
+        <div className="gf-form">
+          <InlineField
+            label="Disk Cache"
+            labelWidth={18}
+            tooltip="Persists successful sync query results on the local Grafana server so dashboard reloads can reuse warm results after plugin restarts. Disable for writeback/action queries."
+          >
+            <InlineSwitch checked={!!jsonData.queryCacheDiskEnabled} onChange={this.onQueryCacheDiskToggle} />
+          </InlineField>
+          <FormField
+            name="QueryCacheDiskMaxEntriesInputField"
+            label="Disk Entries"
+            labelWidth={14}
+            inputWidth={12}
+            onChange={this.onQueryCacheDiskMaxEntriesChange}
+            value={jsonData.queryCacheDiskMaxEntries ?? ''}
+            placeholder="10000"
+            tooltip="Maximum cached sync query result files kept on disk for this datasource instance."
+          />
+          <FormField
+            name="QueryCacheDiskMaxBytesInputField"
+            label="Disk Bytes"
+            labelWidth={14}
+            inputWidth={16}
+            onChange={this.onQueryCacheDiskMaxBytesChange}
+            value={jsonData.queryCacheDiskMaxBytes ?? ''}
+            placeholder="1073741824"
+            tooltip="Approximate maximum disk cache size in bytes for this datasource instance."
+          />
+        </div>
+        <div className="gf-form">
+          <FormField
+            name="QueryCacheDiskPathInputField"
+            label="Disk Path"
+            labelWidth={18}
+            inputWidth={52}
+            onChange={this.onQueryCacheDiskPathChange}
+            value={jsonData.queryCacheDiskPath || ''}
+            placeholder="default Grafana data/cache directory"
+            tooltip="Optional server-side root directory. The plugin adds a datasource-specific subdirectory under this path."
+          />
+        </div>
+        <div className="gf-form">
+          <InlineField
+            label="Cache Controls"
+            labelWidth={18}
+            tooltip="Allows Admin and Editor users to clear memory/disk cache through datasource resource calls and the AsyncQ master data panel. Viewers can still read cache status."
+          >
+            <InlineSwitch checked={jsonData.queryCacheControlEnabled !== false} onChange={this.onQueryCacheControlToggle} />
+          </InlineField>
         </div>
       </ConfigSection>
     );

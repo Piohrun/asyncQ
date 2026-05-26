@@ -20,7 +20,7 @@ Verdict legend:
 
 AsyncQ sync execution uses a per-datasource kdb+ IPC connection pool. `syncMaxConnections` defaults to `4`, so direct sync panels can run concurrently against the same datasource instance. Set `syncMaxConnections=1` when validating old Panopticon-serving ports that rely on strict serial requests, per-handle session state, or limited connection capacity.
 
-AsyncQ can also cache successful sync query results in the datasource instance. Keep `queryCacheEnabled=false` while validating correctness. Enable it later for Panopticon dashboards that are safe to serve from a short-lived result cache. Cache keys include the compiled query, time range, interval, max data points, datasource identity, and Grafana user context. `queryCacheTimeBucketSeconds` defaults to `0` for exact time ranges; set it to a small bucket such as `5`, `30`, or `60` when relative `now` dashboard reloads should reuse warm results. `queryCacheStaleTTLSeconds` enables stale-while-revalidate: the plugin returns stale cached data immediately and refreshes the cache in the background for the next query. `queryCacheKeyMode=strict` includes Grafana ref ID; `queryCacheKeyMode=shared` omits ref ID and should only be used when the q request function does not depend on ref ID. Per-query controls can override mode, key mode, TTL, stale TTL, and time bucket. Do not enable cache for writeback/action queries or gateway calls with side effects; add a q comment containing `asyncq:cache=off`, `asyncq:cache=bypass`, `asyncq:cache=refresh`, or `asyncq:cache=on` to force query-level behavior.
+AsyncQ can also cache successful sync query results in the datasource instance. New datasource configs default to a 60-second memory cache plus a self-contained local disk cache; existing explicit `queryCacheEnabled=false` or `queryCacheDiskEnabled=false` settings remain respected. Keep cache disabled while validating queries with side effects. Cache keys include the compiled query, time range, interval, max data points, datasource identity, and Grafana user context. `queryCacheTimeBucketSeconds` defaults to `0` for exact time ranges; set it to a small bucket such as `5`, `30`, or `60` when relative `now` dashboard reloads should reuse warm results. `queryCacheStaleTTLSeconds` enables stale-while-revalidate: the plugin returns stale cached data immediately and refreshes the cache in the background for the next query. `queryCacheKeyMode=strict` includes Grafana ref ID; `queryCacheKeyMode=shared` omits ref ID and should only be used when the q request function does not depend on ref ID. Per-query controls can override mode, key mode, TTL, stale TTL, and time bucket. Do not enable cache for writeback/action queries or gateway calls with side effects; add a q comment containing `asyncq:cache=off`, `asyncq:cache=bypass`, `asyncq:cache=refresh`, or `asyncq:cache=on` to force query-level behavior.
 
 ### Query And Execution
 
@@ -31,8 +31,8 @@ AsyncQ can also cache successful sync query results in the datasource instance. 
 | Existing gateway accepts a q expression wrapped in a known call | Config-only | Set `panopticonQueryWrapper` with exactly one `{Query}` | Example: `.gateway.run[{Query};{TimeWindowStart};{TimeWindowEnd}]`. |
 | Existing panel passes a full request object into a q function | Config-only if the function can accept AsyncQ's request dict; otherwise adapter needed | Set `panopticonRequestFunction` | AsyncQ passes a request dictionary with `Query`, `Panopticon`, top-level time aliases, datasource, user, and execution metadata. Proprietary envelopes need mapping. |
 | Panopticon source uses positional function args | Config-only or adapter needed | Prefer query text like `.fn[arg1;arg2]`; use wrapper/request function if args come from time range or variables | Works when args are expressible as q literals after macro/variable expansion. |
-| Multiple panels share one base query/result | Config-only | One AsyncQ source panel, dependent panels use Grafana datasource `-- Dashboard --` and `Use results from panel` | Do not duplicate the same AsyncQ target in each dependent panel; duplicate targets produce repeated kdb+ requests. |
-| Dashboard reopens should use warm server-side results | Config-only if stale data is acceptable | Enable datasource `queryCacheEnabled`, set `queryCacheTTLSeconds`, optionally set `queryCacheStaleTTLSeconds` and `queryCacheTimeBucketSeconds`, and keep Dashboard datasource sharing for dependent panels | This approximates Panopticon query result cache. Cache only successful sync results and is local to the Grafana plugin process/datasource instance. Stale-while-revalidate makes reopen feel instant, but the refreshed result appears on the next Grafana query/refresh unless the panel uses a live path. |
+| Multiple panels share one base query/result | Config-only | One AsyncQ source panel or `asyncq-masterdata-panel`, dependent panels use Grafana datasource `-- Dashboard --` and `Use results from panel` | Do not duplicate the same AsyncQ target in each dependent panel; duplicate targets produce repeated kdb+ requests. The companion master-data panel also exposes freshness and cache controls. |
+| Dashboard reopens should use warm server-side results | Config-only if stale data is acceptable | Use datasource `queryCacheEnabled`, `queryCacheDiskEnabled`, `queryCacheTTLSeconds`, optionally set `queryCacheStaleTTLSeconds` and `queryCacheTimeBucketSeconds`, and keep Dashboard datasource sharing for dependent panels | This approximates Panopticon query result cache. Cache only successful sync results and is local to the Grafana server/datasource instance. Disk cache persists across plugin restarts; stale-while-revalidate makes reopen feel instant, but the refreshed result appears on the next Grafana query/refresh unless the panel uses a live path. |
 | Duplicated panels should share the same cached q result | Config-only if the q path ignores ref ID | Set datasource or query `queryCacheKeyMode=shared`; prefer Dashboard datasource when a panel explicitly derives from a source panel | Shared cache mode omits ref ID from the cache key. Do not use it when a Panopticon request function branches on panel/ref ID. |
 | Panopticon server-side async submit/status/result/cancel | Adapter needed unless it already matches `.grafana.asyncq.async.*` | `executionMode="async"` only for the AsyncQ helper contract | Discover job ID field, status values, result function, error fields, expiry, and cancel semantics before patching. |
 | Deferred response or callback over IPC handle | Adapter needed | Current `deferredAsync` only wraps a query then runs Plugin Async | True q `neg` callback/deferred protocols need a plugin adapter that registers the callback handle and translates returned messages. |
@@ -90,6 +90,18 @@ AsyncQ can also cache successful sync query results in the datasource instance. 
 | Panopticon actions/writebacks | Not portable through datasource alone | Build explicit Grafana app/plugin or secured backend endpoint | Datasource queries should not be treated as a generic writeback/action channel. |
 | Cross-panel brushing, focus/playback behavior | Visual rewrite | Approximate with Grafana variables/time range where possible | Grafana interaction model is different. |
 | Full dashboard layout/theme import | Visual rewrite | Rebuild dashboard JSON manually or with a future importer | AsyncQ only handles datasource/query compatibility. |
+
+### Master Data And Cache Controls
+
+The companion panel plugin `asyncq-masterdata-panel` is useful during Panopticon migrations:
+
+- Master data mode runs the shared AsyncQ query and shows a compact data preview plus diagnostics.
+- Freshness mode is a widget-style panel for main dashboard tabs. It reports the newest timestamp in the returned frame and cache status.
+- Diagnostics mode shows selected `frame.meta.custom.asyncqDiagnostics` fields.
+- Cache-control buttons call AsyncQ datasource resources: `cache/status`, `cache/clear`, `cache/clear-entry`, and `cache/clear-expired`.
+- Cache status is read-only; clear actions require datasource `queryCacheControlEnabled` and a Grafana `Admin` or `Editor` role.
+
+Use it when a Panopticon panel acted as the hidden or visible source query for several visual panels. Configure dependent panels with datasource `-- Dashboard --`, `panelId` set to the master-data panel ID, and their own Grafana transformations/field overrides.
 
 ### Decision Rules
 
@@ -162,7 +174,7 @@ Use `sync` while validating. Switch to `pluginAsync` when the query is correct a
 
 Use Grafana's Dashboard datasource when a Panopticon dashboard used one shared datasource result for several panels:
 
-1. Create a source panel that uses AsyncQ and contains the shared q query.
+1. Create a source panel that uses AsyncQ and contains the shared q query. Prefer `asyncq-masterdata-panel` when freshness or cache controls are useful.
 2. Validate the source panel as a Table panel first.
 3. Create dependent panels with datasource `-- Dashboard --`.
 4. In each dependent panel, set `Use results from panel` to the source panel.
@@ -170,13 +182,26 @@ Use Grafana's Dashboard datasource when a Panopticon dashboard used one shared d
 
 Do not paste the same expensive AsyncQ query into every dependent panel unless you intentionally want separate q requests. Direct duplicate AsyncQ targets are independent Grafana queries: sync targets run through the datasource's bounded sync IPC pool, and `pluginAsync` targets use separate plugin-managed IPC calls rather than a shared result.
 
+Dashboard datasource target JSON shape:
+
+```json
+{
+  "datasource": {
+    "type": "datasource",
+    "uid": "-- Dashboard --"
+  },
+  "panelId": 1,
+  "refId": "A"
+}
+```
+
 ## Mode Selection
 
 | Panopticon source behavior | AsyncQ setting |
 | --- | --- |
 | Plain q expression/function call | `compatibilityMode="panopticon"`, `executionMode="sync"` first, then `pluginAsync` |
 | Long-running direct query | `executionMode="pluginAsync"` |
-| Shared result reused by several panels | One source panel uses AsyncQ; dependent panels use datasource `-- Dashboard --` |
+| Shared result reused by several panels | One AsyncQ or `asyncq-masterdata-panel` source panel; dependent panels use datasource `-- Dashboard --` |
 | q gateway already has async submit/status/result/cancel | `executionMode="async"` |
 | Query must be wrapped before evaluation | Set `panopticonQueryWrapper`, exactly one `{Query}` |
 | Pass-to-function panel | Set `panopticonRequestFunction` to a q function/lambda accepting `req` |

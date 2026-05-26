@@ -266,17 +266,18 @@ func (d *KdbDatasource) runAsyncQueryStream(ctx context.Context, req *backend.Ru
 					_ = sendControlFrame(sender, liveReq.RefID, ExecutionModeAsync, "error", jobID, "", err.Error(), status.Progress, true)
 					return nil
 				}
+				resultFields = appendDiagnosticFrames(resultFields, frames)
+				status.Status = "done"
+				resultFields = d.appendDiagnosticAsyncStatus(resultFields, status)
+				resultFields = append(resultFields, "durationMs", time.Since(start).Milliseconds())
 				for _, frame := range frames {
 					markFrame(frame, ExecutionModeAsync, "data", jobID, false, false)
+					attachAsyncQDiagnostics([]*data.Frame{frame}, resultFields)
 					if err := sender.SendFrame(frame, data.IncludeAll); err != nil {
 						d.logDiagnosticError("helper async data send failed", appendDiagnosticError(resultFields, err)...)
 						return err
 					}
 				}
-				resultFields = appendDiagnosticFrames(resultFields, frames)
-				status.Status = "done"
-				resultFields = d.appendDiagnosticAsyncStatus(resultFields, status)
-				resultFields = append(resultFields, "durationMs", time.Since(start).Milliseconds())
 				d.logDiagnostics("helper async completed", resultFields...)
 				return sendControlFrame(sender, liveReq.RefID, ExecutionModeAsync, "done", jobID, status.Message, "", 1, true)
 			}
@@ -356,15 +357,16 @@ func (d *KdbDatasource) runPluginManagedAsyncQueryStream(ctx context.Context, pC
 				_ = sendControlFrame(sender, liveReq.RefID, model.ExecutionMode, "error", requestID, "", err.Error(), 1, true)
 				return nil
 			}
+			resultFields = appendDiagnosticFrames(resultFields, frames)
+			resultFields = append(resultFields, "durationMs", time.Since(start).Milliseconds())
 			for _, frame := range frames {
 				markFrame(frame, model.ExecutionMode, "data", requestID, false, false)
+				attachAsyncQDiagnostics([]*data.Frame{frame}, resultFields)
 				if err := sender.SendFrame(frame, data.IncludeAll); err != nil {
 					d.logDiagnosticError("plugin async data send failed", appendDiagnosticError(resultFields, err)...)
 					return err
 				}
 			}
-			resultFields = appendDiagnosticFrames(resultFields, frames)
-			resultFields = append(resultFields, "durationMs", time.Since(start).Milliseconds())
 			d.logDiagnostics("plugin async completed", resultFields...)
 			return sendControlFrame(sender, liveReq.RefID, model.ExecutionMode, "done", requestID, "", "", 1, true)
 		case <-ticker.C:
@@ -497,14 +499,15 @@ func (d *KdbDatasource) runKdbPushStream(ctx context.Context, req *backend.RunSt
 			_ = sendControlFrame(sender, liveReq.RefID, ExecutionModeStream, "error", streamID, "", err.Error(), 0, true)
 			return nil
 		}
+		payloadFields = appendDiagnosticFrames(payloadFields, frames)
 		for _, frame := range frames {
 			markFrame(frame, ExecutionModeStream, "data", streamID, false, false)
+			attachAsyncQDiagnostics([]*data.Frame{frame}, payloadFields)
 			if err := sender.SendFrame(frame, data.IncludeAll); err != nil {
 				d.logDiagnosticError("stream data send failed", appendDiagnosticError(payloadFields, err)...)
 				return err
 			}
 		}
-		payloadFields = appendDiagnosticFrames(payloadFields, frames)
 		d.logDiagnostics("stream payload sent", payloadFields...)
 	}
 }

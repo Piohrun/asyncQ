@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.4
+
+- Added self-contained local disk persistence for successful sync query cache entries, with datasource settings for disk enablement, path, entry cap, and byte budget.
+- Changed new datasource defaults to enable sync result caching and disk persistence while preserving explicit disabled settings.
+- Added datasource resource endpoints for cache status, entry listing, clear, clear-entry, and clear-expired controls.
+- Gated destructive cache-control endpoints behind datasource enablement and Grafana Admin/Editor roles; cache status remains read-only.
+- Attached AsyncQ diagnostics to result frames under `frame.meta.custom.asyncqDiagnostics`.
+- Added the companion `asyncq-masterdata-panel` plugin for master data previews, freshness widgets, diagnostics, and cache-control buttons.
+- Added a demo dashboard showing master-data panel reuse through Grafana's `-- Dashboard --` datasource.
+
 ## 1.0.3
 
 - Added per-datasource sync query result caching with TTL, max-entry bounds, diagnostics, and q comment cache directives.

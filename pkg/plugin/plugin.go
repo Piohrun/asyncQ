@@ -45,16 +45,21 @@ const (
 	defaultMaxStreamRows        = 1000
 	defaultAsyncMaxJobs         = 16
 	defaultSyncMaxConnections   = 4
+	defaultQueryCacheEnabled    = true
 	defaultQueryCacheTTL        = 60
 	defaultQueryCacheMax        = 128
 	defaultQueryCacheTimeBucket = 0
 	defaultQueryCacheStaleTTL   = 0
+	defaultQueryCacheDisk       = true
+	defaultQueryCacheDiskBytes  = int64(1024 * 1024 * 1024)
+	defaultQueryCacheDiskMax    = 10000
 	asyncQHelperUnavailable     = "async/stream queries require q/asyncq_grafana.q to be loaded in the target kdb+ process or gateway"
 )
 
 var (
 	_ backend.QueryDataHandler      = (*KdbDatasource)(nil)
 	_ backend.CheckHealthHandler    = (*KdbDatasource)(nil)
+	_ backend.CallResourceHandler   = (*KdbDatasource)(nil)
 	_ backend.StreamHandler         = (*KdbDatasource)(nil)
 	_ instancemgmt.InstanceDisposer = (*KdbDatasource)(nil)
 )
@@ -122,28 +127,44 @@ type KdbDatasource struct {
 	QueryCacheTimeBucketSeconds int    `json:"queryCacheTimeBucketSeconds,omitempty"`
 	QueryCacheStaleTTLSeconds   int    `json:"queryCacheStaleTTLSeconds,omitempty"`
 	QueryCacheKeyMode           string `json:"queryCacheKeyMode,omitempty"`
+	QueryCacheDiskEnabled       bool   `json:"queryCacheDiskEnabled,omitempty"`
+	QueryCacheDiskPath          string `json:"queryCacheDiskPath,omitempty"`
+	QueryCacheDiskMaxBytes      int64  `json:"queryCacheDiskMaxBytes,omitempty"`
+	QueryCacheDiskMaxEntries    int    `json:"queryCacheDiskMaxEntries,omitempty"`
+	QueryCacheControlEnabled    bool   `json:"queryCacheControlEnabled,omitempty"`
 	DiagnosticsEnabled          bool   `json:"diagnosticsEnabled,omitempty"`
 	DiagnosticsLogQueryText     bool   `json:"diagnosticsLogQueryText,omitempty"`
 	asyncConfigured             bool
 	streamConfigured            bool
+	queryCacheConfigured        bool
+	queryCacheDefaultEnabled    bool
+	queryCacheDiskConfigured    bool
+	queryCacheDiskDefault       bool
+	queryCacheControlConfigured bool
+	queryCacheControlDefault    bool
 
-	user            string
-	pass            string
-	TlsCertificate  string
-	TlsKey          string
-	CaCert          string
-	TlsServerConfig *tls.Config
-	DialTimeout     time.Duration
-	KdbHandle       *kdb.KDBConn
-	asyncJobs       chan struct{}
-	syncPool        chan *kdb.KDBConn
-	syncPoolSlots   chan struct{}
-	syncPoolActive  map[*kdb.KDBConn]struct{}
-	syncPoolMax     int
-	syncPoolMu      sync.Mutex
-	syncPoolClosed  bool
-	queryCache      *syncQueryCache
-	queryCacheMu    sync.Mutex
+	user             string
+	pass             string
+	instanceID       int64
+	instanceUID      string
+	instanceName     string
+	TlsCertificate   string
+	TlsKey           string
+	CaCert           string
+	TlsServerConfig  *tls.Config
+	DialTimeout      time.Duration
+	KdbHandle        *kdb.KDBConn
+	asyncJobs        chan struct{}
+	syncPool         chan *kdb.KDBConn
+	syncPoolSlots    chan struct{}
+	syncPoolActive   map[*kdb.KDBConn]struct{}
+	syncPoolMax      int
+	syncPoolMu       sync.Mutex
+	syncPoolClosed   bool
+	queryCache       *syncQueryCache
+	queryCacheMu     sync.Mutex
+	queryDiskCache   *syncQueryDiskCache
+	queryDiskCacheMu sync.Mutex
 
 	signals             chan int
 	syncQueue           chan *kdbSyncQuery
@@ -172,6 +193,15 @@ func NewKdbDatasource(_ context.Context, settings backend.DataSourceInstanceSett
 	}
 	_, client.asyncConfigured = rawSettings["enableAsync"]
 	_, client.streamConfigured = rawSettings["enableStreaming"]
+	_, client.queryCacheConfigured = rawSettings["queryCacheEnabled"]
+	_, client.queryCacheDiskConfigured = rawSettings["queryCacheDiskEnabled"]
+	_, client.queryCacheControlConfigured = rawSettings["queryCacheControlEnabled"]
+	client.queryCacheDefaultEnabled = true
+	client.queryCacheDiskDefault = true
+	client.queryCacheControlDefault = true
+	client.instanceID = settings.ID
+	client.instanceUID = settings.UID
+	client.instanceName = settings.Name
 
 	username, ok := settings.DecryptedSecureJSONData["username"]
 	if ok {
@@ -269,6 +299,9 @@ func (d *KdbDatasource) normalizeDatasourceDefaults() {
 	if d.SyncMaxConnections < 1 {
 		d.SyncMaxConnections = defaultSyncMaxConnections
 	}
+	if !d.queryCacheConfigured && d.queryCacheDefaultEnabled {
+		d.QueryCacheEnabled = defaultQueryCacheEnabled
+	}
 	if d.QueryCacheTTLSeconds < 1 {
 		d.QueryCacheTTLSeconds = defaultQueryCacheTTL
 	}
@@ -286,6 +319,18 @@ func (d *KdbDatasource) normalizeDatasourceDefaults() {
 	}
 	if d.QueryCacheKeyMode != QueryCacheKeyModeStrict && d.QueryCacheKeyMode != QueryCacheKeyModeShared {
 		d.QueryCacheKeyMode = QueryCacheKeyModeStrict
+	}
+	if !d.queryCacheDiskConfigured && d.queryCacheDiskDefault {
+		d.QueryCacheDiskEnabled = defaultQueryCacheDisk
+	}
+	if !d.queryCacheControlConfigured && d.queryCacheControlDefault {
+		d.QueryCacheControlEnabled = true
+	}
+	if d.QueryCacheDiskMaxBytes < 1 {
+		d.QueryCacheDiskMaxBytes = defaultQueryCacheDiskBytes
+	}
+	if d.QueryCacheDiskMaxEntries < 1 {
+		d.QueryCacheDiskMaxEntries = defaultQueryCacheDiskMax
 	}
 	if d.asyncJobs == nil {
 		d.asyncJobs = make(chan struct{}, d.AsyncMaxJobs)
@@ -436,9 +481,10 @@ func (d *KdbDatasource) query(_ context.Context, pCtx backend.PluginContext, que
 		response.Error = err
 		return response
 	}
-	response.Frames = append(response.Frames, result.frames...)
 	fields = appendDiagnosticFrames(result.fields, result.frames)
 	fields = append(fields, "durationMs", time.Since(start).Milliseconds())
+	attachAsyncQDiagnostics(result.frames, fields)
+	response.Frames = append(response.Frames, result.frames...)
 	d.logDiagnostics("sync query completed", fields...)
 	return response
 }
