@@ -19,6 +19,8 @@ Helper Async mode uses Grafana Live and calls q helper functions:
 .grafana.asyncq.async.cancel jobId
 ```
 
+The datasource also exposes `POST async/run-and-wait` for MCP clients and migration tooling. It runs finite async modes (`async`, `pluginAsync`, `deferredAsync`, and `legacyAsync`) to completion and returns final frames plus status timeline events. `stream` is not supported by this resource because streams are open Grafana Live subscriptions.
+
 Plugin Async mode uses Grafana Live but does not require q helper functions. The backend opens a dedicated IPC connection, evaluates the query in a goroutine, emits status frames while waiting, and returns the final q result when it arrives.
 
 Deferred Async mode first expands a wrapper containing exactly one `{Query}` placeholder, then runs that expression through Plugin Async. Use this for q gateways that already support deferred responses or wrapper-based submission.
@@ -69,11 +71,12 @@ Cache status and controls are exposed as datasource resources:
 
 - `GET cache/status` and `GET cache/entries`
 - `POST cache/clear`, `POST cache/clear-entry`, and `POST cache/clear-expired`
+- `POST async/run-and-wait` for finite async execution from tooling
 
 Status endpoints are read-only. Clear endpoints require datasource `Cache Controls` to be enabled and a Grafana `Admin` or `Editor` role.
 
-Successful sync, async, and stream result frames include `frame.meta.custom.asyncqDiagnostics`. The companion `asyncq-masterdata-panel` uses this metadata to show data freshness, cache state, and query diagnostics, and can serve as the master source panel for Dashboard datasource reuse.
+Successful sync, async, and stream result frames include `frame.meta.custom.asyncqDiagnostics`. Sync frames include lightweight profile timings for decode, preparation, cache lookup, kdb call, frame parsing, and frame size. The companion `asyncq-masterdata-panel` uses this metadata to show data freshness, cache state, query diagnostics, and profile timings, and can serve as the master source panel for Dashboard datasource reuse.
 
 ## Diagnostics
 
-Enable datasource `Diagnostics` to write structured backend logs for sync, async, legacy async, deferred, and stream lifecycles. By default the logs contain request IDs, ref IDs, mode, query hashes, adapter function hashes, kdb+ object shapes, frame schemas, q worker/result metadata, status transitions, durations, and errors, but not raw query text. Sync logs also include pool acquire wait, opened/reused connections, active/idle pool state, release/discard action, transport duration, and cache disabled/bypass/miss/refresh/store/stale/hit status. q stack traces are hashed by default. `Log Query Text` is a separate opt-in switch for trusted debugging sessions only.
+Enable datasource `Diagnostics` to write structured backend logs for sync, async, legacy async, deferred, and stream lifecycles. By default the logs contain request IDs, ref IDs, mode, query hashes, adapter function hashes, kdb+ object shapes, frame schemas, q worker/result metadata, status transitions, durations, profile timings, and errors, but not raw query text. Sync logs also include pool acquire wait, opened/reused connections, active/idle pool state, release/discard action, transport duration, cache disabled/bypass/miss/refresh/store/stale/hit status, and profile fields such as `profileKdbCallMs`, `profileFrameParseMs`, and `profileFrameCells`. q stack traces are hashed by default. `Log Query Text` is a separate opt-in switch for trusted debugging sessions only.

@@ -63,6 +63,8 @@ func (d *KdbDatasource) CallResource(ctx context.Context, req *backend.CallResou
 		}
 		resp := d.clearExpiredSyncQueryCache(body.Scope)
 		return sendResourceJSON(sender, http.StatusOK, resp)
+	case "async/run-and-wait":
+		return d.handleAsyncRunAndWaitResource(ctx, req, sender)
 	default:
 		if strings.HasPrefix(path, "report/") {
 			return d.handleExcelReportResource(ctx, req, sender, path)

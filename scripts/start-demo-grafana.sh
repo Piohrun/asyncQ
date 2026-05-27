@@ -16,3 +16,4 @@ echo "Panopticon tests: http://localhost:3000/d/asyncq-pano-compat/asyncq-panopt
 echo "Async tests: http://localhost:3000/d/asyncq-async-tests/asyncq-async-execution-tests"
 echo "Master data/cache controls: http://localhost:3000/d/asyncq-masterdata-cache/asyncq-master-data-and-cache-controls"
 echo "Excel reporting: http://localhost:3000/d/asyncq-excel-report/asyncq-excel-reporting"
+echo "Business Suite smoke: http://localhost:3000/d/asyncq-business-suite/asyncq-business-suite-smoke"

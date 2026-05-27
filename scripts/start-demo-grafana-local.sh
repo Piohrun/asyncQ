@@ -60,6 +60,10 @@ if [[ ! -x "$INSTALL_DIR/bin/grafana" ]]; then
   rm -rf "$EXTRACT_DIR"
 fi
 
+if [[ "${ASYNCQ_DEMO_INSTALL_BUSINESS_PLUGINS:-1}" != "0" ]]; then
+  "$ROOT_DIR/scripts/install-demo-business-plugins.sh"
+fi
+
 ln -sfn "$ROOT_DIR/dist" "$PLUGIN_ROOT/asyncq-kdbbackend-datasource"
 ln -sfn "$ROOT_DIR/dist-panel/asyncq-masterdata-panel" "$PLUGIN_ROOT/asyncq-masterdata-panel"
 ln -sfn "$ROOT_DIR/dist-panel/asyncq-excel-report-panel" "$PLUGIN_ROOT/asyncq-excel-report-panel"
@@ -110,5 +114,6 @@ echo "Panopticon tests: http://localhost:$PORT/d/asyncq-pano-compat/asyncq-panop
 echo "Async tests: http://localhost:$PORT/d/asyncq-async-tests/asyncq-async-execution-tests"
 echo "Master data/cache controls: http://localhost:$PORT/d/asyncq-masterdata-cache/asyncq-master-data-and-cache-controls"
 echo "Excel reporting: http://localhost:$PORT/d/asyncq-excel-report/asyncq-excel-reporting"
+echo "Business Suite smoke: http://localhost:$PORT/d/asyncq-business-suite/asyncq-business-suite-smoke"
 echo "Login: admin / admin, or use anonymous admin access."
 echo "Log: $LOG_FILE"

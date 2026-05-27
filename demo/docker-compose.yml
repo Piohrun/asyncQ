@@ -10,6 +10,7 @@ services:
       GF_LOG_LEVEL: info
       ASYNCQ_DEMO_TEMPLATE_DIR: /var/lib/grafana/asyncq/templates
       GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS: asyncq-kdbbackend-datasource,asyncq-masterdata-panel,asyncq-excel-report-panel
+      GF_PLUGINS_PREINSTALL: volkovlabs-table-panel@3.6.5,volkovlabs-echarts-panel@7.2.5,volkovlabs-form-panel@6.3.4
       GF_SECURITY_ADMIN_PASSWORD: admin
       GF_SECURITY_ADMIN_USER: admin
       GF_USERS_DEFAULT_THEME: light

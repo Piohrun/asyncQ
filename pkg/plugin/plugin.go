@@ -515,37 +515,48 @@ func (d *KdbDatasource) QueryData(ctx context.Context, req *backend.QueryDataReq
 func (d *KdbDatasource) query(_ context.Context, pCtx backend.PluginContext, query backend.DataQuery, requestID string) backend.DataResponse {
 	var model QueryModel
 	response := backend.DataResponse{}
+	decodeStart := time.Now()
 	err := json.Unmarshal(query.JSON, &model)
+	decodeMs := diagnosticDurationMs(time.Since(decodeStart))
 	if err != nil {
 		d.logDiagnosticError("unable to decode query JSON", "requestID", requestID, "refID", query.RefID, "error", err.Error())
 		response.Error = err
 		return response
 	}
 	d.normalizeQueryModel(&model)
-	fields := d.diagnosticQueryFields(pCtx, query, model, requestID)
 	start := time.Now()
+	fields := append(d.diagnosticQueryFields(pCtx, query, model, requestID), "profileDecodeMs", decodeMs)
 	d.logDiagnostics("sync query received", fields...)
 	if model.ExecutionMode != ExecutionModeSync {
 		response.Error = fmt.Errorf("%s mode is served through Grafana Live, not the standard query endpoint", model.ExecutionMode)
 		d.logDiagnosticError("sync query rejected", appendDiagnosticError(fields, response.Error)...)
 		return response
 	}
+	prepareStart := time.Now()
 	if err := prepareQueryForExecution(pCtx, query, &model); err != nil {
+		fields = appendDiagnosticDuration(fields, "profilePrepareMs", prepareStart)
 		d.logDiagnosticError("query preparation failed", appendDiagnosticError(fields, err)...)
 		response.Error = err
 		return response
 	}
-	fields = d.diagnosticQueryFields(pCtx, query, model, requestID)
+	prepareMs := diagnosticDurationMs(time.Since(prepareStart))
+	fields = append(d.diagnosticQueryFields(pCtx, query, model, requestID),
+		"profileDecodeMs", decodeMs,
+		"profilePrepareMs", prepareMs,
+	)
 	d.logDiagnostics("sync query prepared", fields...)
 
+	cacheStart := time.Now()
 	result, err := d.runSyncQueryWithCache(pCtx, query, model, fields)
 	if err != nil {
+		result.fields = appendDiagnosticDuration(result.fields, "profileCachePathMs", cacheStart)
 		d.logDiagnosticError(result.errorMessage, appendDiagnosticError(result.fields, err)...)
 		response.Error = err
 		return response
 	}
-	fields = appendDiagnosticFrames(result.fields, result.frames)
-	fields = append(fields, "durationMs", time.Since(start).Milliseconds())
+	fields = appendDiagnosticDuration(result.fields, "profileCachePathMs", cacheStart)
+	fields = appendDiagnosticFrames(fields, result.frames)
+	fields = append(fields, "durationMs", diagnosticDurationMs(time.Since(start)))
 	attachAsyncQDiagnostics(result.frames, fields)
 	response.Frames = append(response.Frames, result.frames...)
 	d.logDiagnostics("sync query completed", fields...)

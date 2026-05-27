@@ -470,6 +470,14 @@ func TestQueryDataAttachesDiagnosticsToFrames(t *testing.T) {
 	if diagnostics["queryCacheStatus"] != "stored" {
 		t.Fatalf("expected stored cache diagnostic, got %#v", diagnostics["queryCacheStatus"])
 	}
+	for _, key := range []string{"profilePrepareMs", "profileCachePathMs", "profileKdbCallMs", "profileFrameParseMs", "profileFrameRows", "profileFrameFields", "profileFrameCells"} {
+		if _, ok := diagnostics[key]; !ok {
+			t.Fatalf("expected %s diagnostic, got %#v", key, diagnostics)
+		}
+	}
+	if diagnostics["profileFrameRows"] != 1 {
+		t.Fatalf("expected one profiled frame row, got %#v", diagnostics["profileFrameRows"])
+	}
 }
 
 func TestCacheResourceClearEntryEvictsMemoryAndDisk(t *testing.T) {

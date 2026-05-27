@@ -11,6 +11,20 @@ import (
 )
 
 func charParser(data *kdb.K) []string {
+	if text, ok := data.Data.(string); ok {
+		out := make([]string, len(text))
+		for i := range text {
+			out[i] = string(text[i])
+		}
+		return out
+	}
+	if bytes, ok := data.Data.([]byte); ok {
+		out := make([]string, len(bytes))
+		for i, value := range bytes {
+			out[i] = string(value)
+		}
+		return out
+	}
 	byteArray := make([]string, data.Len())
 	for i := 0; i < data.Len(); i++ {
 		byteArray[i] = string(data.Index(i).(byte))
@@ -117,6 +131,7 @@ func ParseSimpleKdbTable(res *kdb.K) (*data.Frame, error) {
 	frame := data.NewFrame("response")
 	kdbTable := res.Data.(kdb.Table)
 	tabData := kdbTable.Data
+	frame.Fields = make([]*data.Field, 0, len(kdbTable.Columns))
 
 	for colIndex, columnName := range kdbTable.Columns {
 		frame.Fields = append(frame.Fields, data.NewField(columnName, nil, standardColumnParser(tabData[colIndex])))
@@ -194,6 +209,11 @@ func ParseKdbDictListAsFrame(res *kdb.K) (*data.Frame, error) {
 	if rows[0] == nil || rows[0].Type != kdb.XD {
 		return nil, fmt.Errorf("first item is not a dictionary")
 	}
+
+	if frame, ok, err := parseKdbDictListUniformRows(rows); ok || err != nil {
+		return frame, err
+	}
+
 	columnNames := make([]string, 0)
 	seenColumns := map[string]bool{}
 	rowValues := make([]map[string]*kdb.K, len(rows))
@@ -235,11 +255,51 @@ func ParseKdbDictListAsFrame(res *kdb.K) (*data.Frame, error) {
 			columns[colIndex] = append(columns[colIndex], kdbCellValue(value))
 		}
 	}
+	return frameFromInterfaceColumns(columnNames, columns), nil
+}
+
+func parseKdbDictListUniformRows(rows []*kdb.K) (*data.Frame, bool, error) {
+	var columnNames []string
+	var columns [][]interface{}
+	for rowIndex, row := range rows {
+		if row == nil || row.Type != kdb.XD {
+			return nil, false, fmt.Errorf("item %d is not a dictionary", rowIndex)
+		}
+		rowDict := row.Data.(kdb.Dict)
+		names, err := dictColumnNames(rowDict.Key)
+		if err != nil {
+			return nil, false, fmt.Errorf("item %d keys: %w", rowIndex, err)
+		}
+		values, err := dictValues(rowDict.Value, len(names))
+		if err != nil {
+			return nil, false, fmt.Errorf("item %d values: %w", rowIndex, err)
+		}
+		if len(names) != len(values) {
+			return nil, false, fmt.Errorf("item %d key/value lengths differ", rowIndex)
+		}
+		if rowIndex == 0 {
+			columnNames = names
+			columns = make([][]interface{}, len(columnNames))
+			for i := range columns {
+				columns[i] = make([]interface{}, 0, len(rows))
+			}
+		} else if !sameStringSlice(columnNames, names) {
+			return nil, false, nil
+		}
+		for colIndex, value := range values {
+			columns[colIndex] = append(columns[colIndex], kdbCellValue(value))
+		}
+	}
+	return frameFromInterfaceColumns(columnNames, columns), true, nil
+}
+
+func frameFromInterfaceColumns(columnNames []string, columns [][]interface{}) *data.Frame {
 	frame := data.NewFrame("response")
+	frame.Fields = make([]*data.Field, 0, len(columnNames))
 	for i, name := range columnNames {
 		frame.Fields = append(frame.Fields, data.NewField(name, nil, typedInterfaceColumn(columns[i])))
 	}
-	return frame, nil
+	return frame
 }
 
 func dictColumnNames(keys *kdb.K) ([]string, error) {

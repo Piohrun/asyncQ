@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+## 1.0.8
+
+- Added sync query profiling diagnostics for decode, preparation, cache lookup, kdb call, frame parsing, and frame size metrics.
+- Expanded the master data panel diagnostics view to surface query profile timings, fractional milliseconds, and internally scrollable diagnostics content.
+- Optimized Panopticon dictionary-list frame conversion for common same-schema row dictionaries.
+- Added `async/run-and-wait` datasource resource for MCP clients and migration tooling to execute finite async modes and receive final frames plus status timeline events.
+- Added Business Suite demo dashboard support and migration skill guidance for MCP-generated master-data dashboards and runtime validation.
+
 ## 1.0.7
 
 - Added Excel report template directory allowlisting, generated workbook size limits, row limits, generation timeout controls, and `report/validate`.

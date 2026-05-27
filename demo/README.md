@@ -6,6 +6,7 @@ This demo runs:
 - Grafana 13 on `http://localhost:3000`
 - a provisioned `AsyncQ Demo` datasource
 - a provisioned `AsyncQ kdb+ demo` dashboard with sync, helper async, plugin async, legacy async adapter, deferred wrapper, Panopticon compatibility, stream panels, cache diagnostics, and Excel reporting
+- pinned Business Suite panel plugins for migration testing: Business Table (`volkovlabs-table-panel`), Business Charts (`volkovlabs-echarts-panel`), and Business Forms (`volkovlabs-form-panel`)
 
 ## Start without Docker
 
@@ -30,11 +31,13 @@ http://localhost:3000/d/asyncq-async-tests/asyncq-async-execution-tests
 http://localhost:3000/d/asyncq-sync-pool/asyncq-sync-connection-pool
 http://localhost:3000/d/asyncq-masterdata-cache/asyncq-master-data-and-cache-controls
 http://localhost:3000/d/asyncq-excel-report/asyncq-excel-reporting
+http://localhost:3000/d/asyncq-business-suite/asyncq-business-suite-smoke
 ```
 
 Grafana is configured with anonymous admin access for the demo. The explicit login is `admin` / `admin`.
 
 The local starter downloads Grafana OSS `13.0.1` into `demo/runtime/` on first run and keeps all Grafana data, logs, generated provisioning, and plugin symlinks under that ignored runtime directory.
+It also installs pinned Business Suite panel plugins into `demo/runtime/plugins` by default. Set `ASYNCQ_DEMO_INSTALL_BUSINESS_PLUGINS=0` before running `./scripts/start-demo-local.sh` to skip those downloads.
 
 The demo datasource enables safe backend diagnostics by default. Grafana logs include request IDs, ref IDs, query hashes, q worker/result metadata, frame schemas, async job or stream IDs, and errors. Raw query text and q stack trace logging stays disabled.
 
@@ -68,6 +71,7 @@ Docker is optional. It is useful when you want a fully disposable Grafana contai
 - `AsyncQ master data and cache controls` demonstrates the companion `asyncq-masterdata-panel`: one master data panel runs the AsyncQ query, a freshness widget and table reuse that result through Grafana's `-- Dashboard --` datasource, and cache-control buttons call the datasource cache resources.
 - `AsyncQ Excel reporting` demonstrates the companion `asyncq-excel-report-panel`. Change the `Symbols` dashboard variable or time range, optionally edit the generated workbook filename, then use the report button to download an `.xlsx` workbook populated from the same filtered q data.
   The demo reports use [demo/templates/asyncq-demo-report-template.xlsx](templates/asyncq-demo-report-template.xlsx), which contains a dashboard sheet with formulas and charts pointing at the populated `Summary` and `Trades` ranges.
+- `AsyncQ Business Suite smoke` verifies the installed Business Table, Business Charts, and Business Forms panels against the AsyncQ demo datasource.
 
 For Panopticon dashboards where several panels share one base datasource result, create one AsyncQ source panel or `asyncq-masterdata-panel` and set the dependent panels to Grafana's `-- Dashboard --` datasource with `Use results from panel`. The demo dashboards keep most panels direct so the plugin behavior is visible, but production migrations should use Dashboard datasource sharing for this Panopticon pattern.
 
@@ -101,8 +105,10 @@ For the Docker path, run `docker compose down` from `demo/`, then `./scripts/sto
 - `demo/grafana/provisioning/dashboards/json/asyncq-sync-pool.json` - sync pool diagnostics dashboard
 - `demo/grafana/provisioning/dashboards/json/asyncq-masterdata-cache.json` - master data/cache-control dashboard
 - `demo/grafana/provisioning/dashboards/json/asyncq-excel-report.json` - Excel report dashboard
+- `demo/grafana/provisioning/dashboards/json/asyncq-business-suite.json` - Business Suite panel smoke dashboard
 - `demo/templates/asyncq-demo-report-template.xlsx` - sample workbook template for Excel report tests
 - `demo/docker-compose.yml` - Grafana 13 container
+- `scripts/install-demo-business-plugins.sh` - pinned Business Suite plugin installer for the local demo
 
 ## Notes
 

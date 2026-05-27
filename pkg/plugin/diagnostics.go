@@ -138,6 +138,26 @@ func appendDiagnosticFrames(fields []interface{}, frames []*data.Frame) []interf
 	return append(fields, "frameCount", len(frames), "frameSchemas", diagnosticFrameSchemas(frames))
 }
 
+func appendDiagnosticDuration(fields []interface{}, key string, start time.Time) []interface{} {
+	if start.IsZero() || key == "" {
+		return fields
+	}
+	return append(fields, key, diagnosticDurationMs(time.Since(start)))
+}
+
+func diagnosticDurationMs(duration time.Duration) float64 {
+	return float64(duration.Microseconds()) / 1000
+}
+
+func appendDiagnosticFrameProfile(fields []interface{}, frames []*data.Frame) []interface{} {
+	rows, fieldCount, cells := diagnosticFrameStats(frames)
+	return append(fields,
+		"profileFrameRows", rows,
+		"profileFrameFields", fieldCount,
+		"profileFrameCells", cells,
+	)
+}
+
 func attachAsyncQDiagnostics(frames []*data.Frame, fields []interface{}) {
 	if len(frames) == 0 || len(fields) == 0 {
 		return
@@ -224,6 +244,22 @@ func diagnosticFrameSchemas(frames []*data.Frame) []string {
 		schemas = append(schemas, frameSchema(frame))
 	}
 	return schemas
+}
+
+func diagnosticFrameStats(frames []*data.Frame) (rows int, fields int, cells int) {
+	for _, frame := range frames {
+		if frame == nil {
+			continue
+		}
+		frameRows := 0
+		if len(frame.Fields) > 0 {
+			frameRows = frame.Fields[0].Len()
+		}
+		rows += frameRows
+		fields += len(frame.Fields)
+		cells += frameRows * len(frame.Fields)
+	}
+	return rows, fields, cells
 }
 
 func diagnosticTime(t time.Time) string {

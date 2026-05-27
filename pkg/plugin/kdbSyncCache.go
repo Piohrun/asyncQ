@@ -167,7 +167,9 @@ type syncQueryCacheDS struct {
 }
 
 func (d *KdbDatasource) runSyncQueryWithCache(pCtx backend.PluginContext, query backend.DataQuery, model QueryModel, fields []interface{}) (syncQueryResult, error) {
+	policyStart := time.Now()
 	policy := d.syncQueryCachePolicy(model)
+	fields = appendDiagnosticDuration(fields, "profileCachePolicyMs", policyStart)
 	cache := d.syncQueryCache(policy)
 	if cache == nil {
 		status := "disabled"
@@ -178,7 +180,9 @@ func (d *KdbDatasource) runSyncQueryWithCache(pCtx backend.PluginContext, query 
 	}
 	diskCache := d.syncQueryDiskCache(policy)
 
+	keyStart := time.Now()
 	cacheKey, err := syncQueryCacheKey(pCtx, query, model, policy)
+	fields = appendDiagnosticDuration(fields, "profileCacheKeyMs", keyStart)
 	if err != nil {
 		cacheFields := appendSyncQueryCacheDiagnosticFields(fields, policy, "key-error", "none", "", 0, false, false, false)
 		result, runErr := d.runSyncQueryUncached(pCtx, query, model, cacheFields)
@@ -191,6 +195,7 @@ func (d *KdbDatasource) runSyncQueryWithCache(pCtx backend.PluginContext, query 
 	}
 
 	if policy.read {
+		memoryLookupStart := time.Now()
 		if hit, ok := cache.get(cacheKey, query.RefID, policy); ok {
 			status := "hit"
 			refreshStarted := false
@@ -199,11 +204,15 @@ func (d *KdbDatasource) runSyncQueryWithCache(pCtx backend.PluginContext, query 
 				refreshStarted = d.refreshSyncQueryCache(cache, diskCache, pCtx, query, model, policy, cacheKey, fields)
 			}
 			cacheFields := appendSyncQueryCacheDiagnosticFields(fields, policy, status, hit.storage, cacheKey, hit.age, false, false, refreshStarted)
+			cacheFields = appendDiagnosticDuration(cacheFields, "profileCacheMemoryLookupMs", memoryLookupStart)
 			d.logDiagnostics("sync query cache "+status, cacheFields...)
 			return syncQueryResult{frames: hit.frames, fields: cacheFields}, nil
 		}
+		fields = appendDiagnosticDuration(fields, "profileCacheMemoryLookupMs", memoryLookupStart)
 		if diskCache != nil {
+			diskLookupStart := time.Now()
 			hit, ok, diskErr := diskCache.get(cacheKey, query.RefID, policy)
+			fields = appendDiagnosticDuration(fields, "profileCacheDiskLookupMs", diskLookupStart)
 			if diskErr != nil {
 				d.logDiagnosticError("sync query disk cache read failed", appendSyncQueryCacheDiskError(appendSyncQueryCacheDiagnosticFields(fields, policy, "disk-error", "disk", cacheKey, 0, false, false, false), diskErr)...)
 			} else if ok {
@@ -221,6 +230,7 @@ func (d *KdbDatasource) runSyncQueryWithCache(pCtx backend.PluginContext, query 
 		}
 	}
 
+	singleflightStart := time.Now()
 	value, err, shared := cache.group.Do(cacheKey, func() (interface{}, error) {
 		if policy.read {
 			if hit, ok := cache.get(cacheKey, query.RefID, policy); ok {
@@ -261,11 +271,15 @@ func (d *KdbDatasource) runSyncQueryWithCache(pCtx backend.PluginContext, query 
 		}
 		return result, nil
 	})
+	singleflightMs := diagnosticDurationMs(time.Since(singleflightStart))
 	if err != nil {
 		if result, ok := value.(syncQueryResult); ok {
+			result.fields = append(result.fields, "profileCacheSingleflightMs", singleflightMs)
 			return result, err
 		}
-		return syncQueryResult{fields: appendSyncQueryCacheDiagnosticFields(fields, policy, "miss", "none", cacheKey, 0, shared, false, false), errorMessage: "sync query failed"}, err
+		cacheFields := appendSyncQueryCacheDiagnosticFields(fields, policy, "miss", "none", cacheKey, 0, shared, false, false)
+		cacheFields = append(cacheFields, "profileCacheSingleflightMs", singleflightMs)
+		return syncQueryResult{fields: cacheFields, errorMessage: "sync query failed"}, err
 	}
 
 	switch result := value.(type) {
@@ -281,9 +295,11 @@ func (d *KdbDatasource) runSyncQueryWithCache(pCtx backend.PluginContext, query 
 			refreshStarted = d.refreshSyncQueryCache(cache, diskCache, pCtx, query, model, policy, cacheKey, fields)
 		}
 		cacheFields := appendSyncQueryCacheDiagnosticFields(fields, policy, status, result.storage, cacheKey, result.age, shared, false, refreshStarted)
+		cacheFields = append(cacheFields, "profileCacheSingleflightMs", singleflightMs)
 		d.logDiagnostics("sync query cache "+status, cacheFields...)
 		return syncQueryResult{frames: frames, fields: cacheFields}, nil
 	case syncQueryResult:
+		result.fields = append(result.fields, "profileCacheSingleflightMs", singleflightMs)
 		if shared {
 			result.fields = cloneDiagnosticFields(result.fields)
 			result.fields = append(result.fields, "queryCacheShared", true)
@@ -338,16 +354,25 @@ func (d *KdbDatasource) refreshSyncQueryCache(cache *syncQueryCache, diskCache *
 }
 
 func (d *KdbDatasource) runSyncQueryUncached(pCtx backend.PluginContext, query backend.DataQuery, model QueryModel, fields []interface{}) (syncQueryResult, error) {
-	kdbResponse, err := d.RunKdbQuerySync(buildSyncQueryPayload(pCtx, query, model), time.Duration(model.Timeout)*time.Millisecond, fields...)
+	payloadStart := time.Now()
+	payload := buildSyncQueryPayload(pCtx, query, model)
+	fields = appendDiagnosticDuration(fields, "profilePayloadBuildMs", payloadStart)
+
+	kdbCallStart := time.Now()
+	kdbResponse, err := d.RunKdbQuerySync(payload, time.Duration(model.Timeout)*time.Millisecond, fields...)
+	fields = appendDiagnosticDuration(fields, "profileKdbCallMs", kdbCallStart)
 	if err != nil {
 		return syncQueryResult{fields: fields, errorMessage: "sync query failed"}, err
 	}
 	fields = appendDiagnosticKdbObject(fields, "kdbResponse", kdbResponse)
 
+	parseStart := time.Now()
 	frames, err := parseKdbResponseToFrames(kdbResponse, model, query.RefID)
+	fields = appendDiagnosticDuration(fields, "profileFrameParseMs", parseStart)
 	if err != nil {
 		return syncQueryResult{fields: fields, errorMessage: "sync result parse failed"}, err
 	}
+	fields = appendDiagnosticFrameProfile(fields, frames)
 	return syncQueryResult{frames: frames, fields: fields}, nil
 }
 

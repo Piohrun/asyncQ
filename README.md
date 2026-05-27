@@ -53,6 +53,8 @@ The q side should return status dictionaries with these keys:
 
 When the job reaches `done`, `.grafana.asyncq.async.result` must return a flat table or grouped table accepted by the existing parser.
 
+Helper Async is normally delivered to panels through Grafana Live. The backend also exposes `POST async/run-and-wait` as a datasource resource for MCP clients and migration tooling that need finite async execution without opening a browser Live subscription. It supports `async`, `pluginAsync`, `deferredAsync`, and `legacyAsync`, returning the final frames plus status timeline events. It intentionally rejects `stream`, because streams are open subscriptions rather than finite requests.
+
 ### Plugin Async
 
 Plugin Async mode does not require q helper functions. The backend opens a dedicated kdb+ connection, evaluates the same query expression as sync mode in a goroutine, sends Grafana Live status frames while it waits, and returns the final result frame when q replies.
@@ -188,7 +190,7 @@ Datasource config includes two diagnostic switches:
 - `Diagnostics` writes structured backend logs for query receipt, preparation, q execution, result parsing, frame send, cancellation, and completion across sync, helper async, plugin async, legacy async, deferred async, and stream paths.
 - `Log Query Text` additionally writes raw query and wrapper text to backend logs. It is disabled by default because q text can contain sensitive table names, filters, identifiers, or credentials.
 
-Safe diagnostics logs include request IDs, Grafana ref IDs, execution and compatibility modes, time-range metadata, query and wrapper SHA-256 hashes, kdb+ object descriptions, Grafana frame schemas, durations, job IDs, stream IDs, q worker IDs, q result metadata, status changes, and errors. Sync diagnostics also include pool acquire wait, opened/reused connections, active/idle pool state, release/discard action, transport duration, query-cache status (`disabled`, `bypassed`, `miss`, `refresh`, `stored`, `stale`, or `hit`), and cache storage (`memory`, `disk`, or `memory+disk`). Legacy async diagnostics include adapter function hashes, request mode, response paths, submit/status/result object shapes, normalized status, raw status, whether the raw status matched a configured mapping, message/error fields, timeout duration, and job ID extraction failures. These fields help distinguish plugin-side pool saturation, q-side gateway serialization, async protocol mismatches, status-mapping errors, lifecycle timeouts, and warm-cache reuse. The same diagnostics are attached to returned frames under `frame.meta.custom.asyncqDiagnostics`, so panels can display freshness/cache state without scraping logs. q stack traces and adapter function bodies are logged verbatim only with `Log Query Text`. The local demo provisions `diagnosticsEnabled: true` and `diagnosticsLogQueryText: false` so you can inspect behavior without exposing raw q text.
+Safe diagnostics logs include request IDs, Grafana ref IDs, execution and compatibility modes, time-range metadata, query and wrapper SHA-256 hashes, kdb+ object descriptions, Grafana frame schemas, durations, job IDs, stream IDs, q worker IDs, q result metadata, status changes, and errors. Sync diagnostics also include pool acquire wait, opened/reused connections, active/idle pool state, release/discard action, transport duration, query-cache status (`disabled`, `bypassed`, `miss`, `refresh`, `stored`, `stale`, or `hit`), cache storage (`memory`, `disk`, or `memory+disk`), and lightweight profiler fields such as `profilePrepareMs`, `profileCachePathMs`, `profileCachePolicyMs`, `profileCacheKeyMs`, `profileCacheMemoryLookupMs`, `profileCacheDiskLookupMs`, `profileCacheSingleflightMs`, `profilePayloadBuildMs`, `profileKdbCallMs`, `profileFrameParseMs`, and `profileFrameCells`. Timings are stored as fractional milliseconds where possible, so fast local demo calls no longer collapse every sub-step to `0 ms`. Legacy async diagnostics include adapter function hashes, request mode, response paths, submit/status/result object shapes, normalized status, raw status, whether the raw status matched a configured mapping, message/error fields, timeout duration, and job ID extraction failures. These fields help distinguish plugin-side pool saturation, q-side gateway serialization, async protocol mismatches, status-mapping errors, lifecycle timeouts, frame-conversion cost, and warm-cache reuse. The same diagnostics are attached to returned frames under `frame.meta.custom.asyncqDiagnostics`, so panels can display freshness/cache state without scraping logs. q stack traces and adapter function bodies are logged verbatim only with `Log Query Text`. The local demo provisions `diagnosticsEnabled: true` and `diagnosticsLogQueryText: false` so you can inspect behavior without exposing raw q text.
 
 ## Cache And Master Data Panel
 
@@ -198,10 +200,11 @@ The backend exposes datasource resources for cache status and control:
 
 - `GET cache/status` and `GET cache/entries`
 - `POST cache/clear`, `POST cache/clear-entry`, and `POST cache/clear-expired`
+- `POST async/run-and-wait` for finite async execution from tooling
 
 Cache status is read-only for any user who can query the datasource. Cache clear actions require `Cache Controls` to be enabled on the datasource and a Grafana `Admin` or `Editor` role.
 
-This repo also includes a companion panel plugin, `asyncq-masterdata-panel`. Use it as a master data panel that runs one AsyncQ query, exposes freshness/cache diagnostics, and can be referenced by dependent panels through Grafana's `-- Dashboard --` datasource. Freshness mode is a small widget-style view for main dashboard tabs.
+This repo also includes a companion panel plugin, `asyncq-masterdata-panel`. Use it as a master data panel that runs one AsyncQ query, exposes freshness/cache diagnostics and profile timings, and can be referenced by dependent panels through Grafana's `-- Dashboard --` datasource. Freshness mode is a small widget-style view for main dashboard tabs.
 
 ## Excel Reporting
 
@@ -310,6 +313,8 @@ A runnable demo is available in [demo/README.md](demo/README.md). It provisions 
 ```bash
 ./scripts/start-demo-local.sh
 ```
+
+The local demo also installs pinned Business Suite panel plugins for migration testing: Business Table (`volkovlabs-table-panel`), Business Charts (`volkovlabs-echarts-panel`), and Business Forms (`volkovlabs-form-panel`). Set `ASYNCQ_DEMO_INSTALL_BUSINESS_PLUGINS=0` to skip these external plugin downloads.
 
 The sync pool probe dashboard is provisioned at:
 
