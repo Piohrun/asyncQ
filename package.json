@@ -1,6 +1,6 @@
 {
   "name": "asyncq-kdbbackend-datasource",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "kdb+ datasource with async and streaming support",
   "scripts": {
     "build": "npm run build:datasource",

@@ -25,6 +25,14 @@ Each datasource instance owns a bounded sync IPC connection pool. `Sync Max Conn
 
 Sync query result caching is enabled by default for new datasource configs and is intended for read-only gateway calls. Successful sync query results are cached in memory and, by default, on local disk for `Cache TTL (s)` seconds, bounded by the memory and disk cache limits. Explicit `queryCacheEnabled: false` or `queryCacheDiskEnabled: false` settings are still respected. Cache keys include the compiled query text, time range, interval, max data points, execution/compatibility options, datasource identity, and Grafana user context, so user-specific gateway responses are not shared across users. `Cache Time Bucket (s)` defaults to `0` for exact time ranges; set it to a small value such as `5`, `30`, or `60` when relative `now` dashboards should reuse warm results briefly. `Stale TTL (s)` enables stale-while-revalidate: expired cached data is returned immediately while the backend refreshes the cache for the next query. `Cache Key` defaults to `Strict`, which includes Grafana ref ID; `Shared` omits ref ID for panels that safely share one result. Per-query cache controls can override mode, key mode, TTL, stale TTL, and time bucket. Add a q comment containing `asyncq:cache=off`, `asyncq:cache=bypass`, `asyncq:cache=refresh`, or `asyncq:cache=on` to force query-level behavior from copied q text.
 
+### Excel Reports
+
+The companion `asyncq-excel-report-panel` calls datasource report resources that populate preconfigured `.xlsx` templates. Report bindings write returned frames to `sheet`/`cell` ranges and can either run a mapped sync q query or write frames submitted by the report panel through Grafana's Dashboard datasource.
+
+Large report data sheets should use `writeMode: "stream"` at report or binding level. Stream mode uses excelize's streaming row writer and is much faster for thousands of rows because it writes worksheet XML directly. It should be used for dedicated data tabs where AsyncQ owns the sheet's cell data. The default `cells` mode preserves the legacy per-cell behavior; `rows` is available as a normal-mode row helper. Do not mix stream and normal write modes on the same sheet. In stream mode, rows must be written in ascending order, and the target sheet's existing cell data is replaced by the streamed rows. Keep formulas and charts on separate template sheets pointing at those data ranges.
+
+The report panel shows an in-panel generation status with elapsed time, then displays the final backend generation duration and downloads the workbook through a one-time datasource download token. Users can edit the generated filename before download; the backend appends `.xlsx` and sanitizes path-invalid characters.
+
 ### Helper Async
 
 Helper Async mode is served through Grafana Live. The backend opens a dedicated kdb+ connection and calls q helper or gateway functions:
@@ -190,7 +198,7 @@ Datasource config includes two diagnostic switches:
 - `Diagnostics` writes structured backend logs for query receipt, preparation, q execution, result parsing, frame send, cancellation, and completion across sync, helper async, plugin async, legacy async, deferred async, and stream paths.
 - `Log Query Text` additionally writes raw query and wrapper text to backend logs. It is disabled by default because q text can contain sensitive table names, filters, identifiers, or credentials.
 
-Safe diagnostics logs include request IDs, Grafana ref IDs, execution and compatibility modes, time-range metadata, query and wrapper SHA-256 hashes, kdb+ object descriptions, Grafana frame schemas, durations, job IDs, stream IDs, q worker IDs, q result metadata, status changes, and errors. Sync diagnostics also include pool acquire wait, opened/reused connections, active/idle pool state, release/discard action, transport duration, query-cache status (`disabled`, `bypassed`, `miss`, `refresh`, `stored`, `stale`, or `hit`), cache storage (`memory`, `disk`, or `memory+disk`), and lightweight profiler fields such as `profilePrepareMs`, `profileCachePathMs`, `profileCachePolicyMs`, `profileCacheKeyMs`, `profileCacheMemoryLookupMs`, `profileCacheDiskLookupMs`, `profileCacheSingleflightMs`, `profilePayloadBuildMs`, `profileKdbCallMs`, `profileFrameParseMs`, and `profileFrameCells`. Timings are stored as fractional milliseconds where possible, so fast local demo calls no longer collapse every sub-step to `0 ms`. Legacy async diagnostics include adapter function hashes, request mode, response paths, submit/status/result object shapes, normalized status, raw status, whether the raw status matched a configured mapping, message/error fields, timeout duration, and job ID extraction failures. These fields help distinguish plugin-side pool saturation, q-side gateway serialization, async protocol mismatches, status-mapping errors, lifecycle timeouts, frame-conversion cost, and warm-cache reuse. The same diagnostics are attached to returned frames under `frame.meta.custom.asyncqDiagnostics`, so panels can display freshness/cache state without scraping logs. q stack traces and adapter function bodies are logged verbatim only with `Log Query Text`. The local demo provisions `diagnosticsEnabled: true` and `diagnosticsLogQueryText: false` so you can inspect behavior without exposing raw q text.
+Safe diagnostics logs include request IDs, Grafana ref IDs, execution and compatibility modes, time-range metadata, query and wrapper SHA-256 hashes, kdb+ object descriptions, Grafana frame schemas, durations, job IDs, stream IDs, q worker IDs, q result metadata, status changes, and errors. Sync diagnostics also include pool acquire wait, opened/reused connections, active/idle pool state, release/discard action, transport duration, query-cache status (`disabled`, `bypassed`, `miss`, `refresh`, `stored`, `stale`, or `hit`), cache storage (`memory`, `disk`, or `memory+disk`), and lightweight profiler fields such as `profilePrepareMs`, `profileCachePathMs`, `profileCachePolicyMs`, `profileCacheKeyMs`, `profileCacheMemoryLookupMs`, `profileCacheDiskLookupMs`, `profileCacheSingleflightMs`, `profilePayloadBuildMs`, `profileKdbCallMs`, `profileFrameParseMs`, `profileFrameRows`, `profileFrameFields`, and `profileFrameCells`. Cached sync frames keep the same frame-size profile diagnostics as fresh query frames; cache-only paths report q-call/frame-parse timings as unavailable rather than dropping those fields from the UI. Timings are stored as fractional milliseconds where possible, so fast local demo calls no longer collapse every sub-step to `0 ms`. Legacy async diagnostics include adapter function hashes, request mode, response paths, submit/status/result object shapes, normalized status, raw status, whether the raw status matched a configured mapping, message/error fields, timeout duration, and job ID extraction failures. These fields help distinguish plugin-side pool saturation, q-side gateway serialization, async protocol mismatches, status-mapping errors, lifecycle timeouts, frame-conversion cost, and warm-cache reuse. The same diagnostics are attached to returned frames under `frame.meta.custom.asyncqDiagnostics`, so panels can display freshness/cache state without scraping logs. q stack traces and adapter function bodies are logged verbatim only with `Log Query Text`. The local demo provisions `diagnosticsEnabled: true` and `diagnosticsLogQueryText: false` so you can inspect behavior without exposing raw q text.
 
 ## Cache And Master Data Panel
 
@@ -204,21 +212,25 @@ The backend exposes datasource resources for cache status and control:
 
 Cache status is read-only for any user who can query the datasource. Cache clear actions require `Cache Controls` to be enabled on the datasource and a Grafana `Admin` or `Editor` role.
 
-This repo also includes a companion panel plugin, `asyncq-masterdata-panel`. Use it as a master data panel that runs one AsyncQ query, exposes freshness/cache diagnostics and profile timings, and can be referenced by dependent panels through Grafana's `-- Dashboard --` datasource. Freshness mode is a small widget-style view for main dashboard tabs.
+This repo also includes a companion panel plugin, `asyncq-masterdata-panel`. Use it as a master data panel that runs one AsyncQ query, exposes freshness/cache diagnostics and profile timings, and can be referenced by dependent panels through Grafana's `-- Dashboard --` datasource. Freshness mode is a small widget-style view for main dashboard tabs. The full diagnostics view uses stable metric/profile slots across fresh queries and cache hits; unavailable timings show as `n/a` or `-`, and an `Other` profile row accounts for elapsed time not attributed to named sub-steps.
 
 ## Excel Reporting
 
 The datasource also exposes preconfigured Excel report resources, and this repo includes a companion panel plugin, `asyncq-excel-report-panel`, that renders a dashboard download button. Report definitions are admin/provisioning-controlled through datasource `jsonData.excelReports`; dashboard users select only the configured report button.
 
-The report panel sends the current Grafana time range, dashboard variables, current user identity, and any frames already returned to the report panel to the datasource. A binding with `queryText` is executed through the same AsyncQ sync query path as normal panels, so datasource credentials, sync connection pooling, query cache, diagnostics, Panopticon time macros, and Panopticon dashboard-parameter expansion all apply. A binding without `queryText` uses submitted frames matching its `refId` or `id`; this lets the report panel use Grafana's `-- Dashboard --` datasource to pull results from another panel and write them into Excel. For multiple source panels, configure the report panel datasource as `-- Mixed --` and add one `-- Dashboard --` target per source panel. The backend then writes each frame into the configured Excel sheet and cell. No screenshots are generated; rich workbook templates should contain their own formulas, charts, and formatting pointed at the populated ranges.
+The report panel sends the current Grafana time range, dashboard variables, current user identity, and any frames already returned to the report panel to the datasource. A binding with `queryText` is executed through the same AsyncQ sync query path as normal panels, so datasource credentials, sync connection pooling, query cache, diagnostics, Panopticon time macros, and Panopticon dashboard-parameter expansion all apply. A binding without `queryText` uses submitted frames matching its `refId` or `id`; this lets the report panel use Grafana's `-- Dashboard --` datasource to pull results from another panel and write them into Excel. For multiple source panels, configure the report panel datasource as `-- Mixed --` and add one `-- Dashboard --` target per source panel. The backend then writes each frame into the configured Excel sheet and cell. The panel uses `report/generate-link` followed by `report/download?token=...`, so it can show progress/status text while preserving the backend `Content-Disposition` filename. No screenshots are generated; rich workbook templates should contain their own formulas, charts, and formatting pointed at the populated ranges.
 
 The backend resources are:
 
 - `GET report/catalog`
 - `GET report/validate`
 - `POST report/generate`
+- `POST report/generate-link`
+- `GET report/download?token=...`
 
 Template files are restricted to allowlisted local directories. Set datasource `excelReportTemplateDirs` or the `ASYNCQ_EXCEL_TEMPLATE_DIRS` environment variable to one or more absolute directories, separated by newlines, commas, or semicolons. The backend resolves symlinks before checking that `templatePath` stays inside the allowlist. Generation is also guarded by datasource defaults `excelReportMaxRows` (`100000`), `excelReportMaxFileBytes` (`52428800`), and `excelReportTimeoutMs` (`60000`); reports can override these with `maxRows`, `maxFileBytes`, and `generationTimeoutMs`, while individual bindings can override `maxRows`.
+
+`writeMode` controls how frames are written into Excel. The default `cells` mode preserves the legacy per-cell path. `rows` uses excelize's normal row helper, but it still calls normal cell mutation internally. `stream` is recommended for large dedicated data sheets; it writes worksheet XML directly and avoids the slow normal cell mutation path. Use stream mode only when AsyncQ owns the target sheet's cell data, because the streamed rows replace existing sheet cells and rows must be written in ascending order. Put formulas and charts on separate sheets pointing at the data ranges.
 
 Example datasource `excelReports` JSON:
 
@@ -234,13 +246,13 @@ Example datasource `excelReports` JSON:
         "reportType": "daily-risk"
       },
       "compatibilityMode": "panopticon",
+      "writeMode": "stream",
       "bindings": [
         {
           "id": "positions",
           "queryText": ".risk.positions[{TimeWindowEnd};{book:,}]",
           "sheet": "Positions",
           "cell": "A1",
-          "clearRange": "A1:Z5000",
           "includeHeader": true
         }
       ]
@@ -262,7 +274,7 @@ Frame-backed bindings omit `queryText` and match a frame supplied to the report 
 }
 ```
 
-Report bindings currently run synchronously because XLSX generation must wait for concrete result frames. Use read-only queries, cache settings, larger query timeouts, and Dashboard datasource sharing where appropriate. Templates are opened from the local Grafana server filesystem, and generated workbooks are returned directly to the browser.
+Report bindings currently run synchronously because XLSX generation must wait for concrete result frames. Use read-only queries, cache settings, larger query timeouts, and Dashboard datasource sharing where appropriate. Templates are opened from the local Grafana server filesystem, and generated workbooks are returned directly to the browser or through the one-time download-token resource used by the panel.
 
 `outputName` is the admin-controlled default workbook filename template. The report panel shows it as an editable filename before download and sends the user's override to the backend. Supported filename tokens include `{userId}`, `{userUid}`, `{login}`, `{userName}`, `{reportId}`, `{reportName}`, `{reportType}`, `{timestamp}`, `{yyyymmdd}`, `{yyyymmddhhmm}`, and `{yyyymmddhhmmss}`. The backend appends `.xlsx` if needed and replaces path/filename-invalid characters with `_`.
 

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { PanelProps } from '@grafana/data';
 import { config, getTemplateSrv } from '@grafana/runtime';
 import { Button } from '@grafana/ui';
@@ -12,23 +12,24 @@ const rootStyle: React.CSSProperties = {
   height: '100%',
   minHeight: 0,
   gap: 8,
-  overflow: 'visible',
+  overflow: 'auto',
   fontSize: 12,
 };
 
 const rowStyle: React.CSSProperties = {
   display: 'flex',
-  alignItems: 'center',
+  alignItems: 'flex-end',
+  flexWrap: 'wrap',
   gap: 8,
   minWidth: 0,
 };
 
 const fileNameFieldStyle: React.CSSProperties = {
   display: 'flex',
-  flex: '1 1 260px',
+  flex: '1 1 200px',
   flexDirection: 'column',
   gap: 2,
-  minWidth: 220,
+  minWidth: 160,
 };
 
 const labelStyle: React.CSSProperties = {
@@ -50,15 +51,61 @@ const inputStyle: React.CSSProperties = {
 };
 
 const metaStyle: React.CSSProperties = {
+  maxWidth: '100%',
   overflow: 'hidden',
   textOverflow: 'ellipsis',
   whiteSpace: 'nowrap',
   color: 'var(--text-secondary)',
 };
 
+const statusBannerStyle: React.CSSProperties = {
+  border: '1px solid var(--primary-border, var(--border-weak))',
+  borderRadius: 4,
+  background: 'var(--background-secondary, var(--panel-bg))',
+  color: 'var(--text-primary)',
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 6,
+  padding: '8px 10px',
+  width: '100%',
+};
+
+const statusTitleStyle: React.CSSProperties = {
+  fontSize: 12,
+  fontWeight: 600,
+  lineHeight: '16px',
+};
+
+const statusTextStyle: React.CSSProperties = {
+  color: 'var(--text-secondary)',
+  fontSize: 12,
+  lineHeight: '16px',
+  overflowWrap: 'anywhere',
+};
+
+const successBannerStyle: React.CSSProperties = {
+  ...statusBannerStyle,
+  borderColor: 'var(--success-border, var(--border-weak))',
+};
+
 const errorStyle: React.CSSProperties = {
   ...metaStyle,
   color: 'var(--error-text-color)',
+};
+
+const progressRowStyle: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  minWidth: 0,
+  width: '100%',
+};
+
+const progressStyle: React.CSSProperties = {
+  flex: '1 1 auto',
+  accentColor: 'var(--primary-text-color, #1f60c4)',
+  height: 10,
+  minWidth: 80,
 };
 
 export function AsyncQExcelReportPanel(props: PanelProps<AsyncQExcelReportOptions>) {
@@ -69,7 +116,10 @@ export function AsyncQExcelReportPanel(props: PanelProps<AsyncQExcelReportOption
   const [status, setStatus] = useState('');
   const [error, setError] = useState('');
   const [fileName, setFileName] = useState('');
+  const [startedAt, setStartedAt] = useState(0);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [catalog, setCatalog] = useState<ExcelReportCatalog | undefined>();
+  const previousSuggestion = useRef('');
 
   useEffect(() => {
     if (!datasourceUid) {
@@ -101,37 +151,62 @@ export function AsyncQExcelReportPanel(props: PanelProps<AsyncQExcelReportOption
   const disabled = busy || !datasourceUid || !reportId;
 
   useEffect(() => {
-    setFileName(suggestedFileName);
+    const oldSuggestion = previousSuggestion.current;
+    previousSuggestion.current = suggestedFileName;
+    setFileName((current) => {
+      if (!current || current === oldSuggestion) {
+        return suggestedFileName;
+      }
+      return current;
+    });
   }, [suggestedFileName]);
 
-  const generate = () => {
+  useEffect(() => {
+    if (!busy || !startedAt) {
+      setElapsedSeconds(0);
+      return undefined;
+    }
+    const timer = window.setInterval(() => {
+      setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    }, 250);
+    return () => window.clearInterval(timer);
+  }, [busy, startedAt]);
+
+  const generate = async () => {
     if (!datasourceUid || !reportId) {
       setError('Datasource UID and report ID are required');
       return;
     }
     setBusy(true);
+    setStartedAt(Date.now());
     setError('');
-    setStatus('Preparing download');
+    setStatus('Writing workbook');
     try {
       const requestedFileName = options.showFileNameInput ? fileName.trim() || suggestedFileName : '';
-      submitReportDownloadForm(datasourceUid, {
-        reportId,
-        fileName: requestedFileName,
-        timeRange: {
-          from: toIsoString(props.timeRange.from),
-          to: toIsoString(props.timeRange.to),
+      const generated = await generateReportDownloadLink(
+        datasourceUid,
+        {
+          reportId,
+          fileName: requestedFileName,
+          timeRange: {
+            from: toIsoString(props.timeRange.from),
+            to: toIsoString(props.timeRange.to),
+          },
+          variables: collectDashboardVariables(),
+          user: currentGrafanaUser(),
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || '',
+          frames: serializeFrames(props.data.series, props.data.request?.targets),
         },
-        variables: collectDashboardVariables(),
-        user: currentGrafanaUser(),
-        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || '',
-        frames: serializeFrames(props.data.series, props.data.request?.targets),
-      });
-      setStatus(`Download requested: ${ensureXlsxExtension(sanitizeFileName(requestedFileName || suggestedFileName))}`);
+        requestedFileName || suggestedFileName
+      );
+      downloadReportLink(datasourceUid, generated.token, generated.fileName);
+      setStatus(`Report generated in ${formatDurationSeconds(generated.generationMs)}: ${generated.fileName}`);
     } catch (err) {
       setError(formatError(err));
       setStatus('');
     } finally {
       setBusy(false);
+      setStartedAt(0);
     }
   };
 
@@ -154,8 +229,24 @@ export function AsyncQExcelReportPanel(props: PanelProps<AsyncQExcelReportOption
         <Button icon="file-download" onClick={generate} disabled={disabled}>
           {busy ? 'Generating' : buttonText}
         </Button>
-        {status && !error && <span style={metaStyle}>{status}</span>}
       </div>
+      {busy && (
+        <div role="status" aria-live="polite" style={statusBannerStyle}>
+          <div style={statusTitleStyle}>Generating report</div>
+          <div style={statusTextStyle}>
+            {status || 'Writing workbook'}{elapsedSeconds > 0 ? ` (${elapsedSeconds}s)` : ''}
+          </div>
+          <div style={progressRowStyle}>
+            <progress aria-label="Excel report generation progress" style={progressStyle} />
+          </div>
+        </div>
+      )}
+      {!busy && status && !error && (
+        <div role="status" aria-live="polite" style={successBannerStyle}>
+          <div style={statusTitleStyle}>Report ready</div>
+          <div style={statusTextStyle}>{status}</div>
+        </div>
+      )}
       {options.showReportName && <div style={metaStyle}>{report?.name || reportId || 'No report selected'}</div>}
       {error && <div style={errorStyle} title={error}>{error}</div>}
     </div>
@@ -361,32 +452,47 @@ async function responseError(response: Response): Promise<string> {
   }
 }
 
-function submitReportDownloadForm(datasourceUid: string, payload: Record<string, any>) {
-  const iframeName = `asyncq_excel_report_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
+async function generateReportDownloadLink(
+  datasourceUid: string,
+  payload: Record<string, any>,
+  fallbackFileName: string
+): Promise<{ token: string; fileName: string; generationMs: number }> {
+  const response = await fetch(reportResourceUrl(datasourceUid, 'report/generate-link'), {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: {
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw new Error(await responseError(response));
+  }
+  const result = await response.json();
+  if (!result?.token) {
+    throw new Error(result?.error || 'Report generation did not return a download token');
+  }
+  return {
+    token: String(result.token),
+    fileName: ensureXlsxExtension(sanitizeFileName(String(result.fileName || fallbackFileName))),
+    generationMs: Number(result.generationMs || 0),
+  };
+}
+
+function downloadReportLink(datasourceUid: string, token: string, fileName: string) {
   const iframe = document.createElement('iframe');
-  iframe.name = iframeName;
+  iframe.src = `${reportResourceUrl(datasourceUid, 'report/download')}?token=${encodeURIComponent(token)}`;
+  iframe.title = ensureXlsxExtension(sanitizeFileName(fileName));
   iframe.style.display = 'none';
-
-  const form = document.createElement('form');
-  form.method = 'POST';
-  form.action = reportResourceUrl(datasourceUid, 'report/generate');
-  form.target = iframeName;
-  form.enctype = 'application/x-www-form-urlencoded';
-  form.style.display = 'none';
-
-  const input = document.createElement('textarea');
-  input.name = 'payload';
-  input.value = JSON.stringify(payload);
-  form.appendChild(input);
-
   document.body.appendChild(iframe);
-  document.body.appendChild(form);
-  form.submit();
+  window.setTimeout(() => iframe.remove(), 60000);
+}
 
-  window.setTimeout(() => {
-    form.remove();
-    iframe.remove();
-  }, 60000);
+function formatDurationSeconds(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) {
+    return '0.0s';
+  }
+  return `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)}s`;
 }
 
 function formatError(err: unknown): string {

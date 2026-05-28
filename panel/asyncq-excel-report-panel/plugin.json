@@ -3,6 +3,7 @@
   "type": "panel",
   "name": "AsyncQ Excel Report",
   "id": "asyncq-excel-report-panel",
+  "skipDataQuery": true,
   "info": {
     "description": "Dashboard report button for generating preconfigured AsyncQ Excel workbooks",
     "author": {

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.0.9
+
+- Added Excel report `writeMode` support with explicit `stream` mode for faster large data-sheet generation.
+- Added Excel report generation timing and written row/cell diagnostics to backend logs.
+- Added Excel report panel progress feedback, elapsed/final generation duration text, and one-time download-token flow.
+- Expanded the Excel reporting demo with deterministic large source frames and side-by-side query-backed cells, rows, and stream report buttons.
+- Fixed Excel report filename overrides so user-entered names are not replaced by late catalog/default updates.
+- Stabilized the master data/profiling panel layout so fresh-query and cache-hit results keep the same metric/profile/diagnostic slots.
+- Added cached-frame profile diagnostics (`profileFrameRows`, `profileFrameFields`, and `profileFrameCells`) on sync cache hits.
+
 ## 1.0.8
 
 - Added sync query profiling diagnostics for decode, preparation, cache lookup, kdb call, frame parsing, and frame size metrics.

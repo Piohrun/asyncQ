@@ -958,13 +958,13 @@ const excelReportsPlaceholder = `{
       "templatePath": "/var/lib/grafana/asyncq/templates/daily-risk.xlsx",
       "outputName": "daily-risk-{timestamp}.xlsx",
       "compatibilityMode": "panopticon",
+      "writeMode": "stream",
       "bindings": [
         {
           "id": "positions",
           "queryText": ".risk.positions[{TimeWindowEnd};{book:,}]",
           "sheet": "Positions",
           "cell": "A1",
-          "clearRange": "A1:Z5000",
           "includeHeader": true
         }
       ]

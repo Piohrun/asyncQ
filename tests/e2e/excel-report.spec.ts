@@ -4,36 +4,13 @@ import fs from 'node:fs';
 import { expect, test } from '@playwright/test';
 
 test('Excel reporting dashboard downloads a populated workbook', async ({ page }, testInfo) => {
-  const queryState = { prices: false, trades: false };
+  await page.goto('/d/asyncq-excel-report/asyncq-excel-reporting?orgId=1&from=now-5m&to=now&var-reportRows=5000&kiosk=tv');
+  await expect(page.getByText('Excel report: stream')).toBeVisible();
 
-  page.on('response', async (response) => {
-    if (!response.url().includes('/api/ds/query') || !response.ok()) {
-      return;
-    }
-    const body = await response.json().catch(() => undefined);
-    for (const result of Object.values((body as any)?.results || {})) {
-      for (const frame of (result as any)?.frames || []) {
-        const fieldNames = ((frame as any)?.schema?.fields || []).map((field: any) => String(field.name));
-        const values = (frame as any)?.data?.values || [];
-        const rowCount = Array.isArray(values[0]) ? values[0].length : 0;
-        if (rowCount > 0 && fieldNames.includes('lastPrice') && fieldNames.includes('trades')) {
-          queryState.prices = true;
-        }
-        if (rowCount > 0 && fieldNames.includes('price') && fieldNames.includes('size')) {
-          queryState.trades = true;
-        }
-      }
-    }
-  });
-
-  await page.goto('/d/asyncq-excel-report/asyncq-excel-reporting?orgId=1&from=now-5m&to=now&kiosk=tv');
-  await expect(page.getByText('Excel report')).toBeVisible();
-  await expect.poll(() => queryState.prices && queryState.trades).toBe(true);
-
-  await page.getByLabel('Excel file name').fill('playwright-excel-report');
+  await page.getByLabel('Excel file name').first().fill('playwright-excel-report');
 
   const downloadPromise = page.waitForEvent('download', { timeout: 30_000 });
-  await page.getByRole('button', { name: 'Download report' }).evaluate((button) => {
+  await page.getByRole('button', { name: 'Download stream' }).evaluate((button) => {
     (button as HTMLButtonElement).click();
   });
   const download = await downloadPromise;
@@ -46,12 +23,13 @@ test('Excel reporting dashboard downloads a populated workbook', async ({ page }
   expect(unzipList(workbookPath)).toContain('xl/workbook.xml');
 
   const workbookXml = unzipEntry(workbookPath, 'xl/workbook.xml');
-  const sharedStrings = unzipEntry(workbookPath, 'xl/sharedStrings.xml');
+  const summarySheet = unzipEntry(workbookPath, 'xl/worksheets/sheet2.xml');
+  const tradesSheet = unzipEntry(workbookPath, 'xl/worksheets/sheet3.xml');
   expect(workbookXml).toContain('Summary');
   expect(workbookXml).toContain('Trades');
-  expect(sharedStrings).toContain('sym');
-  expect(sharedStrings).toContain('lastPrice');
-  expect(sharedStrings).toContain('price');
+  expect(summarySheet).toContain('sym');
+  expect(summarySheet).toContain('lastPrice');
+  expect(tradesSheet).toContain('price');
 });
 
 function unzipList(filePath: string): string {
@@ -59,5 +37,5 @@ function unzipList(filePath: string): string {
 }
 
 function unzipEntry(filePath: string, entry: string): string {
-  return execFileSync('unzip', ['-p', filePath, entry], { encoding: 'utf8' });
+  return execFileSync('unzip', ['-p', filePath, entry], { encoding: 'utf8', maxBuffer: 20 * 1024 * 1024 });
 }

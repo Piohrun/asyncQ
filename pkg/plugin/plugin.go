@@ -214,6 +214,8 @@ type KdbDatasource struct {
 	queryCacheMu     sync.Mutex
 	queryDiskCache   *syncQueryDiskCache
 	queryDiskCacheMu sync.Mutex
+	excelDownloads   map[string]excelReportDownload
+	excelDownloadsMu sync.Mutex
 
 	signals             chan int
 	syncQueue           chan *kdbSyncQuery
@@ -556,6 +558,7 @@ func (d *KdbDatasource) query(_ context.Context, pCtx backend.PluginContext, que
 	}
 	fields = appendDiagnosticDuration(result.fields, "profileCachePathMs", cacheStart)
 	fields = appendDiagnosticFrames(fields, result.frames)
+	fields = ensureDiagnosticFrameProfile(fields, result.frames)
 	fields = append(fields, "durationMs", diagnosticDurationMs(time.Since(start)))
 	attachAsyncQDiagnostics(result.frames, fields)
 	response.Frames = append(response.Frames, result.frames...)

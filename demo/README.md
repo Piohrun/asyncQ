@@ -69,8 +69,8 @@ Docker is optional. It is useful when you want a fully disposable Grafana contai
 - `AsyncQ async execution tests` compares sync, helper async, plugin async, legacy async adapter, deferred async, streaming, and Panopticon request-function execution. The legacy panel uses `.demo.legacy.submit/status/result/cancel`, which deliberately return `id/state/pct/payload` envelopes instead of the `.grafana.asyncq.async.*` helper contract.
 - `AsyncQ sync connection pool` runs four slow sync probes against the same datasource. With the single local q process, q itself may serialize execution; inspect Grafana diagnostics for `syncPoolAcquireWaitMs`, `syncPoolAcquireSource`, `syncPoolActive`, and `syncTransportMs` to distinguish plugin pool wait from target q processing time.
 - `AsyncQ master data and cache controls` demonstrates the companion `asyncq-masterdata-panel`: one master data panel runs the AsyncQ query, a freshness widget and table reuse that result through Grafana's `-- Dashboard --` datasource, and cache-control buttons call the datasource cache resources.
-- `AsyncQ Excel reporting` demonstrates the companion `asyncq-excel-report-panel`. Change the `Symbols` dashboard variable or time range, optionally edit the generated workbook filename, then use the report button to download an `.xlsx` workbook populated from the same filtered q data.
-  The demo reports use [demo/templates/asyncq-demo-report-template.xlsx](templates/asyncq-demo-report-template.xlsx), which contains a dashboard sheet with formulas and charts pointing at the populated `Summary` and `Trades` ranges.
+- `AsyncQ Excel reporting` demonstrates the companion `asyncq-excel-report-panel` with large query-backed reports. Change the `Report rows` variable, optionally edit the generated workbook filename, then compare the three report buttons: `cells`, `rows`, and `stream`.
+  The report buttons show generation progress, elapsed time, and a final "report generated" message. The source panels show the same deterministic q data that the report definitions query directly. The generated workbooks use [demo/templates/asyncq-demo-report-template.xlsx](templates/asyncq-demo-report-template.xlsx), and backend logs include `writeSheetsMs`, `serializeWorkbookMs`, `writtenRows`, and `writtenCells` for each generated workbook.
 - `AsyncQ Business Suite smoke` verifies the installed Business Table, Business Charts, and Business Forms panels against the AsyncQ demo datasource.
 
 For Panopticon dashboards where several panels share one base datasource result, create one AsyncQ source panel or `asyncq-masterdata-panel` and set the dependent panels to Grafana's `-- Dashboard --` datasource with `Use results from panel`. The demo dashboards keep most panels direct so the plugin behavior is visible, but production migrations should use Dashboard datasource sharing for this Panopticon pattern.
@@ -79,7 +79,7 @@ If you restart the q process while the dashboard is already open, refresh the br
 
 ## E2E test
 
-The Excel reporting path has a local Playwright test that starts/reuses the demo, waits for dashboard panel data, clicks the report download button, and inspects the generated workbook:
+The Excel reporting path has a local Playwright test that starts/reuses the demo, clicks the stream report download button, and inspects the generated workbook:
 
 ```bash
 npm run test:e2e:install

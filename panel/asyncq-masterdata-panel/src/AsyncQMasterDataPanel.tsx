@@ -261,18 +261,32 @@ function StatusStrip({
   isLoading: boolean;
   compact?: boolean;
 }) {
+  const cacheStatusValue = diagnosticText(summary.diagnostics.queryCacheStatus);
+  const metrics = compact
+    ? [
+        { label: 'Freshness', value: freshness.age ? `${freshness.label} ${freshness.age}` : freshness.label, color: freshness.color },
+        { label: 'State', value: isLoading ? 'updating' : 'ready' },
+        { label: 'Cache', value: cacheStatusValue },
+        { label: 'Rows', value: String(summary.rowCount) },
+      ]
+    : [
+        { label: 'Freshness', value: freshness.age ? `${freshness.label} ${freshness.age}` : freshness.label, color: freshness.color },
+        { label: 'Rows', value: String(summary.rowCount) },
+        { label: 'Fields', value: String(summary.fieldCount) },
+        { label: 'State', value: isLoading ? 'updating' : 'ready' },
+        { label: 'Cache', value: cacheStatusValue },
+        { label: 'Total', value: formatOptionalMs(summary.diagnostics.durationMs) },
+        { label: 'Cache/query', value: formatOptionalMs(summary.diagnostics.profileCachePathMs) },
+        { label: 'kdb call', value: formatOptionalMs(summary.diagnostics.profileKdbCallMs, 'n/a') },
+        { label: 'Frame parse', value: formatOptionalMs(summary.diagnostics.profileFrameParseMs, 'n/a') },
+        { label: 'Memory cache', value: cacheStatus ? `${cacheStatus.memory?.entries ?? 0}/${cacheStatus.memory?.maxEntries ?? '-'}` : 'loading' },
+        { label: 'Disk cache', value: cacheStatus?.disk ? `${cacheStatus.disk.entries ?? 0} files ${formatBytes(cacheStatus.disk.bytes || 0)}` : 'loading' },
+      ];
   return (
     <div style={stripStyle}>
-      <Metric label="Freshness" value={freshness.age ? `${freshness.label} ${freshness.age}` : freshness.label} color={freshness.color} />
-      {!compact && <Metric label="Rows" value={String(summary.rowCount)} />}
-      {!compact && <Metric label="Fields" value={String(summary.fieldCount)} />}
-      <Metric label="State" value={isLoading ? 'updating' : 'ready'} />
-      {!compact && summary.diagnostics.durationMs !== undefined && <Metric label="Total" value={formatMs(summary.diagnostics.durationMs)} />}
-      {!compact && summary.diagnostics.profileCachePathMs !== undefined && <Metric label="Cache/query" value={formatMs(summary.diagnostics.profileCachePathMs)} />}
-      {!compact && summary.diagnostics.profileKdbCallMs !== undefined && <Metric label="kdb call" value={formatMs(summary.diagnostics.profileKdbCallMs)} />}
-      {!compact && summary.diagnostics.profileFrameParseMs !== undefined && <Metric label="Frame parse" value={formatMs(summary.diagnostics.profileFrameParseMs)} />}
-      {cacheStatus && <Metric label="Memory cache" value={`${cacheStatus.memory?.entries ?? 0}/${cacheStatus.memory?.maxEntries ?? '-'}`} />}
-      {cacheStatus?.disk && <Metric label="Disk cache" value={`${cacheStatus.disk.entries ?? 0} files ${formatBytes(cacheStatus.disk.bytes || 0)}`} />}
+      {metrics.map((metric) => (
+        <Metric key={metric.label} label={metric.label} value={metric.value} color={metric.color} />
+      ))}
     </div>
   );
 }
@@ -288,7 +302,7 @@ function Metric({ label, value, color }: { label: string; value: string; color?:
 
 interface TimingItem {
   label: string;
-  value: number;
+  value?: number;
   color?: string;
 }
 
@@ -297,14 +311,14 @@ function Profiler({ diagnostics }: { diagnostics: Record<string, any> }) {
   const prepare = numericDiagnostic(diagnostics.profilePrepareMs);
   const cachePath = numericDiagnostic(diagnostics.profileCachePathMs);
   const topLevel: TimingItem[] = [
-    { label: 'Prepare', value: prepare || 0, color: 'var(--info-text-color)' },
-    { label: 'Cache/query', value: cachePath || 0, color: 'var(--success-text-color)' },
+    { label: 'Total', value: total, color: 'var(--primary-text-color)' },
+    { label: 'Prepare', value: prepare, color: 'var(--info-text-color)' },
+    { label: 'Cache/query', value: cachePath, color: 'var(--success-text-color)' },
   ];
   if (total !== undefined) {
-    const other = Math.max(0, total - topLevel.reduce((sum, item) => sum + item.value, 0));
-    if (other > 0.001 || topLevel.every((item) => item.value === 0)) {
-      topLevel.push({ label: 'Other', value: other, color: 'var(--text-secondary)' });
-    }
+    topLevel.push({ label: 'Other', value: Math.max(0, total - (prepare || 0) - (cachePath || 0)), color: 'var(--text-secondary)' });
+  } else {
+    topLevel.push({ label: 'Other', color: 'var(--text-secondary)' });
   }
 
   const cacheDetail = [
@@ -316,11 +330,7 @@ function Profiler({ diagnostics }: { diagnostics: Record<string, any> }) {
     timingItem('Payload', diagnostics.profilePayloadBuildMs),
     timingItem('kdb call', diagnostics.profileKdbCallMs),
     timingItem('Frame parse', diagnostics.profileFrameParseMs),
-  ].filter((item): item is TimingItem => item !== undefined);
-
-  if (total === undefined && cacheDetail.length === 0 && topLevel.every((item) => item.value === 0)) {
-    return null;
-  }
+  ];
 
   return (
     <div style={sectionStyle}>
@@ -328,14 +338,12 @@ function Profiler({ diagnostics }: { diagnostics: Record<string, any> }) {
       <div style={timingGridStyle}>
         <div>
           <div style={labelStyle}>Top-level query path</div>
-          <TimingBars items={topLevel} baseline={Math.max(total || 0, ...topLevel.map((item) => item.value), 0.001)} />
+          <TimingBars items={topLevel} baseline={timingBaseline(topLevel, total)} />
         </div>
-        {cacheDetail.length > 0 && (
-          <div>
-            <div style={labelStyle}>Cache/query detail</div>
-            <TimingBars items={cacheDetail} baseline={Math.max(cachePath || 0, ...cacheDetail.map((item) => item.value), 0.001)} />
-          </div>
-        )}
+        <div>
+          <div style={labelStyle}>Cache/query detail</div>
+          <TimingBars items={cacheDetail} baseline={timingBaseline(cacheDetail, cachePath)} />
+        </div>
       </div>
     </div>
   );
@@ -345,7 +353,7 @@ function TimingBars({ items, baseline }: { items: TimingItem[]; baseline: number
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 4 }}>
       {items.map((item) => {
-        const width = baseline > 0 ? Math.max(1, Math.min(100, (item.value / baseline) * 100)) : 1;
+        const width = item.value !== undefined && baseline > 0 ? Math.max(1, Math.min(100, (item.value / baseline) * 100)) : 0;
         return (
           <div key={item.label} style={timingRowStyle}>
             <span style={{ ...labelStyle, overflow: 'hidden', textOverflow: 'ellipsis' }}>{item.label}</span>
@@ -359,7 +367,7 @@ function TimingBars({ items, baseline }: { items: TimingItem[]; baseline: number
                 }}
               />
             </span>
-            <span style={{ ...valueStyle, textAlign: 'right' }}>{formatMs(item.value)}</span>
+            <span style={{ ...valueStyle, textAlign: 'right' }}>{item.value === undefined ? '-' : formatMs(item.value)}</span>
           </div>
         );
       })}
@@ -367,12 +375,13 @@ function TimingBars({ items, baseline }: { items: TimingItem[]; baseline: number
   );
 }
 
-function timingItem(label: string, value: any): TimingItem | undefined {
+function timingItem(label: string, value: any): TimingItem {
   const numeric = numericDiagnostic(value);
-  if (numeric === undefined) {
-    return undefined;
-  }
   return { label, value: numeric };
+}
+
+function timingBaseline(items: TimingItem[], preferred?: number): number {
+  return Math.max(preferred || 0, ...items.map((item) => item.value || 0), 0.001);
 }
 
 function FramePreview({ frame, rows }: { frame?: DataFrame; rows: number }) {
@@ -440,11 +449,9 @@ function Diagnostics({ diagnostics, cacheStatus }: { diagnostics: Record<string,
     <div style={sectionStyle}>
       <div style={sectionTitleStyle}>Diagnostics</div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 6 }}>
-        {keys
-          .filter((key) => diagnostics[key] !== undefined && diagnostics[key] !== '')
-          .map((key) => (
-            <Metric key={key} label={key} value={formatValue(diagnostics[key])} />
-          ))}
+        {keys.map((key) => (
+          <Metric key={key} label={key} value={diagnosticText(diagnostics[key])} />
+        ))}
         {cacheStatus?.disk?.error && <Metric label="disk error" value={cacheStatus.disk.error} color="var(--error-text-color)" />}
       </div>
     </div>
@@ -601,9 +608,20 @@ function formatMs(value: any): string {
   return `${Math.round(numeric)} ms`;
 }
 
+function formatOptionalMs(value: any, empty = '-'): string {
+  return numericDiagnostic(value) === undefined ? empty : formatMs(value);
+}
+
 function numericDiagnostic(value: any): number | undefined {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : undefined;
+}
+
+function diagnosticText(value: any): string {
+  if (value === undefined || value === null || value === '') {
+    return '-';
+  }
+  return formatValue(value);
 }
 
 function formatValue(value: any): string {

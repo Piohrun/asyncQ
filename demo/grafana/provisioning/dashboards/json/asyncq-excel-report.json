@@ -46,21 +46,21 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 9,
-        "w": 16,
+        "h": 8,
+        "w": 24,
         "x": 0,
-        "y": 0
+        "y": 7
       },
       "id": 1,
       "options": {
         "cellHeight": "sm",
         "footer": {
-          "countRows": false,
+          "countRows": true,
           "fields": "",
           "reducer": [
             "sum"
           ],
-          "show": false
+          "show": true
         },
         "showHeader": true
       },
@@ -75,15 +75,15 @@
           "executionMode": "sync",
           "includeKeyColumns": false,
           "queryCacheKeyMode": "shared",
-          "queryCacheMode": "enabled",
-          "queryText": "select lastPrice:last price, trades:count i by sym from .demo.asyncq.trade where time within ({TimeWindowStart};{TimeWindowEnd}), sym in `$\" \" vs \"{symbols: }\"",
+          "queryCacheMode": "bypass",
+          "queryText": ".demo.asyncq.reportSummary[{reportRows}]",
           "refId": "A",
           "timeColumn": "time",
-          "timeOut": 10000,
+          "timeOut": 30000,
           "useTimeColumn": false
         }
       ],
-      "title": "Report preview: filtered latest prices",
+      "title": "Report source A: large summary frame",
       "type": "table"
     },
     {
@@ -96,39 +96,78 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 5,
+        "h": 7,
         "w": 8,
-        "x": 16,
+        "x": 0,
         "y": 0
       },
       "id": 2,
       "options": {
-        "buttonText": "Download report",
+        "buttonText": "Download cells",
+        "datasourceUid": "asyncq-demo",
+        "reportId": "demo-panel-frame-report-cells",
+        "showFileNameInput": true,
+        "showReportName": true
+      },
+      "pluginVersion": "13.0.1",
+      "targets": [],
+      "title": "Excel report: cells",
+      "type": "asyncq-excel-report-panel"
+    },
+    {
+      "datasource": {
+        "type": "mixed",
+        "uid": "-- Mixed --"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 0
+      },
+      "id": 4,
+      "options": {
+        "buttonText": "Download rows",
+        "datasourceUid": "asyncq-demo",
+        "reportId": "demo-panel-frame-report-rows",
+        "showFileNameInput": true,
+        "showReportName": true
+      },
+      "pluginVersion": "13.0.1",
+      "targets": [],
+      "title": "Excel report: rows",
+      "type": "asyncq-excel-report-panel"
+    },
+    {
+      "datasource": {
+        "type": "mixed",
+        "uid": "-- Mixed --"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 0
+      },
+      "id": 5,
+      "options": {
+        "buttonText": "Download stream",
         "datasourceUid": "asyncq-demo",
         "reportId": "demo-panel-frame-report",
         "showFileNameInput": true,
         "showReportName": true
       },
       "pluginVersion": "13.0.1",
-      "targets": [
-        {
-          "datasource": {
-            "type": "datasource",
-            "uid": "-- Dashboard --"
-          },
-          "panelId": 1,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "datasource",
-            "uid": "-- Dashboard --"
-          },
-          "panelId": 3,
-          "refId": "B"
-        }
-      ],
-      "title": "Excel report",
+      "targets": [],
+      "title": "Excel report: stream",
       "type": "asyncq-excel-report-panel"
     },
     {
@@ -149,21 +188,21 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 9,
+        "h": 14,
         "w": 24,
         "x": 0,
-        "y": 9
+        "y": 15
       },
       "id": 3,
       "options": {
         "cellHeight": "sm",
         "footer": {
-          "countRows": false,
+          "countRows": true,
           "fields": "",
           "reducer": [
             "sum"
           ],
-          "show": false
+          "show": true
         },
         "showHeader": true
       },
@@ -178,27 +217,66 @@
           "executionMode": "sync",
           "includeKeyColumns": false,
           "queryCacheKeyMode": "shared",
-          "queryCacheMode": "enabled",
-          "queryText": "20#reverse select from .demo.asyncq.trade where time within ({TimeWindowStart};{TimeWindowEnd}), sym in `$\" \" vs \"{symbols: }\"",
+          "queryCacheMode": "bypass",
+          "queryText": ".demo.asyncq.reportRows[{reportRows}]",
           "refId": "B",
           "timeColumn": "time",
-          "timeOut": 10000,
+          "timeOut": 30000,
           "useTimeColumn": false
         }
       ],
-      "title": "Report preview: filtered trades",
+      "title": "Report source B: large trade frame",
       "type": "table"
     }
   ],
-  "refresh": "5s",
+  "refresh": "",
   "schemaVersion": 41,
   "tags": [
     "asyncq",
     "excel",
-    "reporting"
+    "reporting",
+    "performance"
   ],
   "templating": {
     "list": [
+      {
+        "current": {
+          "selected": true,
+          "text": "50000",
+          "value": "50000"
+        },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Report rows",
+        "multi": false,
+        "name": "reportRows",
+        "options": [
+          {
+            "selected": false,
+            "text": "5000",
+            "value": "5000"
+          },
+          {
+            "selected": false,
+            "text": "10000",
+            "value": "10000"
+          },
+          {
+            "selected": false,
+            "text": "25000",
+            "value": "25000"
+          },
+          {
+            "selected": true,
+            "text": "50000",
+            "value": "50000"
+          }
+        ],
+        "query": "5000,10000,25000,50000",
+        "queryValue": "",
+        "skipUrlSync": false,
+        "type": "custom"
+      },
       {
         "allValue": "",
         "current": {
@@ -214,7 +292,7 @@
             "GOOG"
           ]
         },
-        "hide": 0,
+        "hide": 2,
         "includeAll": true,
         "label": "Symbols",
         "multi": true,
@@ -236,7 +314,7 @@
             "value": "GOOG"
           },
           {
-            "selected": false,
+            "selected": true,
             "text": "AMZN",
             "value": "AMZN"
           },
@@ -254,13 +332,13 @@
     ]
   },
   "time": {
-    "from": "now-5m",
+    "from": "now-1h",
     "to": "now"
   },
   "timepicker": {},
   "timezone": "",
   "title": "AsyncQ Excel reporting",
   "uid": "asyncq-excel-report",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }

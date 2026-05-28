@@ -99,7 +99,7 @@ The companion panel plugin `asyncq-masterdata-panel` is useful during Panopticon
 
 - Master data mode runs the shared AsyncQ query and shows a compact data preview plus diagnostics.
 - Freshness mode is a widget-style panel for main dashboard tabs. It reports the newest timestamp in the returned frame and cache status.
-- Diagnostics mode shows selected `frame.meta.custom.asyncqDiagnostics` fields.
+- Diagnostics mode shows selected `frame.meta.custom.asyncqDiagnostics` fields. The layout uses stable metric/profile slots for fresh query and cache-hit states; unavailable q-call/frame-parse timings show as `n/a` or `-`, and cached frames still carry row/field/cell profile diagnostics.
 - Cache-control buttons call AsyncQ datasource resources: `cache/status`, `cache/clear`, `cache/clear-entry`, and `cache/clear-expired`.
 - Cache status is read-only; clear actions require datasource `queryCacheControlEnabled` and a Grafana `Admin` or `Editor` role.
 
@@ -111,14 +111,15 @@ Use the companion panel plugin `asyncq-excel-report-panel` when the migrated das
 
 - Configure report types on the AsyncQ datasource in `jsonData.excelReports`.
 - Use one panel button per report ID; dashboard users cannot edit report mappings from the panel.
-- The panel sends current dashboard time range, variables, and any frames returned to the report panel to `POST report/generate`.
+- The panel sends current dashboard time range, variables, and any frames returned to the report panel to `POST report/generate-link`, then downloads the generated workbook from `GET report/download?token=...`.
 - A binding with `queryText` executes a mapped q query through the same datasource sync path, including Panopticon time macros, dashboard-parameter expansion, sync connection pool, cache, and diagnostics.
 - A binding without `queryText` writes submitted frames matched by `refId` or `id`; use Grafana's `-- Dashboard --` datasource in the report panel targets when the report should use another panel's already-shared result.
 - Each returned frame is written to `sheet`/`cell`; `clearRange` can blank a stale template data area first.
+- Use `writeMode: "stream"` for large dedicated workbook data sheets. It is the fastest XLSX writer path and replaces the target sheet's cell data with streamed rows, so keep formulas/charts on separate template sheets that point at the data range. Leave the default `cells` mode when the report must preserve or interleave with existing cells on the target sheet.
 - `templatePath` points to an `.xlsx` file on the Grafana server and must resolve inside datasource `excelReportTemplateDirs` or `ASYNCQ_EXCEL_TEMPLATE_DIRS`. Leave `templatePath` blank to generate a basic workbook.
 - Use `GET report/validate` to check saved report definitions, template allowlist access, and effective row/file/timeout limits without running q queries.
 - Datasource safeguards default to `excelReportMaxRows=100000`, `excelReportMaxFileBytes=52428800`, and `excelReportTimeoutMs=60000`. Report or binding `maxRows` can lower or raise row caps; report `maxFileBytes` and `generationTimeoutMs` override output size and generation timeout.
-- Downloads should be submitted as a direct form POST to `report/generate`, not converted to a JavaScript blob URL. The backend honors the request `fileName` override or report `outputName` template and returns `Content-Disposition`; blob downloads can lose that filename in Grafana.
+- The current panel should use the `report/generate-link` plus one-time `report/download` token flow, not a JavaScript blob URL. The backend honors the request `fileName` override or report `outputName` template and returns `Content-Disposition`; blob downloads can lose that filename in Grafana.
 - Existing Excel charts and formulas should point at the populated ranges. The plugin does not capture screenshots or export Grafana visual pixels.
 
 Example datasource JSON:
@@ -135,13 +136,13 @@ Example datasource JSON:
         "reportType": "daily-risk"
       },
       "compatibilityMode": "panopticon",
+      "writeMode": "stream",
       "bindings": [
         {
           "id": "positions",
           "queryText": ".risk.positions[{TimeWindowEnd};{book:,}]",
           "sheet": "Positions",
           "cell": "A1",
-          "clearRange": "A1:Z5000",
           "includeHeader": true
         }
       ]
@@ -299,7 +300,7 @@ For frame-backed reports that reference multiple existing panels, set the report
 
 `outputName` is the admin default filename template; users can edit the generated name in the report panel before download. Supported tokens include `{userId}`, `{userUid}`, `{login}`, `{userName}`, `{reportId}`, `{reportName}`, `{reportType}`, `{timestamp}`, `{yyyymmdd}`, `{yyyymmddhhmm}`, and `{yyyymmddhhmmss}`.
 
-The report panel should send a user-edited filename as `fileName` in the `report/generate` payload. Keep the direct form POST download path so the browser uses the datasource backend's `Content-Disposition` filename instead of a random object/blob name.
+The report panel should send a user-edited filename as `fileName` in the `report/generate-link` payload. Keep the one-time backend download-token path so the browser uses the datasource backend's `Content-Disposition` filename instead of a random object/blob name.
 
 When using templates in a work Grafana environment, configure `excelReportTemplateDirs` on the datasource or `ASYNCQ_EXCEL_TEMPLATE_DIRS` in the Grafana process before setting report `templatePath`. Do not point `templatePath` at arbitrary user-controlled paths.
 
@@ -434,10 +435,10 @@ Common fixes:
 | Legacy async times out | Gateway did not complete within the panel timeout, or a blocking status/result call hung | Raise `Timeout (ms)` only after confirming q-side job duration; check q logs for job ID and result availability |
 | Request function fails | Expects different request envelope | Use top-level aliases or `req\`Panopticon`; add a small q shim |
 | Panels still resolve one by one after raising `syncMaxConnections` | Target q gateway/process serializes requests or datasource config was not applied | Inspect diagnostics: high `syncPoolAcquireWaitMs` means plugin pool saturation; low acquire wait with high `syncTransportMs` means the target q side is taking/serializing the work |
-| Dashboard is slower than Panopticon but q looks fast | Cost is likely Grafana fan-out, cache misses, frame conversion, or panel transformations | Inspect `frame.meta.custom.asyncqDiagnostics` or `asyncq-masterdata-panel` diagnostics: `profileCachePathMs`, `profileKdbCallMs`, `profileFrameParseMs`, and `profileFrameCells` separate cache/query time from conversion volume |
+| Dashboard is slower than Panopticon but q looks fast | Cost is likely Grafana fan-out, cache misses, frame conversion, or panel transformations | Inspect `frame.meta.custom.asyncqDiagnostics` or `asyncq-masterdata-panel` diagnostics: `profileCachePathMs`, `profileKdbCallMs`, `profileFrameParseMs`, `profileFrameRows`, `profileFrameFields`, and `profileFrameCells` separate cache/query time from conversion volume |
 | Reopened dashboard still hits kdb+ | Query cache disabled, cache TTL expired, exact relative `now` timestamps changed, query key changed, ref ID differs under strict key mode, or query contains cache bypass marker | Enable `queryCacheEnabled`, increase `queryCacheTTLSeconds`, set `queryCacheTimeBucketSeconds` for relative ranges, use `queryCacheKeyMode=shared` only for ref-ID-independent queries, keep variables stable, and inspect `queryCacheStatus` diagnostics |
 | Reopened dashboard shows old data once, then fresh data on next refresh | Stale-while-revalidate is active | This is expected for standard Grafana query panels. The plugin can refresh its backend cache after returning stale data, but Grafana will not receive the refreshed frame until another panel query unless using a live/stream path. |
-| Excel report downloads with a random filename | The panel converted the response to a blob URL or did not send `fileName` | Use the current `asyncq-excel-report-panel` direct form POST path. Backend logs include `requestedFileName` and `resolvedFileName` for `excel report generated`. |
+| Excel report downloads with a random filename | The panel converted the response to a blob URL, did not send `fileName`, or overwrote the user-edited name with a late default | Use the current `asyncq-excel-report-panel` `report/generate-link` plus `report/download` token path. Backend logs include `requestedFileName` and `resolvedFileName` for `excel report generated`. |
 | Excel report validation fails on `templatePath` | Template path is outside `excelReportTemplateDirs`, env expansion did not produce an absolute path, file is missing, or the file is not `.xlsx` | Configure the template directory allowlist and run `GET report/validate`; the backend resolves symlinks before allowing templates. |
 
 For production debugging, prefer adding a q adapter that logs job ID, ref ID, time range, query hash, and result type on the q side without logging sensitive query text.

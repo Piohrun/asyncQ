@@ -13,6 +13,11 @@ Grafana Live demos.
 \l q/asyncq_grafana.q
 
 .demo.asyncq.SYMS:`AAPL`MSFT`GOOG`AMZN`KX;
+.demo.asyncq.REPORTSYMS:`$("SYM",/:string 100000+til 1000);
+.demo.asyncq.REPORTBOOKS:`EQ`FUT`OPT`FX;
+.demo.asyncq.REPORTVENUES:`XNYS`XNAS`BATS`ARCX;
+.demo.asyncq.REPORTSIDES:`B`S;
+.demo.asyncq.REPORTBASE:.z.p-0D01:00:00.000000000;
 .demo.asyncq.MAXROWS:5000;
 .demo.asyncq.JOBDELAY:0D00:00:03.000000000;
 .demo.asyncq.JOBS:([] jobId:(); status:(); progress:`float$(); query:(); request:(); result:(); error:(); message:(); errorClass:(); stackTrace:(); submitted:`timestamp$(); due:`timestamp$(); finished:`timestamp$(); worker:(); resultType:());
@@ -55,6 +60,24 @@ Grafana Live demos.
   };
 
 .demo.asyncq.trade:.demo.asyncq.seed 300;
+
+.demo.asyncq.buildReportRows:{[n]
+    idx:til n;
+    ([] time:.demo.asyncq.REPORTBASE+1000000*idx; sym:.demo.asyncq.REPORTSYMS idx mod count .demo.asyncq.REPORTSYMS; book:.demo.asyncq.REPORTBOOKS idx mod count .demo.asyncq.REPORTBOOKS; price:50+0.01*idx mod 50000; size:100+10*idx mod 1000; volume:100000+10*idx; venue:.demo.asyncq.REPORTVENUES idx mod count .demo.asyncq.REPORTVENUES; side:.demo.asyncq.REPORTSIDES idx mod count .demo.asyncq.REPORTSIDES)
+  };
+
+.demo.asyncq.REPORTDATA:.demo.asyncq.buildReportRows 100000;
+
+.demo.asyncq.reportRows:{[n]
+    n:1000|`int$n;
+    n:100000&n;
+    n#.demo.asyncq.REPORTDATA
+  };
+
+.demo.asyncq.reportSummary:{[n]
+    rows:.demo.asyncq.reportRows n;
+    select lastTime:last time, lastPrice:last price, trades:count i, turnover:sum price*size, avgSize:avg size by sym from rows
+  };
 
 .demo.asyncq.latest:{[n]
     n#reverse .demo.asyncq.trade
@@ -254,3 +277,4 @@ Grafana Live demos.
 -1 "Try Panopticon request function: {[req] .demo.asyncq.panopticonRequest req}";
 -1 "Try compatibility matrix direct fixture: .demo.asyncq.compatMatrixDirect[]";
 -1 "Try legacy async adapter functions: .demo.legacy.submit/status/result/cancel";
+-1 "Try large report rows: .demo.asyncq.reportRows 10000";

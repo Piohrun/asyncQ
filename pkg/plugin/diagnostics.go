@@ -158,6 +158,24 @@ func appendDiagnosticFrameProfile(fields []interface{}, frames []*data.Frame) []
 	)
 }
 
+func ensureDiagnosticFrameProfile(fields []interface{}, frames []*data.Frame) []interface{} {
+	if diagnosticFieldsContain(fields, "profileFrameRows") &&
+		diagnosticFieldsContain(fields, "profileFrameFields") &&
+		diagnosticFieldsContain(fields, "profileFrameCells") {
+		return fields
+	}
+	return appendDiagnosticFrameProfile(fields, frames)
+}
+
+func diagnosticFieldsContain(fields []interface{}, key string) bool {
+	for i := 0; i < len(fields)-1; i += 2 {
+		if fmt.Sprint(fields[i]) == key {
+			return true
+		}
+	}
+	return false
+}
+
 func attachAsyncQDiagnostics(frames []*data.Frame, fields []interface{}) {
 	if len(frames) == 0 || len(fields) == 0 {
 		return

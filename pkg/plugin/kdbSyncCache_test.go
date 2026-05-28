@@ -480,6 +480,34 @@ func TestQueryDataAttachesDiagnosticsToFrames(t *testing.T) {
 	}
 }
 
+func TestQueryDataCacheHitAttachesFrameProfileDiagnostics(t *testing.T) {
+	ds := cachedTestDatasource()
+	var calls int32
+	ds.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
+		atomic.AddInt32(&calls, 1)
+		return kdb.LongV([]int64{1, 2, 3}), nil
+	}
+
+	req := cacheTestRequest(t, "A", "1 2 3", time.Time{}, time.Time{})
+	if _, err := ds.QueryData(context.Background(), req); err != nil {
+		t.Fatalf("first QueryData returned error: %v", err)
+	}
+	second, err := ds.QueryData(context.Background(), req)
+	if err != nil {
+		t.Fatalf("second QueryData returned error: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected second query to hit cache, got %d kdb calls", calls)
+	}
+	diagnostics := asyncQDiagnosticsFromFrame(t, second.Responses["A"].Frames[0])
+	if diagnostics["queryCacheStatus"] != "hit" {
+		t.Fatalf("expected hit cache diagnostic, got %#v", diagnostics["queryCacheStatus"])
+	}
+	if diagnostics["profileFrameRows"] != 3 || diagnostics["profileFrameFields"] != 1 || diagnostics["profileFrameCells"] != 3 {
+		t.Fatalf("expected cached frame profile diagnostics, got rows=%#v fields=%#v cells=%#v", diagnostics["profileFrameRows"], diagnostics["profileFrameFields"], diagnostics["profileFrameCells"])
+	}
+}
+
 func TestCacheResourceClearEntryEvictsMemoryAndDisk(t *testing.T) {
 	ds := diskCachedTestDatasource(t.TempDir())
 	var calls int32

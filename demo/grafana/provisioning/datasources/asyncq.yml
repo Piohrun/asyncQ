@@ -51,6 +51,7 @@ datasources:
               },
               "templatePath": "$ASYNCQ_DEMO_TEMPLATE_DIR/asyncq-demo-report-template.xlsx",
               "compatibilityMode": "panopticon",
+              "writeMode": "stream",
               "bindings": [
                 {
                   "id": "last-prices",
@@ -58,7 +59,6 @@ datasources:
                   "queryText": "select lastPrice:last price, trades:count i by sym from .demo.asyncq.trade where time within ({TimeWindowStart};{TimeWindowEnd}), sym in `$\" \" vs \"{symbols: }\"",
                   "sheet": "Summary",
                   "cell": "A1",
-                  "clearRange": "A1:Z2000",
                   "includeHeader": true
                 },
                 {
@@ -67,35 +67,108 @@ datasources:
                   "queryText": "50#reverse select from .demo.asyncq.trade where time within ({TimeWindowStart};{TimeWindowEnd}), sym in `$\" \" vs \"{symbols: }\"",
                   "sheet": "Trades",
                   "cell": "A1",
-                  "clearRange": "A1:Z2000",
+                  "includeHeader": true
+                }
+              ]
+            },
+            {
+              "id": "demo-panel-frame-report-cells",
+              "name": "Demo panel data report - cells",
+              "description": "Writes large submitted frames through the legacy per-cell Excel writer.",
+              "outputName": "{userId}_cells_{reportType}_yyyymmddhhmmss.xlsx",
+              "metadata": {
+                "reportType": "demo-panel-data-report-cells"
+              },
+              "templatePath": "$ASYNCQ_DEMO_TEMPLATE_DIR/asyncq-demo-report-template.xlsx",
+              "compatibilityMode": "panopticon",
+              "queryCacheMode": "bypass",
+              "timeOut": 30000,
+              "maxDataPoints": 100000,
+              "maxRows": 100000,
+              "writeMode": "cells",
+              "bindings": [
+                {
+                  "id": "large-summary",
+                  "refId": "A",
+                  "queryText": ".demo.asyncq.reportSummary[{reportRows}]",
+                  "sheet": "Summary",
+                  "cell": "A1",
+                  "includeHeader": true
+                },
+                {
+                  "id": "large-trades",
+                  "refId": "B",
+                  "queryText": ".demo.asyncq.reportRows[{reportRows}]",
+                  "sheet": "Trades",
+                  "cell": "A1",
+                  "includeHeader": true
+                }
+              ]
+            },
+            {
+              "id": "demo-panel-frame-report-rows",
+              "name": "Demo panel data report - rows",
+              "description": "Writes large submitted frames through excelize normal row helper mode.",
+              "outputName": "{userId}_rows_{reportType}_yyyymmddhhmmss.xlsx",
+              "metadata": {
+                "reportType": "demo-panel-data-report-rows"
+              },
+              "templatePath": "$ASYNCQ_DEMO_TEMPLATE_DIR/asyncq-demo-report-template.xlsx",
+              "compatibilityMode": "panopticon",
+              "queryCacheMode": "bypass",
+              "timeOut": 30000,
+              "maxDataPoints": 100000,
+              "maxRows": 100000,
+              "writeMode": "rows",
+              "bindings": [
+                {
+                  "id": "large-summary",
+                  "refId": "A",
+                  "queryText": ".demo.asyncq.reportSummary[{reportRows}]",
+                  "sheet": "Summary",
+                  "cell": "A1",
+                  "includeHeader": true
+                },
+                {
+                  "id": "large-trades",
+                  "refId": "B",
+                  "queryText": ".demo.asyncq.reportRows[{reportRows}]",
+                  "sheet": "Trades",
+                  "cell": "A1",
                   "includeHeader": true
                 }
               ]
             },
             {
               "id": "demo-panel-frame-report",
-              "name": "Demo panel data report",
-              "description": "Writes frames supplied to the report panel, usually through Grafana's Dashboard datasource.",
-              "outputName": "{userId}_{reportType}_yyyymmddhhmm.xlsx",
+              "name": "Demo panel data report - stream",
+              "description": "Writes large submitted frames through excelize streaming writer mode.",
+              "outputName": "{userId}_stream_{reportType}_yyyymmddhhmmss.xlsx",
               "metadata": {
-                "reportType": "demo-panel-data-report"
+                "reportType": "demo-panel-data-report-stream"
               },
               "templatePath": "$ASYNCQ_DEMO_TEMPLATE_DIR/asyncq-demo-report-template.xlsx",
+              "compatibilityMode": "panopticon",
+              "queryCacheMode": "bypass",
+              "timeOut": 30000,
+              "maxDataPoints": 100000,
+              "maxRows": 100000,
+              "writeMode": "stream",
               "bindings": [
                 {
-                  "id": "prices-from-panel",
+                  "id": "large-summary",
                   "refId": "A",
+                  "queryText": ".demo.asyncq.reportSummary[{reportRows}]",
                   "sheet": "Summary",
                   "cell": "A1",
-                  "clearRange": "A1:Z2000",
                   "includeHeader": true
                 },
                 {
-                  "id": "trades-from-panel",
+                  "id": "large-trades",
                   "refId": "B",
+                  "queryText": ".demo.asyncq.reportRows[{reportRows}]",
                   "sheet": "Trades",
                   "cell": "A1",
-                  "clearRange": "A1:Z2000",
                   "includeHeader": true
                 }
               ]
