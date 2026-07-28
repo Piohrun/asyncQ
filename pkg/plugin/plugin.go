@@ -1,12 +1,15 @@
 package plugin
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -15,7 +18,7 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/backend/instancemgmt"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
 	"github.com/grafana/grafana-plugin-sdk-go/data"
-	kdb "github.com/sv/kdbgo"
+	kdb "github.com/greg/asyncq/third_party/kdbgo"
 )
 
 const ADAPTOR_VERSION = float64(2.0)
@@ -65,6 +68,11 @@ const (
 	defaultLegacyAsyncMessage   = "message"
 	defaultLegacyAsyncError     = "error"
 	defaultLegacyAsyncPayload   = "result"
+	defaultConnectionTimeoutMs  = 1000
+	maxConnectionTimeoutMs      = 300000
+	maxTLSCertificateBytes      = 1 << 20
+	maxTLSPrivateKeyBytes       = 1 << 20
+	maxTLSCABundleBytes         = 4 << 20
 	asyncQHelperUnavailable     = "async/stream queries require q/asyncq_grafana.q to be loaded in the target kdb+ process or gateway"
 )
 
@@ -223,6 +231,28 @@ func NewKdbDatasource(_ context.Context, settings backend.DataSourceInstanceSett
 	client.instanceID = settings.ID
 	client.instanceUID = settings.UID
 	client.instanceName = settings.Name
+	normalizedHost, err := kdb.ValidateEndpoint(client.Host, client.Port)
+	if err != nil {
+		return nil, fmt.Errorf("invalid kdb+ endpoint: %w", err)
+	}
+	client.Host = normalizedHost
+
+	timeoutText := strings.TrimSpace(client.Timeout)
+	if timeoutText == "" {
+		client.DialTimeout = time.Duration(defaultConnectionTimeoutMs) * time.Millisecond
+	} else {
+		if timeoutText != client.Timeout {
+			return nil, fmt.Errorf("invalid connection timeout %q: surrounding whitespace is not allowed", client.Timeout)
+		}
+		timeoutMs, err := strconv.ParseUint(timeoutText, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid connection timeout %q: enter an integer number of milliseconds", client.Timeout)
+		}
+		if timeoutMs < 1 || timeoutMs > maxConnectionTimeoutMs {
+			return nil, fmt.Errorf("connection timeout must be between 1 and %d milliseconds; got %d", maxConnectionTimeoutMs, timeoutMs)
+		}
+		client.DialTimeout = time.Duration(timeoutMs) * time.Millisecond
+	}
 
 	username, ok := settings.DecryptedSecureJSONData["username"]
 	if ok {
@@ -239,62 +269,114 @@ func NewKdbDatasource(_ context.Context, settings backend.DataSourceInstanceSett
 		client.pass = ""
 		log.DefaultLogger.Info("No password provided; using default")
 	}
+	if strings.Contains(client.user, ":") {
+		return nil, fmt.Errorf("kdb+ username must not contain ':'")
+	}
+	if err := kdb.ValidateAuth(client.user + ":" + client.pass); err != nil {
+		return nil, fmt.Errorf("invalid kdb+ credentials: %w", err)
+	}
 
 	if client.WithTls {
-		tlsServerConfig := new(tls.Config)
 		log.DefaultLogger.Info("TLS enabled for new kdb datasource, creating tls config...")
-		tlsCertificate, certOk := settings.DecryptedSecureJSONData["tlsCertificate"]
-		if !certOk {
-			log.DefaultLogger.Info("Error decrypting TLS Cert or no TLS Cert provided")
+		tlsCertificate := settings.DecryptedSecureJSONData["tlsCertificate"]
+		if len(tlsCertificate) > maxTLSCertificateBytes {
+			return nil, fmt.Errorf("TLS client certificate exceeds the %d-byte limit", maxTLSCertificateBytes)
+		}
+		if strings.TrimSpace(tlsCertificate) == "" {
+			return nil, fmt.Errorf("TLS client certificate is required when Client Auth is enabled")
 		}
 		client.TlsCertificate = tlsCertificate
 
-		tlsKey, keyOk := settings.DecryptedSecureJSONData["tlsKey"]
-		if !keyOk {
-			log.DefaultLogger.Error("Error decrypting TLS Key or no TLS Key provided")
+		tlsKey := settings.DecryptedSecureJSONData["tlsKey"]
+		if len(tlsKey) > maxTLSPrivateKeyBytes {
+			return nil, fmt.Errorf("TLS client key exceeds the %d-byte limit", maxTLSPrivateKeyBytes)
+		}
+		if strings.TrimSpace(tlsKey) == "" {
+			return nil, fmt.Errorf("TLS client key is required when Client Auth is enabled")
 		}
 		client.TlsKey = tlsKey
 
+		cert, err := tls.X509KeyPair([]byte(client.TlsCertificate), []byte(client.TlsKey))
+		if err != nil {
+			return nil, fmt.Errorf("invalid TLS client certificate/key pair: %w", err)
+		}
+		tlsServerConfig := &tls.Config{
+			Certificates:       []tls.Certificate{cert},
+			InsecureSkipVerify: client.SkipVertifyTLS,
+			MinVersion:         tls.VersionTLS12,
+		}
 		if client.SkipVertifyTLS {
-			log.DefaultLogger.Info("New kdb+ datasource config setup to skip TLS verification")
+			log.DefaultLogger.Warn("TLS server certificate and hostname verification are disabled for this kdb+ datasource")
 		}
 
 		if client.WithCACert {
-			caCert, keyOk := settings.DecryptedSecureJSONData["caCert"]
-			if !keyOk {
-				log.DefaultLogger.Error("Error decrypting CA Cert or no CA Cert provided")
+			caCert := settings.DecryptedSecureJSONData["caCert"]
+			if len(caCert) > maxTLSCABundleBytes {
+				return nil, fmt.Errorf("custom CA certificate exceeds the %d-byte limit", maxTLSCABundleBytes)
+			}
+			if strings.TrimSpace(caCert) == "" {
+				return nil, fmt.Errorf("custom CA certificate is required when Custom CA is enabled")
 			}
 			client.CaCert = caCert
-			log.DefaultLogger.Info("Setting custom CA certificate...")
-			tlsCaCert := x509.NewCertPool()
-			r := tlsCaCert.AppendCertsFromPEM([]byte(client.CaCert))
-			if !r {
-				log.DefaultLogger.Info("Error parsing custom CA certificate")
+			roots, poolErr := x509.SystemCertPool()
+			if poolErr != nil {
+				log.DefaultLogger.Warn("Unable to load system TLS roots; using the configured custom CA only", "error", poolErr)
 			}
-			tlsServerConfig.RootCAs = tlsCaCert
+			if roots == nil {
+				roots = x509.NewCertPool()
+			}
+			if err := appendValidatedCACertificates(roots, []byte(client.CaCert)); err != nil {
+				return nil, fmt.Errorf("invalid custom CA certificate: %w", err)
+			}
+			tlsServerConfig.RootCAs = roots
 		}
-
-		cert, err := tls.X509KeyPair([]byte(client.TlsCertificate), []byte(client.TlsKey))
-		if err != nil {
-			log.DefaultLogger.Error("Cert convert error", "error", err)
-		}
-
-		tlsServerConfig.Certificates = []tls.Certificate{cert}
-		tlsServerConfig.InsecureSkipVerify = client.SkipVertifyTLS
 		client.TlsServerConfig = tlsServerConfig
 	}
 
-	timeOutDuration, err := time.ParseDuration(client.Timeout + "ms")
-	if nil != err {
-		log.DefaultLogger.Info("Using default timeout")
-		timeOutDuration = time.Second
-	}
-	client.DialTimeout = timeOutDuration
 	client.setupKdbConnectionHandlers()
 	client.normalizeDatasourceDefaults()
 
 	log.DefaultLogger.Info("KDB Datasource created successfully", "syncMaxConnections", client.SyncMaxConnections, "asyncMaxJobs", client.AsyncMaxJobs)
 	return &client, nil
+}
+
+func appendValidatedCACertificates(pool *x509.CertPool, bundle []byte) error {
+	if pool == nil {
+		return fmt.Errorf("destination certificate pool is nil")
+	}
+	remaining := bytes.TrimSpace(bundle)
+	added := 0
+	for len(remaining) > 0 {
+		if !bytes.HasPrefix(remaining, []byte("-----BEGIN CERTIFICATE-----")) {
+			return fmt.Errorf("unexpected data outside CERTIFICATE PEM blocks")
+		}
+		block, rest := pem.Decode(remaining)
+		if block == nil {
+			return fmt.Errorf("PEM data contains no decodable CERTIFICATE block")
+		}
+		if block.Type != "CERTIFICATE" {
+			return fmt.Errorf("unexpected PEM block type %q", block.Type)
+		}
+		certificates, err := x509.ParseCertificates(block.Bytes)
+		if err != nil {
+			return fmt.Errorf("parse CERTIFICATE block: %w", err)
+		}
+		for _, certificate := range certificates {
+			if !certificate.IsCA || !certificate.BasicConstraintsValid {
+				return fmt.Errorf("certificate %q is not a CA certificate", certificate.Subject.String())
+			}
+			if certificate.KeyUsage != 0 && certificate.KeyUsage&x509.KeyUsageCertSign == 0 {
+				return fmt.Errorf("CA certificate %q is not permitted to sign certificates", certificate.Subject.String())
+			}
+			pool.AddCert(certificate)
+			added++
+		}
+		remaining = bytes.TrimSpace(rest)
+	}
+	if added == 0 {
+		return fmt.Errorf("PEM data contains no certificates")
+	}
+	return nil
 }
 
 func (d *KdbDatasource) normalizeDatasourceDefaults() {
@@ -380,15 +462,18 @@ func safeCloseStructChan(ch chan struct{}) {
 	}
 }
 
-func (d *KdbDatasource) newConnection() (*kdb.KDBConn, error) {
+func (d *KdbDatasource) newConnection(ctx context.Context) (*kdb.KDBConn, error) {
 	log.DefaultLogger.Info("Opening connection to kdb+", "host", d.Host, "port", d.Port)
 	auth := fmt.Sprintf("%s:%s", d.user, d.pass)
+	ctx = normalizeSyncQueryContext(ctx)
+	dialCtx, cancel := context.WithTimeout(ctx, d.DialTimeout)
+	defer cancel()
 	var conn *kdb.KDBConn
 	var err error
 	if d.WithTls {
-		conn, err = kdb.DialTLS(d.Host, d.Port, auth, d.TlsServerConfig)
+		conn, err = kdb.DialTLSContext(dialCtx, d.Host, d.Port, auth, d.TlsServerConfig)
 	} else {
-		conn, err = kdb.DialKDBTimeout(d.Host, d.Port, auth, d.DialTimeout)
+		conn, err = kdb.DialKDBContext(dialCtx, d.Host, d.Port, auth)
 	}
 	if err != nil {
 		log.DefaultLogger.Error("Error establishing kdb connection", "error", err)

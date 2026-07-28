@@ -12,7 +12,7 @@ import (
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/data"
-	kdb "github.com/sv/kdbgo"
+	kdb "github.com/greg/asyncq/third_party/kdbgo"
 )
 
 func TestQueryDataCachesSuccessfulSyncResults(t *testing.T) {

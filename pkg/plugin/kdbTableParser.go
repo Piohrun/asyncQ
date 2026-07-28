@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/data"
+	kdb "github.com/greg/asyncq/third_party/kdbgo"
 	uuid "github.com/nu7hatch/gouuid"
-	kdb "github.com/sv/kdbgo"
 )
 
 const (

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	kdb "github.com/sv/kdbgo"
+	kdb "github.com/greg/asyncq/third_party/kdbgo"
 )
 
 func TestParseAsyncResourceTime(t *testing.T) {

@@ -11,7 +11,7 @@ import (
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/data"
-	kdb "github.com/sv/kdbgo"
+	kdb "github.com/greg/asyncq/third_party/kdbgo"
 )
 
 type asyncRunAndWaitRequest struct {
@@ -312,7 +312,10 @@ func (d *KdbDatasource) runPluginManagedAsyncQueryWait(ctx context.Context, pCtx
 	defer d.releaseAsyncSlot()
 
 	resp.addStatus(start, "queued", asyncQStatus{ID: requestID, Status: "queued"}, false)
-	conn, err := d.newConnection()
+	timeout := asyncTimeoutDuration(model)
+	jobCtx, cancelJob := context.WithTimeout(ctx, timeout)
+	defer cancelJob()
+	conn, err := d.newConnection(jobCtx)
 	if err != nil {
 		d.logDiagnosticError("plugin async run-and-wait connection failed", appendDiagnosticError(fields, err)...)
 		return resp.fail("connection-failed", "error", requestID, err.Error(), 0, true, start)
@@ -323,32 +326,39 @@ func (d *KdbDatasource) runPluginManagedAsyncQueryWait(ctx context.Context, pCtx
 	resultCh := make(chan *kdb.K, 1)
 	errCh := make(chan error, 1)
 	go func() {
-		result, err := callKdbFunction(conn, queryExecutionFunction(model), buildDirectQueryRequest(pCtx, query, model))
+		result, err := callKdbFunctionWithContext(jobCtx, conn, queryExecutionFunction(model), buildDirectQueryRequest(pCtx, query, model))
 		if err != nil {
 			errCh <- err
 			return
 		}
 		resultCh <- result
 	}()
-
-	timeout := asyncTimeoutDuration(model)
-	timeoutTimer := time.NewTimer(timeout)
-	defer timeoutTimer.Stop()
+	finishContext := func(operationErrors ...error) asyncRunAndWaitResponse {
+		outcome := classifyAsyncContext(ctx, jobCtx, model.ExecutionMode, timeout, operationErrors...)
+		_ = conn.Close()
+		if outcome.cancelled {
+			d.logDiagnostics("plugin async run-and-wait cancelled", append(fields, "durationMs", time.Since(start).Milliseconds(), "error", outcome.err.Error())...)
+			return resp.fail("cancelled", "cancelled", requestID, outcome.err.Error(), 1, true, start)
+		}
+		d.logDiagnosticError("plugin async run-and-wait timed out", appendDiagnosticError(append(fields, "durationMs", time.Since(start).Milliseconds(), "timeoutMs", timeout.Milliseconds()), outcome.err)...)
+		return resp.fail("timeout", "error", requestID, outcome.err.Error(), 1, true, start)
+	}
 
 	select {
 	case <-ctx.Done():
-		_ = conn.Close()
-		d.logDiagnostics("plugin async run-and-wait cancelled", append(fields, "durationMs", time.Since(start).Milliseconds(), "error", ctx.Err().Error())...)
-		return resp.fail("cancelled", "cancelled", requestID, ctx.Err().Error(), 1, true, start)
-	case <-timeoutTimer.C:
-		_ = conn.Close()
-		err := fmt.Errorf("%s query timed out after %v", model.ExecutionMode, timeout)
-		d.logDiagnosticError("plugin async run-and-wait timed out", appendDiagnosticError(append(fields, "durationMs", time.Since(start).Milliseconds(), "timeoutMs", timeout.Milliseconds()), err)...)
-		return resp.fail("timeout", "error", requestID, err.Error(), 1, true, start)
+		return finishContext()
+	case <-jobCtx.Done():
+		return finishContext()
 	case err := <-errCh:
+		if _, ready := readyAsyncContext(ctx, jobCtx, model.ExecutionMode, timeout, err); ready {
+			return finishContext(err)
+		}
 		d.logDiagnosticError("plugin async run-and-wait query failed", appendDiagnosticError(fields, err)...)
 		return resp.fail("query-failed", "error", requestID, err.Error(), 1, true, start)
 	case result := <-resultCh:
+		if _, ready := readyAsyncContext(ctx, jobCtx, model.ExecutionMode, timeout); ready {
+			return finishContext()
+		}
 		resultFields := appendDiagnosticKdbObject(append([]interface{}{}, fields...), "kdbResponse", result)
 		frames, err := parseKdbResponseToFrames(result, model, liveReq.RefID)
 		if err != nil {
@@ -371,22 +381,21 @@ func (d *KdbDatasource) runHelperAsyncQueryWait(ctx context.Context, pCtx backen
 	resp := newAsyncRunAndWaitResponse(liveReq, model, requestID)
 	fields := d.diagnosticQueryFields(pCtx, query, model, requestID)
 
-	conn, err := d.newConnection()
+	timeout := asyncTimeoutDuration(model)
+	jobCtx, cancelJob := context.WithTimeout(ctx, timeout)
+	defer cancelJob()
+	conn, err := d.newConnection(jobCtx)
 	if err != nil {
 		d.logDiagnosticError("helper async run-and-wait connection failed", appendDiagnosticError(fields, err)...)
 		return resp.fail("connection-failed", "error", requestID, err.Error(), 0, true, start)
 	}
 	defer conn.Close()
 
-	timeout := asyncTimeoutDuration(model)
-	jobCtx, cancelJob := context.WithTimeout(ctx, timeout)
-	defer cancelJob()
-
 	helperReq := buildHelperRequest(pCtx, query, model, requestID, "")
 	submitRes, err := callKdbFunctionWithContext(jobCtx, conn, asyncSubmitFn, helperReq)
 	if err != nil {
-		if jobCtx.Err() != nil {
-			err = asyncContextError(jobCtx, "helper async", timeout)
+		if outcome, ready := readyAsyncContext(ctx, jobCtx, "helper async", timeout, err); ready {
+			err = outcome.err
 		}
 		err = fmt.Errorf("%s: %w", asyncQHelperUnavailable, err)
 		d.logDiagnosticError("helper async run-and-wait submit failed", appendDiagnosticError(fields, err)...)
@@ -405,16 +414,16 @@ func (d *KdbDatasource) runHelperAsyncQueryWait(ctx context.Context, pCtx backen
 	ticker := time.NewTicker(time.Duration(model.PollIntervalMs) * time.Millisecond)
 	defer ticker.Stop()
 	lastState := strings.ToLower(statusWithDefault(status.Status, "queued"))
-	finishContext := func() asyncRunAndWaitResponse {
-		if ctx.Err() != nil {
+	finishContext := func(operationErrors ...error) asyncRunAndWaitResponse {
+		outcome := classifyAsyncContext(ctx, jobCtx, "helper async", timeout, operationErrors...)
+		if outcome.cancelled {
 			d.bestEffortAsyncCancel(asyncCancelFn, jobID)
-			d.logDiagnostics("helper async run-and-wait cancelled", append(jobFields, "durationMs", time.Since(start).Milliseconds(), "error", ctx.Err().Error())...)
-			return resp.fail("cancelled", "cancelled", jobID, ctx.Err().Error(), 1, true, start)
+			d.logDiagnostics("helper async run-and-wait cancelled", append(jobFields, "durationMs", time.Since(start).Milliseconds(), "error", outcome.err.Error())...)
+			return resp.fail("cancelled", "cancelled", jobID, outcome.err.Error(), 1, true, start)
 		}
-		err := asyncContextError(jobCtx, "helper async", timeout)
 		d.bestEffortAsyncCancel(asyncCancelFn, jobID)
-		d.logDiagnosticError("helper async run-and-wait timed out", appendDiagnosticError(append(jobFields, "durationMs", time.Since(start).Milliseconds(), "timeoutMs", timeout.Milliseconds()), err)...)
-		return resp.fail("timeout", "error", jobID, err.Error(), 1, true, start)
+		d.logDiagnosticError("helper async run-and-wait timed out", appendDiagnosticError(append(jobFields, "durationMs", time.Since(start).Milliseconds(), "timeoutMs", timeout.Milliseconds()), outcome.err)...)
+		return resp.fail("timeout", "error", jobID, outcome.err.Error(), 1, true, start)
 	}
 
 	for {
@@ -426,8 +435,8 @@ func (d *KdbDatasource) runHelperAsyncQueryWait(ctx context.Context, pCtx backen
 		case <-ticker.C:
 			statusRes, err := callKdbFunctionWithContext(jobCtx, conn, asyncStatusFn, kdb.Atom(kdb.KC, jobID))
 			if err != nil {
-				if jobCtx.Err() != nil {
-					return finishContext()
+				if _, ready := readyAsyncContext(ctx, jobCtx, "helper async", timeout, err); ready {
+					return finishContext(err)
 				}
 				d.logDiagnosticError("helper async run-and-wait status failed", appendDiagnosticError(jobFields, err)...)
 				return resp.fail("status-failed", "error", jobID, err.Error(), 0, true, start)
@@ -451,8 +460,8 @@ func (d *KdbDatasource) runHelperAsyncQueryWait(ctx context.Context, pCtx backen
 			case "done", "complete", "completed":
 				result, err := callKdbFunctionWithContext(jobCtx, conn, asyncResultFn, kdb.Atom(kdb.KC, jobID))
 				if err != nil {
-					if jobCtx.Err() != nil {
-						return finishContext()
+					if _, ready := readyAsyncContext(ctx, jobCtx, "helper async", timeout, err); ready {
+						return finishContext(err)
 					}
 					d.logDiagnosticError("helper async run-and-wait result failed", appendDiagnosticError(jobFields, err)...)
 					return resp.fail("result-failed", "error", jobID, err.Error(), status.Progress, true, start)
@@ -504,16 +513,15 @@ func (d *KdbDatasource) runLegacyAsyncQueryWait(ctx context.Context, pCtx backen
 	}
 	defer d.releaseAsyncSlot()
 
-	conn, err := d.newConnection()
+	timeout := asyncTimeoutDuration(model)
+	jobCtx, cancelJob := context.WithTimeout(ctx, timeout)
+	defer cancelJob()
+	conn, err := d.newConnection(jobCtx)
 	if err != nil {
 		d.logDiagnosticError("legacy async run-and-wait connection failed", appendDiagnosticError(fields, err)...)
 		return resp.fail("connection-failed", "error", requestID, err.Error(), 0, true, start)
 	}
 	defer conn.Close()
-
-	timeout := asyncTimeoutDuration(model)
-	jobCtx, cancelJob := context.WithTimeout(ctx, timeout)
-	defer cancelJob()
 
 	submitArg, err := adapter.buildSubmitArg(pCtx, query, model, requestID)
 	if err != nil {
@@ -522,8 +530,8 @@ func (d *KdbDatasource) runLegacyAsyncQueryWait(ctx context.Context, pCtx backen
 	}
 	submitRes, err := callKdbFunctionWithContext(jobCtx, conn, legacyAsyncCallExpression(adapter.submit, 1), submitArg)
 	if err != nil {
-		if jobCtx.Err() != nil {
-			err = asyncContextError(jobCtx, "legacy async", timeout)
+		if outcome, ready := readyAsyncContext(ctx, jobCtx, "legacy async", timeout, err); ready {
+			err = outcome.err
 		}
 		d.logDiagnosticError("legacy async run-and-wait submit failed", appendDiagnosticError(fields, err)...)
 		return resp.fail("submit-failed", "error", requestID, err.Error(), 0, true, start)
@@ -550,16 +558,16 @@ func (d *KdbDatasource) runLegacyAsyncQueryWait(ctx context.Context, pCtx backen
 	if adapter.cancel != "" {
 		cancelFn = legacyAsyncCallExpression(adapter.cancel, 1)
 	}
-	finishContext := func() asyncRunAndWaitResponse {
-		if ctx.Err() != nil {
+	finishContext := func(operationErrors ...error) asyncRunAndWaitResponse {
+		outcome := classifyAsyncContext(ctx, jobCtx, "legacy async", timeout, operationErrors...)
+		if outcome.cancelled {
 			d.bestEffortAsyncCancel(cancelFn, jobID)
-			d.logDiagnostics("legacy async run-and-wait cancelled", append(jobFields, "durationMs", time.Since(start).Milliseconds(), "error", ctx.Err().Error())...)
-			return resp.fail("cancelled", "cancelled", jobID, ctx.Err().Error(), 1, true, start)
+			d.logDiagnostics("legacy async run-and-wait cancelled", append(jobFields, "durationMs", time.Since(start).Milliseconds(), "error", outcome.err.Error())...)
+			return resp.fail("cancelled", "cancelled", jobID, outcome.err.Error(), 1, true, start)
 		}
-		err := asyncContextError(jobCtx, "legacy async", timeout)
 		d.bestEffortAsyncCancel(cancelFn, jobID)
-		d.logDiagnosticError("legacy async run-and-wait timed out", appendDiagnosticError(append(jobFields, "durationMs", time.Since(start).Milliseconds(), "timeoutMs", timeout.Milliseconds()), err)...)
-		return resp.fail("timeout", "error", jobID, err.Error(), 1, true, start)
+		d.logDiagnosticError("legacy async run-and-wait timed out", appendDiagnosticError(append(jobFields, "durationMs", time.Since(start).Milliseconds(), "timeoutMs", timeout.Milliseconds()), outcome.err)...)
+		return resp.fail("timeout", "error", jobID, outcome.err.Error(), 1, true, start)
 	}
 
 	for {
@@ -571,8 +579,8 @@ func (d *KdbDatasource) runLegacyAsyncQueryWait(ctx context.Context, pCtx backen
 		case <-ticker.C:
 			statusRes, err := callKdbFunctionWithContext(jobCtx, conn, legacyAsyncCallExpression(adapter.status, 1), kdb.Atom(kdb.KC, jobID))
 			if err != nil {
-				if jobCtx.Err() != nil {
-					return finishContext()
+				if _, ready := readyAsyncContext(ctx, jobCtx, "legacy async", timeout, err); ready {
+					return finishContext(err)
 				}
 				d.logDiagnosticError("legacy async run-and-wait status failed", appendDiagnosticError(jobFields, err)...)
 				return resp.fail("status-failed", "error", jobID, err.Error(), 0, true, start)
@@ -611,8 +619,8 @@ func (d *KdbDatasource) runLegacyAsyncQueryWait(ctx context.Context, pCtx backen
 					}
 					resultRes, err := callKdbFunctionWithContext(jobCtx, conn, legacyAsyncCallExpression(adapter.result, 1), kdb.Atom(kdb.KC, jobID))
 					if err != nil {
-						if jobCtx.Err() != nil {
-							return finishContext()
+						if _, ready := readyAsyncContext(ctx, jobCtx, "legacy async", timeout, err); ready {
+							return finishContext(err)
 						}
 						d.logDiagnosticError("legacy async run-and-wait result failed", appendDiagnosticError(statusFields, err)...)
 						return resp.fail("result-failed", "error", jobID, err.Error(), status.Progress, true, start)

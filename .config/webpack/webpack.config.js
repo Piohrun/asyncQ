@@ -106,6 +106,11 @@ module.exports = (_env, argv) => {
           { from: path.join(sourceDir, 'plugin.json'), to: 'plugin.json' },
           { from: readmePath, to: 'README.md' },
           { from: path.join(root, 'LICENSE'), to: 'LICENSE', toType: 'file', noErrorOnMissing: true },
+          {
+            from: path.join(root, 'third_party/kdbgo/LICENSE'),
+            to: 'THIRD_PARTY_LICENSES/kdbgo-MIT.txt',
+            toType: 'file',
+          },
           { from: path.join(root, 'CHANGELOG.md'), to: 'CHANGELOG.md', noErrorOnMissing: true },
           { from: path.join(sourceDir, 'img'), to: 'img', noErrorOnMissing: true },
         ],

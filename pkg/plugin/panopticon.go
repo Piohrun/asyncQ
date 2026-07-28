@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
-	kdb "github.com/sv/kdbgo"
+	kdb "github.com/greg/asyncq/third_party/kdbgo"
 )
 
 var panopticonFormattedMacroPattern = regexp.MustCompile(`\{(TimeWindowStart|TimeWindowEnd|Snapshot|FocusTime|Start|End|From|To):([^{}]+)\}`)

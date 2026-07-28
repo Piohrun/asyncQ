@@ -5,7 +5,6 @@ go 1.26.5
 require (
 	github.com/grafana/grafana-plugin-sdk-go v0.294.0
 	github.com/nu7hatch/gouuid v0.0.0-20131221200532-179d4d0c4d8d
-	github.com/sv/kdbgo v0.20.0
 	github.com/xuri/excelize/v2 v2.11.0
 	golang.org/x/sync v0.22.0
 )

@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
-	kdb "github.com/sv/kdbgo"
+	kdb "github.com/greg/asyncq/third_party/kdbgo"
 )
 
 type syncPoolAcquireInfo struct {
@@ -123,51 +123,25 @@ func (d *KdbDatasource) acquireSyncConnection(ctx context.Context) (*kdb.KDBConn
 }
 
 func (d *KdbDatasource) dialSyncConnection(ctx context.Context) (*kdb.KDBConn, error) {
-	type dialResult struct {
-		conn *kdb.KDBConn
-		err  error
-	}
-
 	ctx = normalizeSyncQueryContext(ctx)
 	if err := syncQueryContextError(ctx, "sync connection establishment interrupted"); err != nil {
 		d.releaseSyncPoolSlot()
 		return nil, err
 	}
-	handoff := make(chan dialResult)
-	go func() {
-		conn, err := d.newConnection()
-		select {
-		case handoff <- dialResult{conn: conn, err: err}:
-			// The receiver now owns the reserved pool slot and any connection.
-		case <-ctx.Done():
-			if conn != nil {
-				_ = conn.Close()
-			}
-			d.releaseSyncPoolSlot()
+	conn, err := d.newConnection(ctx)
+	if err != nil {
+		d.releaseSyncPoolSlot()
+		if contextErr := syncQueryContextError(ctx, "sync connection establishment interrupted"); contextErr != nil {
+			return nil, contextErr
 		}
-	}()
-
-	select {
-	case result := <-handoff:
-		if err := syncQueryContextError(ctx, "sync connection establishment interrupted"); err != nil {
-			if result.conn != nil {
-				_ = result.conn.Close()
-			}
-			d.releaseSyncPoolSlot()
-			return nil, err
-		}
-		if result.err != nil {
-			d.releaseSyncPoolSlot()
-			return nil, result.err
-		}
-		return result.conn, nil
-	case <-ctx.Done():
-		// The dial goroutine retains the slot until the hidden kdbgo dial
-		// completes, then closes any late connection and releases it exactly once.
-		// kdbgo does not expose its socket, so a dial/auth call that never returns
-		// also cannot be force-closed here and must keep the slot reserved.
-		return nil, syncQueryContextError(ctx, "sync connection establishment interrupted")
+		return nil, err
 	}
+	if err := syncQueryContextError(ctx, "sync connection establishment interrupted"); err != nil {
+		_ = conn.Close()
+		d.releaseSyncPoolSlot()
+		return nil, err
+	}
+	return conn, nil
 }
 
 func (d *KdbDatasource) releaseSyncConnection(conn *kdb.KDBConn) syncPoolReleaseInfo {

@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
-	kdb "github.com/sv/kdbgo"
+	kdb "github.com/greg/asyncq/third_party/kdbgo"
 )
 
 func (d *KdbDatasource) setupKdbConnectionHandlers() {
@@ -28,7 +28,7 @@ func syncQueryContextError(ctx context.Context, message string) error {
 		return nil
 	}
 	cause := context.Cause(ctx)
-	if cause == nil || cause == err {
+	if cause == nil || errors.Is(cause, err) {
 		return fmt.Errorf("%s: %w", message, err)
 	}
 	return fmt.Errorf("%s: %w", message, errors.Join(err, cause))
@@ -95,42 +95,17 @@ func syncPoolAcquireSource(reused bool) string {
 }
 
 func runKdbQueryOnConnection(ctx context.Context, conn *kdb.KDBConn, query *kdb.K) (*kdb.K, bool, error) {
-	type queryResult struct {
-		result *kdb.K
-		err    error
-	}
-
 	ctx = normalizeSyncQueryContext(ctx)
-	if err := syncQueryContextError(ctx, "sync query interrupted before transport"); err != nil {
+	result, _, err := conn.CallMessageContext(ctx, query)
+	if contextErr := syncQueryContextError(ctx, "sync query transport interrupted"); contextErr != nil {
+		_ = conn.Close()
+		return nil, false, contextErr
+	}
+	if err != nil {
 		_ = conn.Close()
 		return nil, false, err
 	}
-
-	done := make(chan queryResult, 1)
-	go func() {
-		if err := conn.WriteMessage(kdb.SYNC, query); err != nil {
-			done <- queryResult{err: err}
-			return
-		}
-		result, _, err := conn.ReadMessage()
-		done <- queryResult{result: result, err: err}
-	}()
-
-	select {
-	case msg := <-done:
-		if err := syncQueryContextError(ctx, "sync query transport interrupted after response"); err != nil {
-			_ = conn.Close()
-			return nil, false, err
-		}
-		if msg.err != nil {
-			_ = conn.Close()
-			return nil, false, msg.err
-		}
-		return msg.result, true, nil
-	case <-ctx.Done():
-		_ = conn.Close()
-		return nil, false, syncQueryContextError(ctx, "sync query transport interrupted")
-	}
+	return result, true, nil
 }
 
 func buildDatasourceKdbDict(settings *backend.DataSourceInstanceSettings) *kdb.K {

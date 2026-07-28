@@ -8,7 +8,7 @@ import (
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/data"
-	kdb "github.com/sv/kdbgo"
+	kdb "github.com/greg/asyncq/third_party/kdbgo"
 )
 
 type legacyAsyncAdapter struct {
@@ -331,17 +331,16 @@ func (d *KdbDatasource) runLegacyAsyncQueryStream(ctx context.Context, pCtx back
 	}
 	defer d.releaseAsyncSlot()
 
-	conn, err := d.newConnection()
+	timeout := asyncTimeoutDuration(model)
+	jobCtx, cancelJob := context.WithTimeout(ctx, timeout)
+	defer cancelJob()
+	conn, err := d.newConnection(jobCtx)
 	if err != nil {
 		d.logDiagnosticError("legacy async connection failed", appendDiagnosticError(fields, err)...)
 		_ = sendControlFrame(sender, liveReq.RefID, ExecutionModeLegacyAsync, "error", requestID, "", err.Error(), 0, true)
 		return nil
 	}
 	defer conn.Close()
-
-	timeout := asyncTimeoutDuration(model)
-	jobCtx, cancelJob := context.WithTimeout(ctx, timeout)
-	defer cancelJob()
 
 	submitArg, err := adapter.buildSubmitArg(pCtx, query, model, requestID)
 	if err != nil {
@@ -351,8 +350,8 @@ func (d *KdbDatasource) runLegacyAsyncQueryStream(ctx context.Context, pCtx back
 	}
 	submitRes, err := callKdbFunctionWithContext(jobCtx, conn, legacyAsyncCallExpression(adapter.submit, 1), submitArg)
 	if err != nil {
-		if jobCtx.Err() != nil {
-			err = asyncContextError(jobCtx, "legacy async", timeout)
+		if outcome, ready := readyAsyncContext(ctx, jobCtx, "legacy async", timeout, err); ready {
+			err = outcome.err
 		}
 		d.logDiagnosticError("legacy async submit failed", appendDiagnosticError(fields, err)...)
 		_ = sendControlFrame(sender, liveReq.RefID, ExecutionModeLegacyAsync, "error", requestID, "", err.Error(), 0, true)
@@ -384,17 +383,17 @@ func (d *KdbDatasource) runLegacyAsyncQueryStream(ctx context.Context, pCtx back
 	if adapter.cancel != "" {
 		cancelFn = legacyAsyncCallExpression(adapter.cancel, 1)
 	}
-	finishContext := func() error {
-		if ctx.Err() != nil {
+	finishContext := func(operationErrors ...error) error {
+		outcome := classifyAsyncContext(ctx, jobCtx, "legacy async", timeout, operationErrors...)
+		if outcome.cancelled {
 			d.bestEffortAsyncCancel(cancelFn, jobID)
-			d.logDiagnostics("legacy async cancelled", append(jobFields, "durationMs", time.Since(start).Milliseconds(), "error", ctx.Err().Error())...)
-			_ = sendControlFrame(sender, liveReq.RefID, ExecutionModeLegacyAsync, "cancelled", jobID, "", ctx.Err().Error(), 1, true)
+			d.logDiagnostics("legacy async cancelled", append(jobFields, "durationMs", time.Since(start).Milliseconds(), "error", outcome.err.Error())...)
+			_ = sendControlFrame(sender, liveReq.RefID, ExecutionModeLegacyAsync, "cancelled", jobID, "", outcome.err.Error(), 1, true)
 			return nil
 		}
-		err := asyncContextError(jobCtx, "legacy async", timeout)
 		d.bestEffortAsyncCancel(cancelFn, jobID)
-		d.logDiagnosticError("legacy async timed out", appendDiagnosticError(append(jobFields, "durationMs", time.Since(start).Milliseconds(), "timeoutMs", timeout.Milliseconds()), err)...)
-		_ = sendControlFrame(sender, liveReq.RefID, ExecutionModeLegacyAsync, "error", jobID, "", err.Error(), 1, true)
+		d.logDiagnosticError("legacy async timed out", appendDiagnosticError(append(jobFields, "durationMs", time.Since(start).Milliseconds(), "timeoutMs", timeout.Milliseconds()), outcome.err)...)
+		_ = sendControlFrame(sender, liveReq.RefID, ExecutionModeLegacyAsync, "error", jobID, "", outcome.err.Error(), 1, true)
 		return nil
 	}
 
@@ -407,8 +406,8 @@ func (d *KdbDatasource) runLegacyAsyncQueryStream(ctx context.Context, pCtx back
 		case <-ticker.C:
 			statusRes, err := callKdbFunctionWithContext(jobCtx, conn, legacyAsyncCallExpression(adapter.status, 1), kdb.Atom(kdb.KC, jobID))
 			if err != nil {
-				if jobCtx.Err() != nil {
-					return finishContext()
+				if _, ready := readyAsyncContext(ctx, jobCtx, "legacy async", timeout, err); ready {
+					return finishContext(err)
 				}
 				d.logDiagnosticError("legacy async status failed", appendDiagnosticError(jobFields, err)...)
 				_ = sendControlFrame(sender, liveReq.RefID, ExecutionModeLegacyAsync, "error", jobID, "", err.Error(), 0, true)
@@ -451,8 +450,8 @@ func (d *KdbDatasource) runLegacyAsyncQueryStream(ctx context.Context, pCtx back
 					}
 					resultRes, err := callKdbFunctionWithContext(jobCtx, conn, legacyAsyncCallExpression(adapter.result, 1), kdb.Atom(kdb.KC, jobID))
 					if err != nil {
-						if jobCtx.Err() != nil {
-							return finishContext()
+						if _, ready := readyAsyncContext(ctx, jobCtx, "legacy async", timeout, err); ready {
+							return finishContext(err)
 						}
 						d.logDiagnosticError("legacy async result failed", appendDiagnosticError(statusFields, err)...)
 						_ = sendControlFrame(sender, liveReq.RefID, ExecutionModeLegacyAsync, "error", jobID, "", err.Error(), status.Progress, true)

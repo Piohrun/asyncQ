@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	kdb "github.com/sv/kdbgo"
+	kdb "github.com/greg/asyncq/third_party/kdbgo"
 )
 
 func TestSyncQueryContextErrorPreservesCancellationCause(t *testing.T) {
@@ -100,6 +100,21 @@ func TestRunKdbQuerySyncCancellationClosesAndDiscardsTransport(t *testing.T) {
 	assertEmptySyncPoolSnapshot(t, ds.syncPoolSnapshot())
 }
 
+func TestRunKdbQuerySyncDiscardsUnexpectedResponseType(t *testing.T) {
+	server := startUnexpectedResponseKDBServer(t)
+	ds := syncTransportTestDatasource(server.listener.Addr())
+
+	result, err := ds.runKdbQuerySync(context.Background(), kdb.Long(1), 2*time.Second)
+	if !errors.Is(err, kdb.ErrBadMsg) {
+		t.Fatalf("unexpected response framing error = %v, want ErrBadMsg", err)
+	}
+	if result != nil {
+		t.Fatalf("unexpected response payload was accepted: %v", result)
+	}
+	waitForTestSignal(t, server.clientClosed, "unexpected response did not close the transport")
+	assertEmptySyncPoolSnapshot(t, ds.syncPoolSnapshot())
+}
+
 func TestRunKdbQueryOnConnectionRejectsResponseWhenCancellationWinsReuseCheck(t *testing.T) {
 	server := startRespondingKDBServer(t)
 	ds := syncTransportTestDatasource(server.listener.Addr())
@@ -165,7 +180,7 @@ func TestRunKdbQuerySyncUsesOneTotalDeadlineAcrossPoolWaitAndTransport(t *testin
 	assertEmptySyncPoolSnapshot(t, ds.syncPoolSnapshot())
 }
 
-func TestCanceledDialClosesLateConnectionBeforeReleasingSlot(t *testing.T) {
+func TestCanceledDialClosesConnectionAndReleasesSlotPromptly(t *testing.T) {
 	server := startDelayedHandshakeKDBServer(t)
 	ds := syncTransportTestDatasource(server.listener.Addr())
 
@@ -192,11 +207,11 @@ func TestCanceledDialClosesLateConnectionBeforeReleasingSlot(t *testing.T) {
 	}
 
 	snapshot := ds.syncPoolSnapshot()
-	if snapshot.slots != 1 || snapshot.active != 0 || snapshot.idle != 0 {
-		t.Fatalf("dial slot was released before the hidden dial completed: %+v", snapshot)
+	if snapshot.slots != 0 || snapshot.active != 0 || snapshot.idle != 0 {
+		t.Fatalf("canceled context-aware dial retained pool accounting: %+v", snapshot)
 	}
 	server.releaseHandshake()
-	waitForTestSignal(t, server.clientClosed, "late dial connection was not closed")
+	waitForTestSignal(t, server.clientClosed, "canceled dial connection was not closed")
 	waitForEmptySyncPool(t, ds)
 }
 
@@ -294,6 +309,46 @@ func startRespondingKDBServer(t *testing.T) blockingKDBServer {
 		}
 		close(queryReceived)
 		if err := kdb.Encode(conn, kdb.RESPONSE, kdb.Long(1)); err != nil {
+			return
+		}
+		_, _ = reader.ReadByte()
+		close(clientClosed)
+	}()
+	return blockingKDBServer{
+		listener:      listener,
+		queryReceived: queryReceived,
+		clientClosed:  clientClosed,
+	}
+}
+
+func startUnexpectedResponseKDBServer(t *testing.T) blockingKDBServer {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	queryReceived := make(chan struct{})
+	clientClosed := make(chan struct{})
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		reader := bufio.NewReader(conn)
+		if _, err := reader.ReadBytes(0); err != nil {
+			return
+		}
+		if _, err := conn.Write([]byte{3}); err != nil {
+			return
+		}
+		if _, _, err := kdb.Decode(reader); err != nil {
+			return
+		}
+		close(queryReceived)
+		if err := kdb.Encode(conn, kdb.ASYNC, kdb.Long(1)); err != nil {
 			return
 		}
 		_, _ = reader.ReadByte()
