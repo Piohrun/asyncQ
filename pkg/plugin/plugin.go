@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -76,6 +75,9 @@ const (
 	maxTLSPrivateKeyBytes       = 1 << 20
 	maxTLSCABundleBytes         = 4 << 20
 	asyncQHelperUnavailable     = "async/stream queries require q/asyncq_grafana.q to be loaded in the target kdb+ process or gateway"
+
+	healthDatasourceUnavailableMessage = "datasource is unavailable"
+	healthRequestValidationMessage     = "health check request failed validation"
 )
 
 var (
@@ -88,7 +90,7 @@ var (
 
 type QueryModel struct {
 	QueryText                   string `json:"queryText"`
-	Timeout                     int    `json:"timeOut"`
+	Timeout                     int    `json:"timeOut,omitempty"`
 	UseTimeColumn               bool   `json:"useTimeColumn"`
 	TimeColumn                  string `json:"timeColumn"`
 	IncludeKeyColumns           bool   `json:"includeKeyColumns"`
@@ -221,11 +223,9 @@ type KdbDatasource struct {
 // NewKdbDatasource creates a new datasource instance.
 func NewKdbDatasource(_ context.Context, settings backend.DataSourceInstanceSettings) (instancemgmt.Instance, error) {
 	client := &KdbDatasource{}
-	var rawSettings map[string]json.RawMessage
-	_ = json.Unmarshal(settings.JSONData, &rawSettings)
-	err := json.Unmarshal(settings.JSONData, client)
+	rawSettings, err := decodeDatasourceSettings(settings.JSONData, client)
 	if err != nil {
-		log.DefaultLogger.Error("Error decrypting Host and Port information", "error", err)
+		log.DefaultLogger.Error("Invalid datasource settings", "error", err)
 		return nil, err
 	}
 	_, client.asyncConfigured = rawSettings["enableAsync"]
@@ -527,6 +527,9 @@ func (d *KdbDatasource) newCleanupConnection(ctx context.Context) (*kdb.KDBConn,
 }
 
 func (d *KdbDatasource) QueryData(ctx context.Context, req *backend.QueryDataRequest) (response *backend.QueryDataResponse, err error) {
+	if d == nil {
+		return nil, backend.PluginErrorf("invalid query request: datasource is nil")
+	}
 	ctx, finish, err := d.beginOperation(ctx)
 	if err != nil {
 		return nil, err
@@ -535,14 +538,21 @@ func (d *KdbDatasource) QueryData(ctx context.Context, req *backend.QueryDataReq
 		err = disposedOperationError(ctx, err)
 		finish()
 	}()
-	d.normalizeDatasourceDefaults()
 
+	if err := validateQueryRequestShape(req); err != nil {
+		return nil, err
+	}
+	d.normalizeDatasourceDefaults()
 	response = backend.NewQueryDataResponse()
 	if len(req.Queries) == 0 {
 		return response, nil
 	}
+	admitted, admissionErr := d.admitDataQueries(req)
+	if admissionErr != nil {
+		return queryAdmissionResponse(req, admissionErr), nil
+	}
 
-	workerCount := min(len(req.Queries), d.SyncMaxConnections)
+	workerCount := min(len(admitted), d.SyncMaxConnections)
 	var nextQuery atomic.Int64
 	var workers sync.WaitGroup
 	var responseMu sync.Mutex
@@ -555,13 +565,13 @@ func (d *KdbDatasource) QueryData(ctx context.Context, req *backend.QueryDataReq
 					return
 				}
 				index := int(nextQuery.Add(1) - 1)
-				if index >= len(req.Queries) {
+				if index >= len(admitted) {
 					return
 				}
-				query := req.Queries[index]
-				result := d.query(ctx, req.PluginContext, query, syncDiagnosticRequestID(req, query, index))
+				admittedQuery := admitted[index]
+				result := d.queryAdmitted(ctx, req.PluginContext, admittedQuery, syncDiagnosticRequestID(req, admittedQuery.query, index))
 				responseMu.Lock()
-				response.Responses[query.RefID] = result
+				response.Responses[admittedQuery.query.RefID] = result
 				responseMu.Unlock()
 			}
 		}()
@@ -584,40 +594,18 @@ func (d *KdbDatasource) QueryData(ctx context.Context, req *backend.QueryDataReq
 	return response, nil
 }
 
-func (d *KdbDatasource) query(ctx context.Context, pCtx backend.PluginContext, query backend.DataQuery, requestID string) backend.DataResponse {
+func (d *KdbDatasource) queryAdmitted(ctx context.Context, pCtx backend.PluginContext, admitted admittedDataQuery, requestID string) backend.DataResponse {
 	ctx = normalizeSyncQueryContext(ctx)
-	var model QueryModel
+	query := admitted.query
+	model := admitted.model
 	response := backend.DataResponse{}
-	decodeStart := time.Now()
-	err := json.Unmarshal(query.JSON, &model)
-	decodeMs := diagnosticDurationMs(time.Since(decodeStart))
-	if err != nil {
-		d.logDiagnosticError("unable to decode query JSON", "requestID", requestID, "refID", query.RefID, "error", err.Error())
-		response.Error = err
-		return response
-	}
-	d.normalizeQueryModel(&model)
 	start := time.Now()
-	fields := append(d.diagnosticQueryFields(pCtx, query, model, requestID), "profileDecodeMs", decodeMs)
-	d.logDiagnostics("sync query received", fields...)
-	if model.ExecutionMode != ExecutionModeSync {
-		response.Error = fmt.Errorf("%s mode is served through Grafana Live, not the standard query endpoint", model.ExecutionMode)
-		d.logDiagnosticError("sync query rejected", appendDiagnosticError(fields, response.Error)...)
-		return response
-	}
-	prepareStart := time.Now()
-	if err := prepareQueryForExecution(pCtx, query, &model); err != nil {
-		fields = appendDiagnosticDuration(fields, "profilePrepareMs", prepareStart)
-		d.logDiagnosticError("query preparation failed", appendDiagnosticError(fields, err)...)
-		response.Error = err
-		return response
-	}
-	prepareMs := diagnosticDurationMs(time.Since(prepareStart))
-	fields = append(d.diagnosticQueryFields(pCtx, query, model, requestID),
-		"profileDecodeMs", decodeMs,
-		"profilePrepareMs", prepareMs,
+	fields := append(
+		d.diagnosticQueryFields(pCtx, query, model, requestID),
+		"profileDecodeMs", admitted.decodeMs,
+		"profilePrepareMs", admitted.prepareMs,
 	)
-	d.logDiagnostics("sync query prepared", fields...)
+	d.logDiagnostics("sync query received", fields...)
 
 	cacheStart := time.Now()
 	result, err := d.runSyncQueryWithCache(ctx, pCtx, query, model, fields)
@@ -938,6 +926,12 @@ func moveTimeColumnToFront(frame *data.Frame, timeColumn string) error {
 }
 
 func (d *KdbDatasource) CheckHealth(ctx context.Context, req *backend.CheckHealthRequest) (result *backend.CheckHealthResult, err error) {
+	if d == nil {
+		return &backend.CheckHealthResult{
+			Status:  backend.HealthStatusError,
+			Message: healthDatasourceUnavailableMessage,
+		}, backend.PluginErrorf("health check failed: datasource is nil")
+	}
 	ctx, finish, err := d.beginOperation(ctx)
 	if err != nil {
 		return &backend.CheckHealthResult{Status: backend.HealthStatusError, Message: err.Error()}, err
@@ -951,6 +945,13 @@ func (d *KdbDatasource) CheckHealth(ctx context.Context, req *backend.CheckHealt
 	pCtx := backend.PluginContext{}
 	if req != nil {
 		pCtx = req.PluginContext
+	}
+	if err := validatePluginContextExpansionInputs(pCtx); err != nil {
+		d.logDiagnosticError("health check request failed validation")
+		return &backend.CheckHealthResult{
+			Status:  backend.HealthStatusError,
+			Message: healthRequestValidationMessage,
+		}, nil
 	}
 	healthFields := []interface{}{
 		"host", d.Host,
@@ -990,16 +991,34 @@ func (d *KdbDatasource) CheckHealth(ctx context.Context, req *backend.CheckHealt
 	var status = backend.HealthStatusUnknown
 	var message = ""
 
-	if test.Type != -kdb.KJ {
+	if test == nil {
 		status = backend.HealthStatusError
-		message = fmt.Sprintf("kdb+ result not of expected type; received type %v", test.Type)
-		d.logDiagnosticError("health check returned unexpected type", append(healthFields, "kdbResponse", describeKdbObject(test))...)
+		message = "kdb+ returned a nil health-check response"
+		d.logDiagnosticError("health check returned nil response", healthFields...)
 		return &backend.CheckHealthResult{
 			Status:  status,
 			Message: message,
 		}, nil
 	}
-	val := test.Data.(int64)
+	if test.Type != -kdb.KJ {
+		status = backend.HealthStatusError
+		message = fmt.Sprintf("kdb+ result not of expected type; received type %v", test.Type)
+		d.logDiagnosticError("health check returned unexpected type", append(healthFields, "kdbResponseType", test.Type)...)
+		return &backend.CheckHealthResult{
+			Status:  status,
+			Message: message,
+		}, nil
+	}
+	val, ok := test.Data.(int64)
+	if !ok {
+		status = backend.HealthStatusError
+		message = "kdb+ health-check result had invalid long atom data"
+		d.logDiagnosticError("health check returned malformed long atom", append(healthFields, "kdbResponseType", test.Type)...)
+		return &backend.CheckHealthResult{
+			Status:  status,
+			Message: message,
+		}, nil
+	}
 
 	if val == 2 {
 		status = backend.HealthStatusOk

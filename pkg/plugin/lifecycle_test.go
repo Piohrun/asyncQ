@@ -700,7 +700,7 @@ func TestDisposeWaitsForStaleRefreshAndPreventsCommit(t *testing.T) {
 }
 
 func TestQueryDataFanoutIsBoundedAndCancellationFillsResponses(t *testing.T) {
-	const queryCount = 5000
+	const queryCount = maxQueryCount
 	const workerLimit = 7
 
 	ds := &KdbDatasource{
