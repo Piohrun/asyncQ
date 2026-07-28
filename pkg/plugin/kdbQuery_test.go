@@ -43,9 +43,14 @@ func TestAcquireSyncConnectionCanceledWaiterPreservesPoolAccounting(t *testing.T
 
 	cause := errors.New("pool waiter superseded")
 	ctx, cancel := context.WithCancelCause(context.Background())
+	operationCtx, finish, err := ds.beginOperation(ctx)
+	if err != nil {
+		t.Fatalf("failed to admit pool waiter: %v", err)
+	}
+	defer finish()
 	outcome := make(chan error, 1)
 	go func() {
-		_, _, err := ds.acquireSyncConnection(ctx)
+		_, _, err := ds.acquireSyncConnection(operationCtx)
 		outcome <- err
 	}()
 
@@ -118,7 +123,12 @@ func TestRunKdbQuerySyncDiscardsUnexpectedResponseType(t *testing.T) {
 func TestRunKdbQueryOnConnectionRejectsResponseWhenCancellationWinsReuseCheck(t *testing.T) {
 	server := startRespondingKDBServer(t)
 	ds := syncTransportTestDatasource(server.listener.Addr())
-	conn, _, err := ds.acquireSyncConnection(context.Background())
+	operationCtx, finish, err := ds.beginOperation(context.Background())
+	if err != nil {
+		t.Fatalf("failed to admit test operation: %v", err)
+	}
+	defer finish()
+	conn, _, err := ds.acquireSyncConnection(operationCtx)
 	if err != nil {
 		t.Fatalf("failed to acquire test connection: %v", err)
 	}
@@ -143,7 +153,12 @@ func TestRunKdbQuerySyncUsesOneTotalDeadlineAcrossPoolWaitAndTransport(t *testin
 	server := startBlockingKDBServer(t)
 	ds := syncTransportTestDatasource(server.listener.Addr())
 
-	held, _, err := ds.acquireSyncConnection(context.Background())
+	operationCtx, finish, err := ds.beginOperation(context.Background())
+	if err != nil {
+		t.Fatalf("failed to admit held connection operation: %v", err)
+	}
+	defer finish()
+	held, _, err := ds.acquireSyncConnection(operationCtx)
 	if err != nil {
 		t.Fatalf("failed to acquire held connection: %v", err)
 	}
@@ -186,9 +201,14 @@ func TestCanceledDialClosesConnectionAndReleasesSlotPromptly(t *testing.T) {
 
 	cause := errors.New("dial superseded")
 	ctx, cancel := context.WithCancelCause(context.Background())
+	operationCtx, finish, err := ds.beginOperation(ctx)
+	if err != nil {
+		t.Fatalf("failed to admit dial operation: %v", err)
+	}
+	defer finish()
 	outcome := make(chan error, 1)
 	go func() {
-		_, _, err := ds.acquireSyncConnection(ctx)
+		_, _, err := ds.acquireSyncConnection(operationCtx)
 		outcome <- err
 	}()
 

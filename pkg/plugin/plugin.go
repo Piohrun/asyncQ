@@ -7,11 +7,13 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
@@ -183,39 +185,45 @@ type KdbDatasource struct {
 	queryCacheControlDefault    bool
 	datasourceDefaultsOnce      sync.Once
 
-	user             string
-	pass             string
-	instanceID       int64
-	instanceUID      string
-	instanceName     string
-	TlsCertificate   string
-	TlsKey           string
-	CaCert           string
-	TlsServerConfig  *tls.Config
-	DialTimeout      time.Duration
-	asyncJobs        chan struct{}
-	syncPool         chan *kdb.KDBConn
-	syncPoolSlots    chan struct{}
-	syncPoolActive   map[*kdb.KDBConn]struct{}
-	syncPoolMax      int
-	syncPoolMu       sync.Mutex
-	syncPoolClosed   bool
-	queryCache       *syncQueryCache
-	queryCacheMu     sync.Mutex
-	queryDiskCache   *syncQueryDiskCache
-	queryDiskCacheMu sync.Mutex
-	excelDownloads   map[string]excelReportDownload
-	excelDownloadsMu sync.Mutex
+	user              string
+	pass              string
+	instanceID        int64
+	instanceUID       string
+	instanceName      string
+	TlsCertificate    string
+	TlsKey            string
+	CaCert            string
+	TlsServerConfig   *tls.Config
+	DialTimeout       time.Duration
+	asyncJobs         chan struct{}
+	syncPool          chan *kdb.KDBConn
+	syncPoolSlots     chan struct{}
+	syncPoolActive    map[*kdb.KDBConn]struct{}
+	syncPoolMax       int
+	syncPoolMu        sync.Mutex
+	syncPoolClosed    bool
+	queryCache        *syncQueryCache
+	queryCacheMu      sync.Mutex
+	queryDiskCache    *syncQueryDiskCache
+	queryDiskCacheMu  sync.Mutex
+	excelDownloads    map[string]excelReportDownload
+	excelDownloadsMu  sync.Mutex
+	lifecycleMu       sync.Mutex
+	lifecycleCtx      context.Context
+	lifecycleCancel   context.CancelCauseFunc
+	lifecycleStopping bool
+	lifecycleDone     chan struct{}
+	lifecycleWG       sync.WaitGroup
 
 	RunKdbQuerySync func(context.Context, *kdb.K, time.Duration, ...interface{}) (*kdb.K, error)
 }
 
 // NewKdbDatasource creates a new datasource instance.
 func NewKdbDatasource(_ context.Context, settings backend.DataSourceInstanceSettings) (instancemgmt.Instance, error) {
-	client := KdbDatasource{}
+	client := &KdbDatasource{}
 	var rawSettings map[string]json.RawMessage
 	_ = json.Unmarshal(settings.JSONData, &rawSettings)
-	err := json.Unmarshal(settings.JSONData, &client)
+	err := json.Unmarshal(settings.JSONData, client)
 	if err != nil {
 		log.DefaultLogger.Error("Error decrypting Host and Port information", "error", err)
 		return nil, err
@@ -335,9 +343,10 @@ func NewKdbDatasource(_ context.Context, settings backend.DataSourceInstanceSett
 
 	client.setupKdbConnectionHandlers()
 	client.normalizeDatasourceDefaults()
+	client.initializeLifecycle()
 
 	log.DefaultLogger.Info("KDB Datasource created successfully", "syncMaxConnections", client.SyncMaxConnections, "asyncMaxJobs", client.AsyncMaxJobs)
-	return &client, nil
+	return client, nil
 }
 
 func appendValidatedCACertificates(pool *x509.CertPool, bundle []byte) error {
@@ -448,28 +457,23 @@ func (d *KdbDatasource) applyDatasourceDefaults() {
 	}
 }
 
-func (d *KdbDatasource) Dispose() {
+func logDatasourceDispose() {
 	log.DefaultLogger.Info("Dispose called")
-	d.closeSyncPool()
-	d.closeSyncQueryCache()
-	safeCloseStructChan(d.asyncJobs)
 }
 
-func safeCloseStructChan(ch chan struct{}) {
-	defer func() { _ = recover() }()
-	if ch != nil {
-		close(ch)
+func (d *KdbDatasource) newConnection(ctx context.Context) (conn *kdb.KDBConn, err error) {
+	ctx = normalizeSyncQueryContext(ctx)
+	if !d.hasActiveLifecycleLease(ctx) {
+		return nil, fmt.Errorf("kdb+ connection requires an admitted datasource operation: %w", ErrDatasourceDisposed)
 	}
-}
+	if err := syncQueryContextError(ctx, "kdb+ connection establishment interrupted"); err != nil {
+		return nil, err
+	}
 
-func (d *KdbDatasource) newConnection(ctx context.Context) (*kdb.KDBConn, error) {
 	log.DefaultLogger.Info("Opening connection to kdb+", "host", d.Host, "port", d.Port)
 	auth := fmt.Sprintf("%s:%s", d.user, d.pass)
-	ctx = normalizeSyncQueryContext(ctx)
 	dialCtx, cancel := context.WithTimeout(ctx, d.DialTimeout)
 	defer cancel()
-	var conn *kdb.KDBConn
-	var err error
 	if d.WithTls {
 		conn, err = kdb.DialTLSContext(dialCtx, d.Host, d.Port, auth, d.TlsServerConfig)
 	} else {
@@ -479,27 +483,104 @@ func (d *KdbDatasource) newConnection(ctx context.Context) (*kdb.KDBConn, error)
 		log.DefaultLogger.Error("Error establishing kdb connection", "error", err)
 		return nil, err
 	}
+	if contextErr := syncQueryContextError(dialCtx, "kdb+ connection establishment interrupted"); contextErr != nil {
+		_ = conn.Close()
+		return nil, contextErr
+	}
 	log.DefaultLogger.Info("Dialled kdb+ successfully", "host", d.Host, "port", d.Port)
 	return conn, nil
 }
 
-func (d *KdbDatasource) QueryData(ctx context.Context, req *backend.QueryDataRequest) (*backend.QueryDataResponse, error) {
+func (d *KdbDatasource) newCleanupConnection(ctx context.Context) (*kdb.KDBConn, error) {
 	ctx = normalizeSyncQueryContext(ctx)
-	response := backend.NewQueryDataResponse()
-
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	for index, q := range req.Queries {
-		wg.Add(1)
-		go func(index int, q backend.DataQuery) {
-			defer wg.Done()
-			res := d.query(ctx, req.PluginContext, q, syncDiagnosticRequestID(req, q, index))
-			mu.Lock()
-			response.Responses[q.RefID] = res
-			mu.Unlock()
-		}(index, q)
+	if !d.hasActiveLifecycleLease(ctx) {
+		return nil, fmt.Errorf("q-side cleanup requires an admitted datasource operation: %w", ErrDatasourceDisposed)
 	}
-	wg.Wait()
+	if err := syncQueryContextError(ctx, "q-side cleanup connection interrupted"); err != nil {
+		return nil, err
+	}
+
+	dialTimeout := d.DialTimeout
+	if dialTimeout <= 0 {
+		dialTimeout = time.Duration(defaultConnectionTimeoutMs) * time.Millisecond
+	}
+	dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
+	defer cancel()
+	auth := fmt.Sprintf("%s:%s", d.user, d.pass)
+	var (
+		conn *kdb.KDBConn
+		err  error
+	)
+	if d.WithTls {
+		conn, err = kdb.DialTLSContext(dialCtx, d.Host, d.Port, auth, d.TlsServerConfig)
+	} else {
+		conn, err = kdb.DialKDBContext(dialCtx, d.Host, d.Port, auth)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if contextErr := syncQueryContextError(dialCtx, "q-side cleanup connection interrupted"); contextErr != nil {
+		_ = conn.Close()
+		return nil, contextErr
+	}
+	return conn, nil
+}
+
+func (d *KdbDatasource) QueryData(ctx context.Context, req *backend.QueryDataRequest) (response *backend.QueryDataResponse, err error) {
+	ctx, finish, err := d.beginOperation(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		err = disposedOperationError(ctx, err)
+		finish()
+	}()
+	d.normalizeDatasourceDefaults()
+
+	response = backend.NewQueryDataResponse()
+	if len(req.Queries) == 0 {
+		return response, nil
+	}
+
+	workerCount := min(len(req.Queries), d.SyncMaxConnections)
+	var nextQuery atomic.Int64
+	var workers sync.WaitGroup
+	var responseMu sync.Mutex
+	workers.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer workers.Done()
+			for {
+				if ctx.Err() != nil {
+					return
+				}
+				index := int(nextQuery.Add(1) - 1)
+				if index >= len(req.Queries) {
+					return
+				}
+				query := req.Queries[index]
+				result := d.query(ctx, req.PluginContext, query, syncDiagnosticRequestID(req, query, index))
+				responseMu.Lock()
+				response.Responses[query.RefID] = result
+				responseMu.Unlock()
+			}
+		}()
+	}
+	workers.Wait()
+
+	if contextErr := syncQueryContextError(ctx, "query request interrupted"); contextErr != nil {
+		for _, query := range req.Queries {
+			result, ok := response.Responses[query.RefID]
+			if !ok {
+				result = backend.DataResponse{Error: contextErr}
+			} else if result.Error == nil {
+				result.Error = contextErr
+			} else if !errors.Is(result.Error, context.Cause(ctx)) {
+				result.Error = errors.Join(result.Error, contextErr)
+			}
+			response.Responses[query.RefID] = result
+		}
+	}
 	return response, nil
 }
 
@@ -856,8 +937,17 @@ func moveTimeColumnToFront(frame *data.Frame, timeColumn string) error {
 	return nil
 }
 
-func (d *KdbDatasource) CheckHealth(ctx context.Context, req *backend.CheckHealthRequest) (*backend.CheckHealthResult, error) {
-	ctx = normalizeSyncQueryContext(ctx)
+func (d *KdbDatasource) CheckHealth(ctx context.Context, req *backend.CheckHealthRequest) (result *backend.CheckHealthResult, err error) {
+	ctx, finish, err := d.beginOperation(ctx)
+	if err != nil {
+		return &backend.CheckHealthResult{Status: backend.HealthStatusError, Message: err.Error()}, err
+	}
+	defer func() {
+		err = disposedOperationError(ctx, err)
+		finish()
+	}()
+	d.normalizeDatasourceDefaults()
+
 	pCtx := backend.PluginContext{}
 	if req != nil {
 		pCtx = req.PluginContext

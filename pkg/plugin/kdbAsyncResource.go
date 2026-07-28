@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
@@ -325,13 +326,21 @@ func (d *KdbDatasource) runPluginManagedAsyncQueryWait(ctx context.Context, pCtx
 
 	resultCh := make(chan *kdb.K, 1)
 	errCh := make(chan error, 1)
+	var queryWorker sync.WaitGroup
+	queryWorker.Add(1)
 	go func() {
+		defer queryWorker.Done()
 		result, err := callKdbFunctionWithContext(jobCtx, conn, queryExecutionFunction(model), buildDirectQueryRequest(pCtx, query, model))
 		if err != nil {
 			errCh <- err
 			return
 		}
 		resultCh <- result
+	}()
+	defer func() {
+		cancelJob()
+		_ = conn.Close()
+		queryWorker.Wait()
 	}()
 	finishContext := func(operationErrors ...error) asyncRunAndWaitResponse {
 		outcome := classifyAsyncContext(ctx, jobCtx, model.ExecutionMode, timeout, operationErrors...)
@@ -417,11 +426,11 @@ func (d *KdbDatasource) runHelperAsyncQueryWait(ctx context.Context, pCtx backen
 	finishContext := func(operationErrors ...error) asyncRunAndWaitResponse {
 		outcome := classifyAsyncContext(ctx, jobCtx, "helper async", timeout, operationErrors...)
 		if outcome.cancelled {
-			d.bestEffortAsyncCancel(asyncCancelFn, jobID)
+			d.bestEffortAsyncCancel(ctx, asyncCancelFn, jobID)
 			d.logDiagnostics("helper async run-and-wait cancelled", append(jobFields, "durationMs", time.Since(start).Milliseconds(), "error", outcome.err.Error())...)
 			return resp.fail("cancelled", "cancelled", jobID, outcome.err.Error(), 1, true, start)
 		}
-		d.bestEffortAsyncCancel(asyncCancelFn, jobID)
+		d.bestEffortAsyncCancel(ctx, asyncCancelFn, jobID)
 		d.logDiagnosticError("helper async run-and-wait timed out", appendDiagnosticError(append(jobFields, "durationMs", time.Since(start).Milliseconds(), "timeoutMs", timeout.Milliseconds()), outcome.err)...)
 		return resp.fail("timeout", "error", jobID, outcome.err.Error(), 1, true, start)
 	}
@@ -561,11 +570,11 @@ func (d *KdbDatasource) runLegacyAsyncQueryWait(ctx context.Context, pCtx backen
 	finishContext := func(operationErrors ...error) asyncRunAndWaitResponse {
 		outcome := classifyAsyncContext(ctx, jobCtx, "legacy async", timeout, operationErrors...)
 		if outcome.cancelled {
-			d.bestEffortAsyncCancel(cancelFn, jobID)
+			d.bestEffortAsyncCancel(ctx, cancelFn, jobID)
 			d.logDiagnostics("legacy async run-and-wait cancelled", append(jobFields, "durationMs", time.Since(start).Milliseconds(), "error", outcome.err.Error())...)
 			return resp.fail("cancelled", "cancelled", jobID, outcome.err.Error(), 1, true, start)
 		}
-		d.bestEffortAsyncCancel(cancelFn, jobID)
+		d.bestEffortAsyncCancel(ctx, cancelFn, jobID)
 		d.logDiagnosticError("legacy async run-and-wait timed out", appendDiagnosticError(append(jobFields, "durationMs", time.Since(start).Milliseconds(), "timeoutMs", timeout.Milliseconds()), outcome.err)...)
 		return resp.fail("timeout", "error", jobID, outcome.err.Error(), 1, true, start)
 	}

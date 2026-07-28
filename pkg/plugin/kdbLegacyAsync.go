@@ -386,12 +386,12 @@ func (d *KdbDatasource) runLegacyAsyncQueryStream(ctx context.Context, pCtx back
 	finishContext := func(operationErrors ...error) error {
 		outcome := classifyAsyncContext(ctx, jobCtx, "legacy async", timeout, operationErrors...)
 		if outcome.cancelled {
-			d.bestEffortAsyncCancel(cancelFn, jobID)
+			d.bestEffortAsyncCancel(ctx, cancelFn, jobID)
 			d.logDiagnostics("legacy async cancelled", append(jobFields, "durationMs", time.Since(start).Milliseconds(), "error", outcome.err.Error())...)
 			_ = sendControlFrame(sender, liveReq.RefID, ExecutionModeLegacyAsync, "cancelled", jobID, "", outcome.err.Error(), 1, true)
 			return nil
 		}
-		d.bestEffortAsyncCancel(cancelFn, jobID)
+		d.bestEffortAsyncCancel(ctx, cancelFn, jobID)
 		d.logDiagnosticError("legacy async timed out", appendDiagnosticError(append(jobFields, "durationMs", time.Since(start).Milliseconds(), "timeoutMs", timeout.Milliseconds()), outcome.err)...)
 		_ = sendControlFrame(sender, liveReq.RefID, ExecutionModeLegacyAsync, "error", jobID, "", outcome.err.Error(), 1, true)
 		return nil

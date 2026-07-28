@@ -41,13 +41,16 @@ func syncQueryTimeout(timeout time.Duration) time.Duration {
 	return timeout
 }
 
-func detachedSyncQueryContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
-	base := context.WithoutCancel(normalizeSyncQueryContext(ctx))
-	return context.WithTimeout(base, syncQueryTimeout(timeout))
-}
+func (d *KdbDatasource) runKdbQuerySync(ctx context.Context, query *kdb.K, timeout time.Duration, diagnosticFields ...interface{}) (result *kdb.K, err error) {
+	ctx, finish, err := d.ensureOperationContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		err = disposedOperationError(ctx, err)
+		finish()
+	}()
 
-func (d *KdbDatasource) runKdbQuerySync(ctx context.Context, query *kdb.K, timeout time.Duration, diagnosticFields ...interface{}) (*kdb.K, error) {
-	ctx = normalizeSyncQueryContext(ctx)
 	timeout = syncQueryTimeout(timeout)
 	queryCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

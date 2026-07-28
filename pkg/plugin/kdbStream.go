@@ -53,7 +53,17 @@ type asyncQStatus struct {
 	Payload    *kdb.K
 }
 
-func (d *KdbDatasource) SubscribeStream(_ context.Context, req *backend.SubscribeStreamRequest) (*backend.SubscribeStreamResponse, error) {
+func (d *KdbDatasource) SubscribeStream(ctx context.Context, req *backend.SubscribeStreamRequest) (response *backend.SubscribeStreamResponse, err error) {
+	ctx, finish, err := d.beginOperation(ctx)
+	if err != nil {
+		return &backend.SubscribeStreamResponse{Status: backend.SubscribeStreamStatusPermissionDenied}, err
+	}
+	defer func() {
+		err = disposedOperationError(ctx, err)
+		finish()
+	}()
+	d.normalizeDatasourceDefaults()
+
 	if isAsyncPath(req.Path) {
 		if d.asyncConfigured && !d.EnableAsync {
 			return &backend.SubscribeStreamResponse{Status: backend.SubscribeStreamStatusPermissionDenied}, fmt.Errorf("async queries are disabled for this datasource")
@@ -75,11 +85,30 @@ func (d *KdbDatasource) SubscribeStream(_ context.Context, req *backend.Subscrib
 	return &backend.SubscribeStreamResponse{Status: backend.SubscribeStreamStatusNotFound}, fmt.Errorf("unsupported stream path: %s", req.Path)
 }
 
-func (d *KdbDatasource) PublishStream(_ context.Context, _ *backend.PublishStreamRequest) (*backend.PublishStreamResponse, error) {
+func (d *KdbDatasource) PublishStream(ctx context.Context, _ *backend.PublishStreamRequest) (response *backend.PublishStreamResponse, err error) {
+	ctx, finish, err := d.beginOperation(ctx)
+	if err != nil {
+		return &backend.PublishStreamResponse{Status: backend.PublishStreamStatusPermissionDenied}, err
+	}
+	defer func() {
+		err = disposedOperationError(ctx, err)
+		finish()
+	}()
+	d.normalizeDatasourceDefaults()
 	return &backend.PublishStreamResponse{Status: backend.PublishStreamStatusPermissionDenied}, nil
 }
 
-func (d *KdbDatasource) RunStream(ctx context.Context, req *backend.RunStreamRequest, sender *backend.StreamSender) error {
+func (d *KdbDatasource) RunStream(ctx context.Context, req *backend.RunStreamRequest, sender *backend.StreamSender) (err error) {
+	ctx, finish, err := d.beginOperation(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		err = disposedOperationError(ctx, err)
+		finish()
+	}()
+	d.normalizeDatasourceDefaults()
+
 	switch {
 	case isAsyncPath(req.Path):
 		return d.runAsyncQueryStream(ctx, req, sender)
@@ -240,12 +269,12 @@ func (d *KdbDatasource) runAsyncQueryStream(ctx context.Context, req *backend.Ru
 	finishContext := func(operationErrors ...error) error {
 		outcome := classifyAsyncContext(ctx, jobCtx, "helper async", timeout, operationErrors...)
 		if outcome.cancelled {
-			d.bestEffortAsyncCancel(asyncCancelFn, jobID)
+			d.bestEffortAsyncCancel(ctx, asyncCancelFn, jobID)
 			d.logDiagnostics("helper async cancelled", append(jobFields, "durationMs", time.Since(start).Milliseconds(), "error", outcome.err.Error())...)
 			_ = sendControlFrame(sender, liveReq.RefID, ExecutionModeAsync, "cancelled", jobID, "", outcome.err.Error(), 1, true)
 			return outcome.err
 		}
-		d.bestEffortAsyncCancel(asyncCancelFn, jobID)
+		d.bestEffortAsyncCancel(ctx, asyncCancelFn, jobID)
 		d.logDiagnosticError("helper async timed out", appendDiagnosticError(append(jobFields, "durationMs", time.Since(start).Milliseconds(), "timeoutMs", timeout.Milliseconds()), outcome.err)...)
 		_ = sendControlFrame(sender, liveReq.RefID, ExecutionModeAsync, "error", jobID, "", outcome.err.Error(), 1, true)
 		return nil
@@ -366,13 +395,21 @@ func (d *KdbDatasource) runPluginManagedAsyncQueryStream(ctx context.Context, pC
 
 	resultCh := make(chan *kdb.K, 1)
 	errCh := make(chan error, 1)
+	var queryWorker sync.WaitGroup
+	queryWorker.Add(1)
 	go func() {
+		defer queryWorker.Done()
 		result, err := callKdbFunctionWithContext(jobCtx, conn, queryExecutionFunction(model), buildDirectQueryRequest(pCtx, query, model))
 		if err != nil {
 			errCh <- err
 			return
 		}
 		resultCh <- result
+	}()
+	defer func() {
+		cancelJob()
+		_ = conn.Close()
+		queryWorker.Wait()
 	}()
 
 	ticker := time.NewTicker(time.Duration(model.PollIntervalMs) * time.Millisecond)
@@ -444,14 +481,14 @@ func asyncTimeoutDuration(model QueryModel) time.Duration {
 	return time.Duration(timeoutMs) * time.Millisecond
 }
 
-func (d *KdbDatasource) bestEffortAsyncCancel(fn string, jobID string) {
+func (d *KdbDatasource) bestEffortAsyncCancel(ctx context.Context, fn string, jobID string) {
 	fn = strings.TrimSpace(fn)
 	if fn == "" || jobID == "" {
 		return
 	}
-	cancelCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	cancelCtx, cancel := context.WithTimeout(context.WithoutCancel(normalizeSyncQueryContext(ctx)), 2*time.Second)
 	defer cancel()
-	conn, err := d.newConnection(cancelCtx)
+	conn, err := d.newCleanupConnection(cancelCtx)
 	if err != nil {
 		d.logDiagnostics("async cancel connection failed", "functionHash", diagnosticHash(fn), "jobID", jobID, "error", err.Error())
 		return
@@ -464,12 +501,30 @@ func (d *KdbDatasource) bestEffortAsyncCancel(fn string, jobID string) {
 }
 
 func (d *KdbDatasource) acquireAsyncSlot(ctx context.Context) error {
+	ctx = normalizeSyncQueryContext(ctx)
+	if !d.hasActiveLifecycleLease(ctx) {
+		return fmt.Errorf("async slot acquisition requires an admitted datasource operation: %w", ErrDatasourceDisposed)
+	}
+
+	d.lifecycleMu.Lock()
+	defer d.lifecycleMu.Unlock()
+	d.initializeLifecycleLocked()
+	if d.lifecycleStopping {
+		return ErrDatasourceDisposed
+	}
+	if err := syncQueryContextError(ctx, "async slot acquisition interrupted"); err != nil {
+		return err
+	}
 	d.normalizeDatasourceDefaults()
 	select {
-	case d.asyncJobs <- struct{}{}:
-		return nil
 	case <-ctx.Done():
-		return ctx.Err()
+		return syncQueryContextError(ctx, "async slot acquisition interrupted")
+	case d.asyncJobs <- struct{}{}:
+		if err := syncQueryContextError(ctx, "async slot acquisition interrupted"); err != nil {
+			<-d.asyncJobs
+			return err
+		}
+		return nil
 	default:
 		return fmt.Errorf("async job limit reached (%d)", d.AsyncMaxJobs)
 	}
@@ -520,7 +575,7 @@ func (d *KdbDatasource) runKdbPushStream(ctx context.Context, req *backend.RunSt
 	status.Status = statusWithDefault(status.Status, "running")
 	d.logDiagnostics("stream started", d.appendDiagnosticAsyncStatus(append([]interface{}{}, fields...), status)...)
 	stopStream := onceAsyncStreamStop(func() {
-		d.stopKdbStream(streamID)
+		d.stopKdbStream(ctx, streamID)
 	})
 	remoteTerminated := false
 	defer func() {
@@ -614,10 +669,10 @@ func validateStreamPushMessageType(messageType kdb.ReqType) error {
 	return nil
 }
 
-func (d *KdbDatasource) stopKdbStream(streamID string) {
-	stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+func (d *KdbDatasource) stopKdbStream(ctx context.Context, streamID string) {
+	stopCtx, cancel := context.WithTimeout(context.WithoutCancel(normalizeSyncQueryContext(ctx)), 2*time.Second)
 	defer cancel()
-	conn, err := d.newConnection(stopCtx)
+	conn, err := d.newCleanupConnection(stopCtx)
 	if err != nil {
 		log.DefaultLogger.Info("unable to open stream stop connection", "streamID", streamID, "error", err)
 		return

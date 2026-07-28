@@ -26,7 +26,17 @@ type cacheResourceResponse struct {
 	Error         string               `json:"error,omitempty"`
 }
 
-func (d *KdbDatasource) CallResource(ctx context.Context, req *backend.CallResourceRequest, sender backend.CallResourceResponseSender) error {
+func (d *KdbDatasource) CallResource(ctx context.Context, req *backend.CallResourceRequest, sender backend.CallResourceResponseSender) (err error) {
+	ctx, finish, err := d.beginOperation(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		err = disposedOperationError(ctx, err)
+		finish()
+	}()
+	d.normalizeDatasourceDefaults()
+
 	path := strings.Trim(strings.TrimSpace(req.Path), "/")
 	switch path {
 	case "cache/status":

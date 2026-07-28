@@ -269,7 +269,7 @@ func (d *KdbDatasource) handleExcelReportResource(ctx context.Context, req *back
 			log.DefaultLogger.Error("excel report generation failed", "datasourceUID", d.instanceUID, "reportID", body.ReportID, "status", status, "code", code, "error", err.Error())
 			return sendResourceJSON(sender, status, excelReportResourceResponse{OK: false, Code: code, Report: body.ReportID, Error: err.Error()})
 		}
-		token, err := d.storeExcelReportDownload(generated)
+		token, err := d.storeExcelReportDownload(ctx, generated)
 		if err != nil {
 			return sendResourceJSON(sender, http.StatusInternalServerError, excelReportGenerateLinkResponse{OK: false, Error: err.Error()})
 		}
@@ -302,24 +302,40 @@ func (d *KdbDatasource) handleExcelReportResource(ctx context.Context, req *back
 	}
 }
 
-func (d *KdbDatasource) storeExcelReportDownload(generated excelReportGenerated) (string, error) {
+func (d *KdbDatasource) storeExcelReportDownload(ctx context.Context, generated excelReportGenerated) (string, error) {
 	token, err := newExcelReportDownloadToken()
 	if err != nil {
 		return "", err
 	}
-	d.excelDownloadsMu.Lock()
-	defer d.excelDownloadsMu.Unlock()
-	if d.excelDownloads == nil {
-		d.excelDownloads = map[string]excelReportDownload{}
-	}
-	now := time.Now()
-	d.cleanupExpiredExcelReportDownloadsLocked(now)
-	d.excelDownloads[token] = excelReportDownload{
-		Body:      generated.Body,
-		FileName:  generated.FileName,
-		ExpiresAt: now.Add(excelReportDownloadTTL),
+	if err := d.withActiveLifecycle(ctx, func() error {
+		d.excelDownloadsMu.Lock()
+		defer d.excelDownloadsMu.Unlock()
+		if d.excelDownloads == nil {
+			d.excelDownloads = map[string]excelReportDownload{}
+		}
+		now := time.Now()
+		d.cleanupExpiredExcelReportDownloadsLocked(now)
+		d.excelDownloads[token] = excelReportDownload{
+			Body:      generated.Body,
+			FileName:  generated.FileName,
+			ExpiresAt: now.Add(excelReportDownloadTTL),
+		}
+		return nil
+	}); err != nil {
+		return "", err
 	}
 	return token, nil
+}
+
+func (d *KdbDatasource) clearExcelReportDownloads() {
+	d.excelDownloadsMu.Lock()
+	defer d.excelDownloadsMu.Unlock()
+	for token, download := range d.excelDownloads {
+		download.Body = nil
+		d.excelDownloads[token] = download
+		delete(d.excelDownloads, token)
+	}
+	d.excelDownloads = nil
 }
 
 func (d *KdbDatasource) takeExcelReportDownload(token string) (excelReportGenerated, bool) {

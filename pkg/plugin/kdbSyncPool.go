@@ -44,7 +44,7 @@ func (d *KdbDatasource) ensureSyncPool() error {
 	defer d.syncPoolMu.Unlock()
 
 	if d.syncPoolClosed {
-		return fmt.Errorf("datasource disposed before sync connection could be acquired")
+		return fmt.Errorf("sync connection pool is closed: %w", ErrDatasourceDisposed)
 	}
 	if d.syncPool != nil && d.syncPoolSlots != nil {
 		return nil
@@ -58,8 +58,15 @@ func (d *KdbDatasource) ensureSyncPool() error {
 	return nil
 }
 
-func (d *KdbDatasource) acquireSyncConnection(ctx context.Context) (*kdb.KDBConn, syncPoolAcquireInfo, error) {
+func (d *KdbDatasource) acquireSyncConnection(ctx context.Context) (conn *kdb.KDBConn, info syncPoolAcquireInfo, err error) {
 	ctx = normalizeSyncQueryContext(ctx)
+	if !d.hasActiveLifecycleLease(ctx) {
+		return nil, syncPoolAcquireInfo{}, fmt.Errorf("sync connection acquisition requires an admitted datasource operation: %w", ErrDatasourceDisposed)
+	}
+	if err := syncQueryContextError(ctx, "sync connection acquisition interrupted"); err != nil {
+		return nil, syncPoolAcquireInfo{}, err
+	}
+
 	start := time.Now()
 	if err := d.ensureSyncPool(); err != nil {
 		return nil, syncPoolAcquireInfo{wait: time.Since(start), snapshot: d.syncPoolSnapshot()}, err
@@ -230,7 +237,7 @@ func (d *KdbDatasource) syncPoolChannels() (chan *kdb.KDBConn, chan struct{}, er
 	defer d.syncPoolMu.Unlock()
 
 	if d.syncPoolClosed {
-		return nil, nil, fmt.Errorf("datasource disposed before sync connection could be acquired")
+		return nil, nil, fmt.Errorf("sync connection pool is closed: %w", ErrDatasourceDisposed)
 	}
 	if d.syncPool == nil || d.syncPoolSlots == nil {
 		return nil, nil, fmt.Errorf("sync connection pool is not initialized")
@@ -245,7 +252,7 @@ func (d *KdbDatasource) activateSyncConnection(conn *kdb.KDBConn) error {
 	if d.syncPoolClosed {
 		_ = conn.Close()
 		d.releaseSyncPoolSlotUnlocked()
-		return fmt.Errorf("datasource disposed before sync connection could be acquired")
+		return fmt.Errorf("sync connection pool is closed: %w", ErrDatasourceDisposed)
 	}
 	if d.syncPoolActive == nil {
 		d.syncPoolActive = make(map[*kdb.KDBConn]struct{})
