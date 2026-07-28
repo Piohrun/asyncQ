@@ -1332,7 +1332,6 @@ func ParseGroupedKdbTable(res *kdb.K, includeKeys bool) ([]*data.Frame, error) {
 		return nil, fmt.Errorf("grouped table key/value row counts differ: %d and %d", rc, valueRows)
 	}
 	frameArray := make([]*data.Frame, rc)
-	keyColCount := len(keyTable.Columns)
 	for row := 0; row < rc; row++ {
 		keyData, err := correctedTableIndexValidated(keyTable, row)
 		if err != nil {
@@ -1353,8 +1352,11 @@ func ParseGroupedKdbTable(res *kdb.K, includeKeys bool) ([]*data.Frame, error) {
 		}
 		var masterCols []string
 		var masterData []*kdb.K
+		includedKeyColumnCount := 0
 		if includeKeys {
-			masterCols = append(keyData.Key.Data.([]string), rowData.Key.Data.([]string)...)
+			keyColumns := keyData.Key.Data.([]string)
+			includedKeyColumnCount = len(keyColumns)
+			masterCols = append(keyColumns, rowData.Key.Data.([]string)...)
 			masterData = append(keyData.Value.Data.([]*kdb.K), rowData.Value.Data.([]*kdb.K)...)
 		} else {
 			masterCols = rowData.Key.Data.([]string)
@@ -1386,7 +1388,7 @@ func ParseGroupedKdbTable(res *kdb.K, includeKeys bool) ([]*data.Frame, error) {
 					if err != nil {
 						return nil, fmt.Errorf("grouped table row %d column %d: %w", row, i, err)
 					}
-					if i < keyColCount || length != depth {
+					if i < includedKeyColumnCount || length != depth {
 						text, err := kdbObjectString(kObj)
 						if err != nil {
 							return nil, fmt.Errorf("grouped table row %d column %d: %w", row, i, err)

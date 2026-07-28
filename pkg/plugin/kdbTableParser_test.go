@@ -557,6 +557,79 @@ func TestParseGroupedTableConvertsMixedGenericListColumnToStrings(t *testing.T) 
 	}
 }
 
+func TestParseGroupedTableClassifiesCharacterVectorsAgainstIncludedKeys(t *testing.T) {
+	tests := []struct {
+		name               string
+		includeKeys        bool
+		expectedFieldNames []string
+	}{
+		{
+			name:               "value columns only",
+			includeKeys:        false,
+			expectedFieldNames: []string{"letters", "label", "values"},
+		},
+		{
+			name:               "key and value columns",
+			includeKeys:        true,
+			expectedFieldNames: []string{"group", "letters", "label", "values"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			frames, err := ParseGroupedKdbTable(groupedCharacterVectorResponse(), tt.includeKeys)
+			if err != nil {
+				t.Fatalf("ParseGroupedKdbTable returned error: %v", err)
+			}
+			frame := onlyFrame(t, frames)
+			if frame.Name != "desk" {
+				t.Fatalf("unexpected frame name: got %q want %q", frame.Name, "desk")
+			}
+			assertFieldNames(t, frame, tt.expectedFieldNames)
+			for _, field := range frame.Fields {
+				if field.Len() != 3 {
+					t.Fatalf("field %q has length %d, want 3", field.Name, field.Len())
+				}
+			}
+
+			assertFieldValues(t, fieldByName(t, frame, "letters"), []interface{}{"a", "b", "c"})
+			assertFieldValues(t, fieldByName(t, frame, "label"), []interface{}{"ok", "ok", "ok"})
+			assertFieldValues(t, fieldByName(t, frame, "values"), []interface{}{int64(10), int64(20), int64(30)})
+			if tt.includeKeys {
+				assertFieldValues(t, fieldByName(t, frame, "group"), []interface{}{"desk", "desk", "desk"})
+			}
+		})
+	}
+}
+
+func groupedCharacterVectorResponse() *kdb.K {
+	return kdb.NewDict(
+		kdb.NewTable(
+			[]string{"group"},
+			[]*kdb.K{kdb.NewList(kdb.Atom(kdb.KC, "desk"))},
+		),
+		kdb.NewTable(
+			[]string{"letters", "label", "values"},
+			[]*kdb.K{
+				kdb.NewList(kdb.Atom(kdb.KC, "abc")),
+				kdb.NewList(kdb.Atom(kdb.KC, "ok")),
+				kdb.NewList(kdb.LongV([]int64{10, 20, 30})),
+			},
+		),
+	)
+}
+
+func assertFieldValues(t *testing.T, field *data.Field, want []interface{}) {
+	t.Helper()
+	got := make([]interface{}, field.Len())
+	for i := range got {
+		got[i] = field.At(i)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("field %q values: got %#v want %#v", field.Name, got, want)
+	}
+}
+
 func TestParseEmptyGroupedTableWithoutValueColumns(t *testing.T) {
 	res := kdb.NewDict(
 		kdb.NewTable([]string{"sym"}, []*kdb.K{kdb.SymbolV(nil)}),
