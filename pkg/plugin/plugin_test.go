@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -378,10 +379,54 @@ func TestNormalizeDatasourceDefaultsPreservesConfiguredSyncMaxConnections(t *tes
 	}
 }
 
+func TestNormalizeQueryModelInitializesDatasourceDefaultsConcurrently(t *testing.T) {
+	const concurrency = 64
+
+	ds := &KdbDatasource{}
+	models := make([]QueryModel, concurrency)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(concurrency)
+
+	for i := range models {
+		go func(index int) {
+			defer wg.Done()
+			<-start
+			ds.normalizeQueryModel(&models[index])
+		}(i)
+	}
+
+	close(start)
+	wg.Wait()
+
+	for i, model := range models {
+		if model.ExecutionMode != ExecutionModeSync {
+			t.Fatalf("model %d: expected execution mode %q, got %q", i, ExecutionModeSync, model.ExecutionMode)
+		}
+		if model.CompatibilityMode != CompatibilityModeNative {
+			t.Fatalf("model %d: expected compatibility mode %q, got %q", i, CompatibilityModeNative, model.CompatibilityMode)
+		}
+		if model.LegacyAsyncRequestMode != LegacyAsyncRequestModeRequestDict {
+			t.Fatalf("model %d: expected legacy request mode %q, got %q", i, LegacyAsyncRequestModeRequestDict, model.LegacyAsyncRequestMode)
+		}
+		if model.LegacyAsyncJobIDPath != defaultLegacyAsyncJobIDPath {
+			t.Fatalf("model %d: expected legacy job ID path %q, got %q", i, defaultLegacyAsyncJobIDPath, model.LegacyAsyncJobIDPath)
+		}
+	}
+	if ds.SyncMaxConnections != defaultSyncMaxConnections {
+		t.Fatalf("expected default sync max connections %d, got %d", defaultSyncMaxConnections, ds.SyncMaxConnections)
+	}
+	if ds.AsyncMaxJobs != defaultAsyncMaxJobs {
+		t.Fatalf("expected default async max jobs %d, got %d", defaultAsyncMaxJobs, ds.AsyncMaxJobs)
+	}
+	if cap(ds.asyncJobs) != defaultAsyncMaxJobs {
+		t.Fatalf("expected async slot capacity %d, got %d", defaultAsyncMaxJobs, cap(ds.asyncJobs))
+	}
+}
+
 func TestQueryDataRunsSyncQueriesConcurrently(t *testing.T) {
 	ds := &KdbDatasource{}
 	ds.setupKdbConnectionHandlers()
-	ds.normalizeDatasourceDefaults()
 
 	entered := make(chan struct{}, 2)
 	release := make(chan struct{})

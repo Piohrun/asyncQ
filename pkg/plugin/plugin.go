@@ -191,6 +191,7 @@ type KdbDatasource struct {
 	queryCacheDiskDefault       bool
 	queryCacheControlConfigured bool
 	queryCacheControlDefault    bool
+	datasourceDefaultsOnce      sync.Once
 
 	user             string
 	pass             string
@@ -338,6 +339,10 @@ func NewKdbDatasource(_ context.Context, settings backend.DataSourceInstanceSett
 }
 
 func (d *KdbDatasource) normalizeDatasourceDefaults() {
+	d.datasourceDefaultsOnce.Do(d.applyDatasourceDefaults)
+}
+
+func (d *KdbDatasource) applyDatasourceDefaults() {
 	if d.ExecutionMode == "" {
 		d.ExecutionMode = ExecutionModeSync
 	}
