@@ -3,6 +3,7 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -17,7 +18,7 @@ func TestCheckHealthSuccess(t *testing.T) {
 	// Init
 	ds := &KdbDatasource{}
 	ds.setupKdbConnectionHandlers()
-	ds.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) { return kdb.Long(2), nil }
+	ds.RunKdbQuerySync = func(context.Context, *kdb.K, time.Duration, ...interface{}) (*kdb.K, error) { return kdb.Long(2), nil }
 	res, err := ds.CheckHealth(nil, nil)
 	if err != nil {
 		t.Errorf("Error running CheckHealth: %v", err)
@@ -33,7 +34,7 @@ func TestCheckHealthFailValue(t *testing.T) {
 	// Init
 	ds := &KdbDatasource{}
 	ds.setupKdbConnectionHandlers()
-	ds.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) { return kdb.Long(3), nil }
+	ds.RunKdbQuerySync = func(context.Context, *kdb.K, time.Duration, ...interface{}) (*kdb.K, error) { return kdb.Long(3), nil }
 	res, err := ds.CheckHealth(nil, nil)
 	if err != nil {
 		t.Errorf("Error running CheckHealth: %v", err)
@@ -49,7 +50,7 @@ func TestCheckHealthFailType(t *testing.T) {
 	// Init
 	ds := &KdbDatasource{}
 	ds.setupKdbConnectionHandlers()
-	ds.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
+	ds.RunKdbQuerySync = func(context.Context, *kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
 		return kdb.Error(fmt.Errorf("kdb+ server-side error")), nil
 	}
 	res, err := ds.CheckHealth(nil, nil)
@@ -67,7 +68,7 @@ func TestCheckHealthFailError(t *testing.T) {
 	// Init
 	ds := &KdbDatasource{}
 	ds.setupKdbConnectionHandlers()
-	ds.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
+	ds.RunKdbQuerySync = func(context.Context, *kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
 		return nil, fmt.Errorf("Go backend-side error")
 	}
 	res, err := ds.CheckHealth(nil, nil)
@@ -78,6 +79,48 @@ func TestCheckHealthFailError(t *testing.T) {
 	if res.Status != backend.HealthStatusError {
 		t.Errorf("Erroring CheckHealth did not return Error health status")
 		return
+	}
+}
+
+func TestCheckHealthPropagatesCallerCancellation(t *testing.T) {
+	ds := &KdbDatasource{}
+	ds.setupKdbConnectionHandlers()
+	entered := make(chan struct{})
+	observed := make(chan error, 1)
+	ds.RunKdbQuerySync = func(ctx context.Context, _ *kdb.K, _ time.Duration, _ ...interface{}) (*kdb.K, error) {
+		close(entered)
+		<-ctx.Done()
+		observed <- ctx.Err()
+		return nil, fmt.Errorf("health hook interrupted: %w", ctx.Err())
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	outcome := make(chan *backend.CheckHealthResult, 1)
+	go func() {
+		result, _ := ds.CheckHealth(ctx, nil)
+		outcome <- result
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("health check did not reach query hook")
+	}
+	cancel()
+	select {
+	case result := <-outcome:
+		if result == nil || result.Status != backend.HealthStatusError {
+			t.Fatalf("expected canceled health check to report error status, got %#v", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("health check did not return after cancellation")
+	}
+	select {
+	case err := <-observed:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("health hook observed unexpected error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("health hook did not observe caller cancellation")
 	}
 }
 
@@ -161,7 +204,7 @@ func TestQueryDataRunsSyncQueriesConcurrently(t *testing.T) {
 
 	var inFlight int32
 	var maxInFlight int32
-	ds.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
+	ds.RunKdbQuerySync = func(context.Context, *kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
 		current := atomic.AddInt32(&inFlight, 1)
 		for {
 			max := atomic.LoadInt32(&maxInFlight)

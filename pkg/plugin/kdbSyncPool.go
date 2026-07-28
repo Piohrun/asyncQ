@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -57,19 +58,17 @@ func (d *KdbDatasource) ensureSyncPool() error {
 	return nil
 }
 
-func (d *KdbDatasource) acquireSyncConnection(timeout time.Duration) (*kdb.KDBConn, syncPoolAcquireInfo, error) {
-	if timeout <= 0 {
-		timeout = time.Duration(defaultQueryTimeout) * time.Millisecond
-	}
+func (d *KdbDatasource) acquireSyncConnection(ctx context.Context) (*kdb.KDBConn, syncPoolAcquireInfo, error) {
+	ctx = normalizeSyncQueryContext(ctx)
 	start := time.Now()
 	if err := d.ensureSyncPool(); err != nil {
 		return nil, syncPoolAcquireInfo{wait: time.Since(start), snapshot: d.syncPoolSnapshot()}, err
 	}
 
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-
 	for {
+		if err := syncQueryContextError(ctx, "sync connection acquisition interrupted"); err != nil {
+			return nil, syncPoolAcquireInfo{wait: time.Since(start), snapshot: d.syncPoolSnapshot()}, err
+		}
 		pool, slots, err := d.syncPoolChannels()
 		if err != nil {
 			return nil, syncPoolAcquireInfo{wait: time.Since(start), snapshot: d.syncPoolSnapshot()}, err
@@ -83,11 +82,17 @@ func (d *KdbDatasource) acquireSyncConnection(timeout time.Duration) (*kdb.KDBCo
 			if err := d.activateSyncConnection(conn); err != nil {
 				return nil, syncPoolAcquireInfo{reused: true, wait: time.Since(start), snapshot: d.syncPoolSnapshot()}, err
 			}
+			if err := syncQueryContextError(ctx, "sync connection acquisition interrupted"); err != nil {
+				d.discardSyncConnection(conn)
+				return nil, syncPoolAcquireInfo{reused: true, wait: time.Since(start), snapshot: d.syncPoolSnapshot()}, err
+			}
 			return conn, syncPoolAcquireInfo{reused: true, wait: time.Since(start), snapshot: d.syncPoolSnapshot()}, nil
 		default:
 		}
 
 		select {
+		case <-ctx.Done():
+			return nil, syncPoolAcquireInfo{wait: time.Since(start), snapshot: d.syncPoolSnapshot()}, syncQueryContextError(ctx, "sync connection acquisition interrupted")
 		case conn := <-pool:
 			if conn == nil {
 				continue
@@ -95,20 +100,73 @@ func (d *KdbDatasource) acquireSyncConnection(timeout time.Duration) (*kdb.KDBCo
 			if err := d.activateSyncConnection(conn); err != nil {
 				return nil, syncPoolAcquireInfo{reused: true, wait: time.Since(start), snapshot: d.syncPoolSnapshot()}, err
 			}
+			if err := syncQueryContextError(ctx, "sync connection acquisition interrupted"); err != nil {
+				d.discardSyncConnection(conn)
+				return nil, syncPoolAcquireInfo{reused: true, wait: time.Since(start), snapshot: d.syncPoolSnapshot()}, err
+			}
 			return conn, syncPoolAcquireInfo{reused: true, wait: time.Since(start), snapshot: d.syncPoolSnapshot()}, nil
 		case slots <- struct{}{}:
-			conn, err := d.newConnection()
+			conn, err := d.dialSyncConnection(ctx)
 			if err != nil {
-				d.releaseSyncPoolSlot()
 				return nil, syncPoolAcquireInfo{wait: time.Since(start), snapshot: d.syncPoolSnapshot()}, err
 			}
 			if err := d.activateSyncConnection(conn); err != nil {
 				return nil, syncPoolAcquireInfo{wait: time.Since(start), snapshot: d.syncPoolSnapshot()}, err
 			}
+			if err := syncQueryContextError(ctx, "sync connection acquisition interrupted"); err != nil {
+				d.discardSyncConnection(conn)
+				return nil, syncPoolAcquireInfo{wait: time.Since(start), snapshot: d.syncPoolSnapshot()}, err
+			}
 			return conn, syncPoolAcquireInfo{wait: time.Since(start), snapshot: d.syncPoolSnapshot()}, nil
-		case <-timer.C:
-			return nil, syncPoolAcquireInfo{wait: time.Since(start), snapshot: d.syncPoolSnapshot()}, fmt.Errorf("timed out waiting for sync connection after %v", timeout)
 		}
+	}
+}
+
+func (d *KdbDatasource) dialSyncConnection(ctx context.Context) (*kdb.KDBConn, error) {
+	type dialResult struct {
+		conn *kdb.KDBConn
+		err  error
+	}
+
+	ctx = normalizeSyncQueryContext(ctx)
+	if err := syncQueryContextError(ctx, "sync connection establishment interrupted"); err != nil {
+		d.releaseSyncPoolSlot()
+		return nil, err
+	}
+	handoff := make(chan dialResult)
+	go func() {
+		conn, err := d.newConnection()
+		select {
+		case handoff <- dialResult{conn: conn, err: err}:
+			// The receiver now owns the reserved pool slot and any connection.
+		case <-ctx.Done():
+			if conn != nil {
+				_ = conn.Close()
+			}
+			d.releaseSyncPoolSlot()
+		}
+	}()
+
+	select {
+	case result := <-handoff:
+		if err := syncQueryContextError(ctx, "sync connection establishment interrupted"); err != nil {
+			if result.conn != nil {
+				_ = result.conn.Close()
+			}
+			d.releaseSyncPoolSlot()
+			return nil, err
+		}
+		if result.err != nil {
+			d.releaseSyncPoolSlot()
+			return nil, result.err
+		}
+		return result.conn, nil
+	case <-ctx.Done():
+		// The dial goroutine retains the slot until the hidden kdbgo dial
+		// completes, then closes any late connection and releases it exactly once.
+		// kdbgo does not expose its socket, so a dial/auth call that never returns
+		// also cannot be force-closed here and must keep the slot reserved.
+		return nil, syncQueryContextError(ctx, "sync connection establishment interrupted")
 	}
 }
 
@@ -138,11 +196,19 @@ func (d *KdbDatasource) releaseSyncConnection(conn *kdb.KDBConn) syncPoolRelease
 }
 
 func (d *KdbDatasource) discardSyncConnection(conn *kdb.KDBConn) syncPoolReleaseInfo {
+	return d.removeSyncConnection(conn, true)
+}
+
+func (d *KdbDatasource) discardClosedSyncConnection(conn *kdb.KDBConn) syncPoolReleaseInfo {
+	return d.removeSyncConnection(conn, false)
+}
+
+func (d *KdbDatasource) removeSyncConnection(conn *kdb.KDBConn, closeConnection bool) syncPoolReleaseInfo {
 	d.syncPoolMu.Lock()
 	delete(d.syncPoolActive, conn)
 	d.syncPoolMu.Unlock()
 
-	if conn != nil {
+	if closeConnection && conn != nil {
 		_ = conn.Close()
 	}
 	d.releaseSyncPoolSlot()

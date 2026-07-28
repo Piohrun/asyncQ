@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -17,7 +18,7 @@ import (
 func TestQueryDataCachesSuccessfulSyncResults(t *testing.T) {
 	ds := cachedTestDatasource()
 	var calls int32
-	ds.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
+	ds.RunKdbQuerySync = func(context.Context, *kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
 		return kdb.Long(int64(atomic.AddInt32(&calls, 1))), nil
 	}
 
@@ -44,7 +45,7 @@ func TestQueryDataCachesSuccessfulSyncResults(t *testing.T) {
 func TestQueryDataCacheCanBeBypassedFromQueryText(t *testing.T) {
 	ds := cachedTestDatasource()
 	var calls int32
-	ds.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
+	ds.RunKdbQuerySync = func(context.Context, *kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
 		return kdb.Long(int64(atomic.AddInt32(&calls, 1))), nil
 	}
 
@@ -64,7 +65,7 @@ func TestQueryDataCacheCanBeEnabledPerQuery(t *testing.T) {
 	ds := cachedTestDatasource()
 	ds.QueryCacheEnabled = false
 	var calls int32
-	ds.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
+	ds.RunKdbQuerySync = func(context.Context, *kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
 		return kdb.Long(int64(atomic.AddInt32(&calls, 1))), nil
 	}
 
@@ -85,7 +86,7 @@ func TestQueryDataCacheCanBeEnabledPerQuery(t *testing.T) {
 func TestQueryDataCacheCanBeDisabledPerQuery(t *testing.T) {
 	ds := cachedTestDatasource()
 	var calls int32
-	ds.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
+	ds.RunKdbQuerySync = func(context.Context, *kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
 		return kdb.Long(int64(atomic.AddInt32(&calls, 1))), nil
 	}
 
@@ -106,7 +107,7 @@ func TestQueryDataCacheCanBeDisabledPerQuery(t *testing.T) {
 func TestQueryDataCacheKeyIncludesTimeRange(t *testing.T) {
 	ds := cachedTestDatasource()
 	var calls int32
-	ds.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
+	ds.RunKdbQuerySync = func(context.Context, *kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
 		return kdb.Long(int64(atomic.AddInt32(&calls, 1))), nil
 	}
 
@@ -127,7 +128,7 @@ func TestQueryDataCacheKeyIncludesTimeRange(t *testing.T) {
 func TestQueryDataCacheStrictKeyIncludesRefID(t *testing.T) {
 	ds := cachedTestDatasource()
 	var calls int32
-	ds.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
+	ds.RunKdbQuerySync = func(context.Context, *kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
 		return kdb.Long(int64(atomic.AddInt32(&calls, 1))), nil
 	}
 
@@ -148,7 +149,7 @@ func TestQueryDataCacheSharedKeyIgnoresRefID(t *testing.T) {
 	ds := cachedTestDatasource()
 	ds.QueryCacheKeyMode = QueryCacheKeyModeShared
 	var calls int32
-	ds.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
+	ds.RunKdbQuerySync = func(context.Context, *kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
 		return kdb.Long(int64(atomic.AddInt32(&calls, 1))), nil
 	}
 
@@ -167,13 +168,16 @@ func TestQueryDataCacheSharedKeyIgnoresRefID(t *testing.T) {
 	if got := second.Responses["B"].Frames[0].RefID; got != "B" {
 		t.Fatalf("expected cached frame refID to be rewritten for requester, got %q", got)
 	}
+	if got := second.Responses["B"].Frames[0].Name; got != "B" {
+		t.Fatalf("expected cached frame name to be rewritten for requester, got %q", got)
+	}
 }
 
 func TestQueryDataCacheCanBucketTimeRange(t *testing.T) {
 	ds := cachedTestDatasource()
 	ds.QueryCacheTimeBucketSeconds = 60
 	var calls int32
-	ds.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
+	ds.RunKdbQuerySync = func(context.Context, *kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
 		return kdb.Long(int64(atomic.AddInt32(&calls, 1))), nil
 	}
 
@@ -194,7 +198,7 @@ func TestQueryDataCacheCanBucketTimeRange(t *testing.T) {
 func TestQueryDataCacheUsesPerQueryTimeBucket(t *testing.T) {
 	ds := cachedTestDatasource()
 	var calls int32
-	ds.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
+	ds.RunKdbQuerySync = func(context.Context, *kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
 		return kdb.Long(int64(atomic.AddInt32(&calls, 1))), nil
 	}
 
@@ -221,7 +225,7 @@ func TestQueryDataCacheExpiresEntries(t *testing.T) {
 	ds := cachedTestDatasource()
 	ds.QueryCacheTTLSeconds = 1
 	var calls int32
-	ds.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
+	ds.RunKdbQuerySync = func(context.Context, *kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
 		return kdb.Long(int64(atomic.AddInt32(&calls, 1))), nil
 	}
 
@@ -248,7 +252,7 @@ func TestQueryDataCacheReturnsStaleAndRefreshes(t *testing.T) {
 	ds.QueryCacheStaleTTLSeconds = 60
 	var calls int32
 	refreshDone := make(chan struct{}, 1)
-	ds.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
+	ds.RunKdbQuerySync = func(context.Context, *kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
 		call := atomic.AddInt32(&calls, 1)
 		if call == 2 {
 			defer func() { refreshDone <- struct{}{} }()
@@ -291,7 +295,7 @@ func TestQueryDataCacheReturnsStaleAndRefreshes(t *testing.T) {
 func TestQueryDataCacheRefreshModeUpdatesCache(t *testing.T) {
 	ds := cachedTestDatasource()
 	var calls int32
-	ds.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
+	ds.RunKdbQuerySync = func(context.Context, *kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
 		return kdb.Long(int64(atomic.AddInt32(&calls, 1))), nil
 	}
 
@@ -325,7 +329,7 @@ func TestQueryDataCacheEvictsLeastRecentlyUsedEntry(t *testing.T) {
 	ds := cachedTestDatasource()
 	ds.QueryCacheMaxEntries = 1
 	var calls int32
-	ds.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
+	ds.RunKdbQuerySync = func(context.Context, *kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
 		return kdb.Long(int64(atomic.AddInt32(&calls, 1))), nil
 	}
 
@@ -348,7 +352,7 @@ func TestQueryDataCacheEvictsLeastRecentlyUsedEntry(t *testing.T) {
 func TestQueryDataCacheReturnsClonedFrames(t *testing.T) {
 	ds := cachedTestDatasource()
 	var calls int32
-	ds.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
+	ds.RunKdbQuerySync = func(context.Context, *kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
 		atomic.AddInt32(&calls, 1)
 		return kdb.Long(1), nil
 	}
@@ -378,7 +382,7 @@ func TestQueryDataCacheCoalescesConcurrentMisses(t *testing.T) {
 	var calls int32
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
-	ds.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
+	ds.RunKdbQuerySync = func(context.Context, *kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
 		atomic.AddInt32(&calls, 1)
 		select {
 		case entered <- struct{}{}:
@@ -393,9 +397,11 @@ func TestQueryDataCacheCoalescesConcurrentMisses(t *testing.T) {
 	queryB.RefID = "B"
 	const callers = 24
 	type outcome struct {
-		result syncQueryResult
-		refID  string
-		err    error
+		result    syncQueryResult
+		caller    int
+		requestID string
+		refID     string
+		err       error
 	}
 	var wg sync.WaitGroup
 	waitersReady := sync.WaitGroup{}
@@ -410,10 +416,11 @@ func TestQueryDataCacheCoalescesConcurrentMisses(t *testing.T) {
 		if index%2 != 0 {
 			query = queryB
 		}
+		requestID := fmt.Sprintf("request-%d", index)
 		fields := make([]interface{}, 0, 512)
-		fields = append(fields, "caller", index)
-		result, err := ds.runSyncQueryWithCache(backend.PluginContext{}, query, model, fields)
-		outcomes <- outcome{result: result, refID: query.RefID, err: err}
+		fields = append(fields, "caller", index, "requestID", requestID, "refID", query.RefID)
+		result, err := ds.runSyncQueryWithCache(context.Background(), backend.PluginContext{}, query, model, fields)
+		outcomes <- outcome{result: result, caller: index, requestID: requestID, refID: query.RefID, err: err}
 	}
 
 	wg.Add(1)
@@ -445,7 +452,19 @@ func TestQueryDataCacheCoalescesConcurrentMisses(t *testing.T) {
 		if got := outcome.result.frames[0].RefID; got != outcome.refID {
 			t.Fatalf("expected frame refID %q, got %q", outcome.refID, got)
 		}
+		if got := outcome.result.frames[0].Name; got != outcome.refID {
+			t.Fatalf("expected frame name %q, got %q", outcome.refID, got)
+		}
 		diagnostics := diagnosticFieldMap(outcome.result.fields)
+		if got := diagnostics["caller"]; got != outcome.caller {
+			t.Fatalf("expected caller diagnostic %d, got %#v", outcome.caller, got)
+		}
+		if got := diagnostics["requestID"]; got != outcome.requestID {
+			t.Fatalf("expected requestID diagnostic %q, got %#v", outcome.requestID, got)
+		}
+		if got := diagnostics["refID"]; got != outcome.refID {
+			t.Fatalf("expected refID diagnostic %q, got %#v", outcome.refID, got)
+		}
 		if diagnostics["queryCacheShared"] != true {
 			t.Fatalf("expected coalesced query diagnostics, got %#v", diagnostics)
 		}
@@ -463,7 +482,7 @@ func TestQueryDataCacheCoalescesConcurrentErrors(t *testing.T) {
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
 	wantErr := errors.New("test kdb failure")
-	ds.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
+	ds.RunKdbQuerySync = func(context.Context, *kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
 		atomic.AddInt32(&calls, 1)
 		select {
 		case entered <- struct{}{}:
@@ -490,7 +509,7 @@ func TestQueryDataCacheCoalescesConcurrentErrors(t *testing.T) {
 		}
 		fields := make([]interface{}, 0, 512)
 		fields = append(fields, "caller", index)
-		result, err := ds.runSyncQueryWithCache(backend.PluginContext{}, query, model, fields)
+		result, err := ds.runSyncQueryWithCache(context.Background(), backend.PluginContext{}, query, model, fields)
 		outcomes <- outcome{result: result, err: err}
 	}
 
@@ -529,13 +548,128 @@ func TestQueryDataCacheCoalescesConcurrentErrors(t *testing.T) {
 	assertDiagnosticFieldsIndependent(t, results)
 }
 
+func TestCanceledCoalescedWaiterReturnsWhileSharedExecutionCompletes(t *testing.T) {
+	ds := cachedTestDatasource()
+	ds.QueryCacheKeyMode = QueryCacheKeyModeShared
+	var calls int32
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	completed := make(chan struct{})
+	var completeOnce sync.Once
+	ds.RunKdbQuerySync = func(ctx context.Context, _ *kdb.K, _ time.Duration, _ ...interface{}) (*kdb.K, error) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			close(entered)
+		}
+		<-release
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("shared hook context was canceled: %w", err)
+		}
+		completeOnce.Do(func() { close(completed) })
+		return kdb.Long(1), nil
+	}
+
+	query, model := preparedCacheTestQuery(t, ds, "A", "1")
+	cancelCause := errors.New("coalesced waiter superseded")
+	firstCtx, cancelFirst := context.WithCancelCause(context.Background())
+	firstOutcome := make(chan error, 1)
+	go func() {
+		_, err := ds.runSyncQueryWithCache(firstCtx, backend.PluginContext{}, query, model, []interface{}{"caller", "first"})
+		firstOutcome <- err
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("shared cache miss did not start")
+	}
+	cancelFirst(cancelCause)
+	select {
+	case err := <-firstOutcome:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected canceled waiter error, got %v", err)
+		}
+		if !errors.Is(err, cancelCause) {
+			t.Fatalf("expected coalesced waiter cancellation cause, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled coalesced waiter did not return promptly")
+	}
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		close(release)
+	}()
+	second, err := ds.runSyncQueryWithCache(context.Background(), backend.PluginContext{}, query, model, []interface{}{"caller", "second"})
+	if err != nil {
+		t.Fatalf("live waiter returned error: %v", err)
+	}
+	if len(second.frames) != 1 || second.frames[0].At(0, 0).(int64) != 1 {
+		t.Fatalf("unexpected shared result: %#v", second.frames)
+	}
+	select {
+	case <-completed:
+	default:
+		t.Fatal("shared execution did not complete")
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("expected one detached shared execution, got %d", got)
+	}
+}
+
+func TestUncachedQueryCancellationReachesHook(t *testing.T) {
+	ds := cachedTestDatasource()
+	ds.QueryCacheEnabled = false
+	entered := make(chan struct{})
+	observed := make(chan error, 1)
+	ds.RunKdbQuerySync = func(ctx context.Context, _ *kdb.K, _ time.Duration, _ ...interface{}) (*kdb.K, error) {
+		close(entered)
+		<-ctx.Done()
+		observed <- ctx.Err()
+		return nil, fmt.Errorf("hook interrupted: %w", ctx.Err())
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	request := cacheTestRequest(t, "A", "1", time.Time{}, time.Time{})
+	outcome := make(chan *backend.QueryDataResponse, 1)
+	go func() {
+		response, _ := ds.QueryData(ctx, request)
+		outcome <- response
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("uncached query did not reach hook")
+	}
+	cancel()
+	select {
+	case response := <-outcome:
+		if response == nil {
+			t.Fatal("QueryData returned nil response")
+		}
+		if err := response.Responses["A"].Error; !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected canceled query response, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("uncached QueryData did not return after cancellation")
+	}
+	select {
+	case err := <-observed:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("hook observed unexpected context error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("hook did not observe caller cancellation")
+	}
+}
+
 func TestQueryDataDiskCachePersistsAcrossDatasourceInstances(t *testing.T) {
 	cacheDir := t.TempDir()
 	req := cacheTestRequest(t, "A", "1", time.Time{}, time.Time{})
 
 	ds1 := diskCachedTestDatasource(cacheDir)
 	var calls1 int32
-	ds1.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
+	ds1.RunKdbQuerySync = func(context.Context, *kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
 		return kdb.Long(int64(atomic.AddInt32(&calls1, 1))), nil
 	}
 	first, err := ds1.QueryData(context.Background(), req)
@@ -548,7 +682,7 @@ func TestQueryDataDiskCachePersistsAcrossDatasourceInstances(t *testing.T) {
 
 	ds2 := diskCachedTestDatasource(cacheDir)
 	var calls2 int32
-	ds2.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
+	ds2.RunKdbQuerySync = func(context.Context, *kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
 		return kdb.Long(int64(atomic.AddInt32(&calls2, 1))), nil
 	}
 	second, err := ds2.QueryData(context.Background(), req)
@@ -570,7 +704,7 @@ func TestQueryDataDiskCachePersistsAcrossDatasourceInstances(t *testing.T) {
 
 func TestQueryDataAttachesDiagnosticsToFrames(t *testing.T) {
 	ds := cachedTestDatasource()
-	ds.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
+	ds.RunKdbQuerySync = func(context.Context, *kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
 		return kdb.Long(1), nil
 	}
 
@@ -599,7 +733,7 @@ func TestQueryDataAttachesDiagnosticsToFrames(t *testing.T) {
 func TestQueryDataCacheHitAttachesFrameProfileDiagnostics(t *testing.T) {
 	ds := cachedTestDatasource()
 	var calls int32
-	ds.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
+	ds.RunKdbQuerySync = func(context.Context, *kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
 		atomic.AddInt32(&calls, 1)
 		return kdb.LongV([]int64{1, 2, 3}), nil
 	}
@@ -627,7 +761,7 @@ func TestQueryDataCacheHitAttachesFrameProfileDiagnostics(t *testing.T) {
 func TestCacheResourceClearEntryEvictsMemoryAndDisk(t *testing.T) {
 	ds := diskCachedTestDatasource(t.TempDir())
 	var calls int32
-	ds.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
+	ds.RunKdbQuerySync = func(context.Context, *kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
 		return kdb.Long(int64(atomic.AddInt32(&calls, 1))), nil
 	}
 

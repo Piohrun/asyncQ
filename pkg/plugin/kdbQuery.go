@@ -1,6 +1,8 @@
 package plugin
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -12,12 +14,45 @@ func (d *KdbDatasource) setupKdbConnectionHandlers() {
 	d.RunKdbQuerySync = d.runKdbQuerySync
 }
 
-func (d *KdbDatasource) runKdbQuerySync(query *kdb.K, timeout time.Duration, diagnosticFields ...interface{}) (*kdb.K, error) {
-	if timeout <= 0 {
-		timeout = time.Duration(defaultQueryTimeout) * time.Millisecond
+func normalizeSyncQueryContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
 	}
+	return ctx
+}
 
-	conn, acquireInfo, err := d.acquireSyncConnection(timeout)
+func syncQueryContextError(ctx context.Context, message string) error {
+	ctx = normalizeSyncQueryContext(ctx)
+	err := ctx.Err()
+	if err == nil {
+		return nil
+	}
+	cause := context.Cause(ctx)
+	if cause == nil || cause == err {
+		return fmt.Errorf("%s: %w", message, err)
+	}
+	return fmt.Errorf("%s: %w", message, errors.Join(err, cause))
+}
+
+func syncQueryTimeout(timeout time.Duration) time.Duration {
+	if timeout <= 0 {
+		return time.Duration(defaultQueryTimeout) * time.Millisecond
+	}
+	return timeout
+}
+
+func detachedSyncQueryContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	base := context.WithoutCancel(normalizeSyncQueryContext(ctx))
+	return context.WithTimeout(base, syncQueryTimeout(timeout))
+}
+
+func (d *KdbDatasource) runKdbQuerySync(ctx context.Context, query *kdb.K, timeout time.Duration, diagnosticFields ...interface{}) (*kdb.K, error) {
+	ctx = normalizeSyncQueryContext(ctx)
+	timeout = syncQueryTimeout(timeout)
+	queryCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	conn, acquireInfo, err := d.acquireSyncConnection(queryCtx)
 	if err != nil {
 		d.logDiagnostics("sync pool acquire failed", appendSyncPoolDiagnosticFields(appendDiagnosticError(diagnosticFields, err), acquireInfo.snapshot, syncPoolDiagnosticOptions{
 			acquireWaitMs: acquireInfo.wait.Milliseconds(),
@@ -31,7 +66,7 @@ func (d *KdbDatasource) runKdbQuerySync(query *kdb.K, timeout time.Duration, dia
 	})...)
 
 	start := time.Now()
-	result, reusable, err := runKdbQueryOnConnection(conn, query, timeout)
+	result, reusable, err := runKdbQueryOnConnection(queryCtx, conn, query)
 	duration := time.Since(start)
 	reusablePtr := &reusable
 	if reusable {
@@ -42,7 +77,7 @@ func (d *KdbDatasource) runKdbQuerySync(query *kdb.K, timeout time.Duration, dia
 			transportMs: duration.Milliseconds(),
 		})...)
 	} else {
-		releaseInfo := d.discardSyncConnection(conn)
+		releaseInfo := d.discardClosedSyncConnection(conn)
 		d.logDiagnostics("sync pool connection discarded", appendSyncPoolDiagnosticFields(appendDiagnosticError(diagnosticFields, err), releaseInfo.snapshot, syncPoolDiagnosticOptions{
 			action:      releaseInfo.action,
 			reusable:    reusablePtr,
@@ -59,10 +94,16 @@ func syncPoolAcquireSource(reused bool) string {
 	return "opened"
 }
 
-func runKdbQueryOnConnection(conn *kdb.KDBConn, query *kdb.K, timeout time.Duration) (*kdb.K, bool, error) {
+func runKdbQueryOnConnection(ctx context.Context, conn *kdb.KDBConn, query *kdb.K) (*kdb.K, bool, error) {
 	type queryResult struct {
 		result *kdb.K
 		err    error
+	}
+
+	ctx = normalizeSyncQueryContext(ctx)
+	if err := syncQueryContextError(ctx, "sync query interrupted before transport"); err != nil {
+		_ = conn.Close()
+		return nil, false, err
 	}
 
 	done := make(chan queryResult, 1)
@@ -77,13 +118,18 @@ func runKdbQueryOnConnection(conn *kdb.KDBConn, query *kdb.K, timeout time.Durat
 
 	select {
 	case msg := <-done:
+		if err := syncQueryContextError(ctx, "sync query transport interrupted after response"); err != nil {
+			_ = conn.Close()
+			return nil, false, err
+		}
 		if msg.err != nil {
+			_ = conn.Close()
 			return nil, false, msg.err
 		}
 		return msg.result, true, nil
-	case <-time.After(timeout):
+	case <-ctx.Done():
 		_ = conn.Close()
-		return nil, false, fmt.Errorf("query timed out after %v", timeout)
+		return nil, false, syncQueryContextError(ctx, "sync query transport interrupted")
 	}
 }
 

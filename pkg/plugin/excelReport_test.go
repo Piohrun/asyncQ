@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/data"
+	kdb "github.com/sv/kdbgo"
 	"github.com/xuri/excelize/v2"
 )
 
@@ -282,6 +284,54 @@ func TestExcelReportGenerationRejectsSubmittedRowsOverLimit(t *testing.T) {
 	_, err := ds.generateExcelReport(context.Background(), backend.PluginContext{}, request)
 	if err == nil || !strings.Contains(err.Error(), "exceeds maxRows") {
 		t.Fatalf("expected maxRows error, got %v", err)
+	}
+}
+
+func TestExcelReportBindingPropagatesGenerationCancellation(t *testing.T) {
+	ds := &KdbDatasource{
+		ExcelReports: `{"reports":[{"id":"r1","bindings":[{"id":"A","queryText":"1","sheet":"Data","cell":"A1"}]}]}`,
+	}
+	ds.setupKdbConnectionHandlers()
+	entered := make(chan struct{})
+	observed := make(chan error, 1)
+	ds.RunKdbQuerySync = func(ctx context.Context, _ *kdb.K, _ time.Duration, _ ...interface{}) (*kdb.K, error) {
+		close(entered)
+		<-ctx.Done()
+		observed <- ctx.Err()
+		return nil, ctx.Err()
+	}
+	request := excelReportGenerateRequest{
+		ReportID:  "r1",
+		TimeRange: excelReportTimeRange{From: "2026-05-26T10:00:00Z", To: "2026-05-26T10:01:00Z"},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	outcome := make(chan error, 1)
+	go func() {
+		_, err := ds.generateExcelReport(ctx, backend.PluginContext{}, request)
+		outcome <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("Excel binding did not reach query hook")
+	}
+	cancel()
+	select {
+	case err := <-outcome:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected canceled report generation, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Excel report generation did not return after cancellation")
+	}
+	select {
+	case err := <-observed:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Excel binding hook observed unexpected error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Excel binding hook did not observe generation cancellation")
 	}
 }
 

@@ -199,7 +199,7 @@ type KdbDatasource struct {
 	excelDownloads   map[string]excelReportDownload
 	excelDownloadsMu sync.Mutex
 
-	RunKdbQuerySync func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error)
+	RunKdbQuerySync func(context.Context, *kdb.K, time.Duration, ...interface{}) (*kdb.K, error)
 }
 
 // NewKdbDatasource creates a new datasource instance.
@@ -399,6 +399,7 @@ func (d *KdbDatasource) newConnection() (*kdb.KDBConn, error) {
 }
 
 func (d *KdbDatasource) QueryData(ctx context.Context, req *backend.QueryDataRequest) (*backend.QueryDataResponse, error) {
+	ctx = normalizeSyncQueryContext(ctx)
 	response := backend.NewQueryDataResponse()
 
 	var wg sync.WaitGroup
@@ -417,7 +418,8 @@ func (d *KdbDatasource) QueryData(ctx context.Context, req *backend.QueryDataReq
 	return response, nil
 }
 
-func (d *KdbDatasource) query(_ context.Context, pCtx backend.PluginContext, query backend.DataQuery, requestID string) backend.DataResponse {
+func (d *KdbDatasource) query(ctx context.Context, pCtx backend.PluginContext, query backend.DataQuery, requestID string) backend.DataResponse {
+	ctx = normalizeSyncQueryContext(ctx)
 	var model QueryModel
 	response := backend.DataResponse{}
 	decodeStart := time.Now()
@@ -452,7 +454,7 @@ func (d *KdbDatasource) query(_ context.Context, pCtx backend.PluginContext, que
 	d.logDiagnostics("sync query prepared", fields...)
 
 	cacheStart := time.Now()
-	result, err := d.runSyncQueryWithCache(pCtx, query, model, fields)
+	result, err := d.runSyncQueryWithCache(ctx, pCtx, query, model, fields)
 	if err != nil {
 		result.fields = appendDiagnosticDuration(result.fields, "profileCachePathMs", cacheStart)
 		d.logDiagnosticError(result.errorMessage, appendDiagnosticError(result.fields, err)...)
@@ -769,7 +771,8 @@ func moveTimeColumnToFront(frame *data.Frame, timeColumn string) error {
 	return nil
 }
 
-func (d *KdbDatasource) CheckHealth(_ context.Context, req *backend.CheckHealthRequest) (*backend.CheckHealthResult, error) {
+func (d *KdbDatasource) CheckHealth(ctx context.Context, req *backend.CheckHealthRequest) (*backend.CheckHealthResult, error) {
+	ctx = normalizeSyncQueryContext(ctx)
 	pCtx := backend.PluginContext{}
 	if req != nil {
 		pCtx = req.PluginContext
@@ -800,7 +803,7 @@ func (d *KdbDatasource) CheckHealth(_ context.Context, req *backend.CheckHealthR
 		kdb.NewDict(kdb.SymbolV([]string{"Query", "QueryType"}), kdb.NewList(kdb.Atom(kdb.KC, "1+1"), kdb.Symbol("HEALTHCHECK"))),
 		kdb.Long(int64(d.DialTimeout/time.Millisecond)))
 
-	test, err := d.RunKdbQuerySync(kdb.NewList(kdb.Atom(kdb.KC, "{[x] value x[`Query;`Query]}"), kdb.NewDict(k, v)), d.DialTimeout)
+	test, err := d.RunKdbQuerySync(ctx, kdb.NewList(kdb.Atom(kdb.KC, "{[x] value x[`Query;`Query]}"), kdb.NewDict(k, v)), d.DialTimeout)
 	if err != nil {
 		d.logDiagnosticError("health check failed", appendDiagnosticError(healthFields, err)...)
 		emsg := fmt.Sprintf("Error querying kdb+ process: %v", err)

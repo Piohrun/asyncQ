@@ -629,6 +629,7 @@ func (d *KdbDatasource) validateExcelReportConfiguration() excelReportValidation
 }
 
 func (d *KdbDatasource) generateExcelReport(ctx context.Context, pCtx backend.PluginContext, request excelReportGenerateRequest) (excelReportGenerated, error) {
+	ctx = normalizeSyncQueryContext(ctx)
 	totalStarted := time.Now()
 	catalog, err := d.excelReportCatalog()
 	if err != nil {
@@ -662,7 +663,7 @@ func (d *KdbDatasource) generateExcelReport(ctx context.Context, pCtx backend.Pl
 	queryStarted := time.Now()
 	results := make([]excelReportRunResult, 0, len(report.Bindings))
 	for index, binding := range report.Bindings {
-		if err := ctx.Err(); err != nil {
+		if err := syncQueryContextError(ctx, "excel report generation interrupted"); err != nil {
 			return excelReportGenerated{}, err
 		}
 		var result excelReportRunResult
@@ -670,7 +671,7 @@ func (d *KdbDatasource) generateExcelReport(ctx context.Context, pCtx backend.Pl
 		if strings.TrimSpace(binding.QueryText) == "" {
 			result, err = buildSubmittedExcelReportBinding(binding, request, index)
 		} else {
-			result, err = d.runExcelReportBinding(pCtx, report, binding, request, from, to, index)
+			result, err = d.runExcelReportBinding(ctx, pCtx, report, binding, request, from, to, index)
 		}
 		if err != nil {
 			return excelReportGenerated{}, fmt.Errorf("binding %q failed: %w", excelReportBindingID(binding), err)
@@ -694,7 +695,7 @@ func (d *KdbDatasource) generateExcelReport(ctx context.Context, pCtx backend.Pl
 	workbookWriter := newExcelReportWorkbookWriter(workbook)
 	var writeStats excelReportWriteStats
 	for _, result := range results {
-		if err := ctx.Err(); err != nil {
+		if err := syncQueryContextError(ctx, "excel report generation interrupted"); err != nil {
 			return excelReportGenerated{}, err
 		}
 		stats, err := workbookWriter.writeExcelReportBinding(report, result.Binding, result.Frames)
@@ -811,7 +812,7 @@ func parseExcelReportTime(raw string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("expected RFC3339 timestamp or Unix milliseconds")
 }
 
-func (d *KdbDatasource) runExcelReportBinding(pCtx backend.PluginContext, report excelReportDefinition, binding excelReportBinding, request excelReportGenerateRequest, from time.Time, to time.Time, index int) (excelReportRunResult, error) {
+func (d *KdbDatasource) runExcelReportBinding(ctx context.Context, pCtx backend.PluginContext, report excelReportDefinition, binding excelReportBinding, request excelReportGenerateRequest, from time.Time, to time.Time, index int) (excelReportRunResult, error) {
 	refID := strings.TrimSpace(binding.RefID)
 	if refID == "" {
 		refID = strings.TrimSpace(binding.ID)
@@ -865,7 +866,7 @@ func (d *KdbDatasource) runExcelReportBinding(pCtx backend.PluginContext, report
 	}
 	fields := d.diagnosticQueryFields(pCtx, query, model, fmt.Sprintf("excel-report-%s-%s", report.ID, refID))
 	fields = append(fields, "excelReportID", report.ID, "excelBindingID", binding.ID, "excelSheet", binding.Sheet, "excelCell", binding.Cell)
-	result, err := d.runSyncQueryWithCache(pCtx, query, model, fields)
+	result, err := d.runSyncQueryWithCache(ctx, pCtx, query, model, fields)
 	if err != nil {
 		return excelReportRunResult{}, err
 	}
