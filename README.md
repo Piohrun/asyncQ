@@ -61,6 +61,16 @@ The q side should return status dictionaries with these keys:
 
 When the job reaches `done`, `.grafana.asyncq.async.result` must return a flat table or grouped table accepted by the existing parser.
 
+The bundled reference helper accepts `RequestID`, job IDs, and stream IDs only as non-empty q char vectors composed of printable ASCII graphic characters (`!` through `~`, bytes 33–126) and no longer than `.grafana.asyncq.ID_MAX_CHARS` (128 by default). It rejects missing, non-text, whitespace/control-bearing, or over-limit IDs rather than coercing or truncating them.
+
+When Helper Async uses `panopticonRequestFunction`, the value must be the fully qualified name of a function that is already loaded in q and explicitly allowlisted after its definition:
+
+```q
+.grafana.asyncq.TRUSTED_PANOPTICON_FUNCTIONS:distinct .grafana.asyncq.TRUSTED_PANOPTICON_FUNCTIONS,`.pano.run
+```
+
+Set `panopticonRequestFunction` to `.pano.run`, not to an inline function expression. This allowlist is enforced by the bundled helper's restricted q evaluation path. Sync, Plugin Async, Legacy Async, and custom gateway implementations have their own execution boundaries and must be reviewed according to those paths rather than assumed to share the helper policy.
+
 Helper Async is normally delivered to panels through Grafana Live. The backend also exposes `POST async/run-and-wait` as a datasource resource for MCP clients and migration tooling that need finite async execution without opening a browser Live subscription. It supports `async`, `pluginAsync`, `deferredAsync`, and `legacyAsync`, returning the final frames plus status timeline events. It intentionally rejects `stream`, because streams are open subscriptions rather than finite requests.
 
 ### Plugin Async
@@ -100,7 +110,7 @@ Legacy Async mode is for existing q gateways that already expose server-side asy
 }
 ```
 
-Function settings can be q function names such as `.gw.submit` or lambdas such as `{[req] .gw.submit req}`. Request mode can submit the full request dict, only the Panopticon context dict, original query text, or compiled query text after macro/wrapper expansion. Status values are configurable with comma-separated mappings for queued, running, done, error, and cancelled states. Result functions may return a raw table or an envelope containing the configured payload path. The query `Timeout (ms)` applies to the full legacy async lifecycle, including submit, status polling, result fetch, and best-effort cancel.
+Function settings should name preloaded q functions such as `.gw.submit`. Request mode can submit the full request dict, only the Panopticon context dict, original query text, or compiled query text after macro/wrapper expansion. Status values are configurable with comma-separated mappings for queued, running, done, error, and cancelled states. Result functions may return a raw table or an envelope containing the configured payload path. The query `Timeout (ms)` applies to the full legacy async lifecycle, including submit, status polling, result fetch, and best-effort cancel. Legacy adapters and custom gateways have their own execution boundary; the bundled helper allowlist does not automatically govern them.
 
 ### Stream
 
@@ -170,7 +180,7 @@ If a Panopticon dashboard runs one base datasource query and several panels only
 Two optional Panopticon invocation controls are available at datasource and query level:
 
 - `Pano Wrapper` rewrites the query expression before execution. It must contain exactly one `{Query}` placeholder, for example `.pano.run[{Query};{TimeWindowStart};{TimeWindowEnd}]`.
-- `Pano Fn` is a q function or lambda that accepts the full request dictionary. When set, the backend calls it instead of directly evaluating query text, for example `{[req] .pano.run req}`.
+- `Pano Fn` identifies a preloaded q function that accepts the full request dictionary, for example `.pano.run`. Helper Async requires a fully qualified name that is also present in `.grafana.asyncq.TRUSTED_PANOPTICON_FUNCTIONS`; direct and plugin-managed paths enforce their own execution boundary.
 
 This does not make Grafana a byte-for-byte Panopticon runtime. Grafana variables still need to be created, and panel configuration, callbacks, and client-side Panopticon behavior still need deliberate mapping, but simple function-driven table panels are much closer to copy/paste compatible.
 

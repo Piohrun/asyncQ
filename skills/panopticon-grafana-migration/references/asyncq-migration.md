@@ -29,7 +29,7 @@ AsyncQ can also cache successful sync query results in the datasource instance. 
 | Plain q expression or function call over sync IPC | Direct | `compatibilityMode="panopticon"`, `executionMode="sync"` for validation; tune `syncMaxConnections` per gateway | Highest-confidence copy/paste case when the result shape is supported. Set `syncMaxConnections=1` if the legacy port must serialize requests. |
 | Long-running blocking query over the same q port | Direct | Validate with `sync`, then use `executionMode="pluginAsync"` | Keeps Grafana responsive. It does not make the q gateway itself non-blocking; cancellation is best-effort by closing the plugin-owned IPC connection. |
 | Existing gateway accepts a q expression wrapped in a known call | Config-only | Set `panopticonQueryWrapper` with exactly one `{Query}` | Example: `.gateway.run[{Query};{TimeWindowStart};{TimeWindowEnd}]`. |
-| Existing panel passes a full request object into a q function | Config-only if the function can accept AsyncQ's request dict; otherwise adapter needed | Set `panopticonRequestFunction` | AsyncQ passes a request dictionary with `Query`, `Panopticon`, top-level time aliases, datasource, user, and execution metadata. Proprietary envelopes need mapping. |
+| Existing panel passes a full request object into a q function | Config-only if the function can accept AsyncQ's request dict; otherwise adapter needed | Set `panopticonRequestFunction` to a fully qualified preloaded function name | AsyncQ passes a request dictionary with `Query`, `Panopticon`, top-level time aliases, datasource, user, and execution metadata. Helper Async also requires the name in the q helper allowlist. Proprietary envelopes need mapping. |
 | Panopticon source uses positional function args | Config-only or adapter needed | Prefer query text like `.fn[arg1;arg2]`; use wrapper/request function if args come from time range or variables | Works when args are expressible as q literals after macro/variable expansion. |
 | Multiple panels share one base query/result | Config-only | One AsyncQ source panel or `asyncq-masterdata-panel`, dependent panels use Grafana datasource `-- Dashboard --` and `Use results from panel` | Do not duplicate the same AsyncQ target in each dependent panel; duplicate targets produce repeated kdb+ requests. The companion master-data panel also exposes freshness and cache controls. |
 | Dashboard reopens should use warm server-side results | Config-only if stale data is acceptable | Use datasource `queryCacheEnabled`, `queryCacheDiskEnabled`, `queryCacheTTLSeconds`, optionally set `queryCacheStaleTTLSeconds` and `queryCacheTimeBucketSeconds`, and keep Dashboard datasource sharing for dependent panels | This approximates Panopticon query result cache. Cache only successful sync results and is local to the Grafana server/datasource instance. Disk cache persists across plugin restarts; stale-while-revalidate makes reopen feel instant, but the refreshed result appears on the next Grafana query/refresh unless the panel uses a live path. |
@@ -171,7 +171,7 @@ Feasible without modifying the gateway/RDB:
 - Panopticon-style time macros expanded by the plugin before submission.
 - Shared base-query panels using Grafana's Dashboard datasource to reuse one AsyncQ source panel result.
 - Result parsing for flat tables, keyed tables, primitive dictionaries, atoms, vectors, char vectors, and lists of row dictionaries.
-- Request-dictionary invocation when the existing gateway already accepts a compatible function/lambda call through `panopticonRequestFunction`.
+- Request-dictionary invocation when the existing gateway already accepts a compatible named function call through `panopticonRequestFunction`.
 
 Not automatically feasible without discovering and reproducing the existing client protocol:
 
@@ -314,8 +314,10 @@ When using templates in a work Grafana environment, configure `excelReportTempla
 | q gateway already has AsyncQ helper functions | `executionMode="async"` |
 | q gateway already has non-AsyncQ submit/status/result/cancel functions | `executionMode="legacyAsync"` with configured function names, request mode, response paths, and status mappings |
 | Query must be wrapped before evaluation | Set `panopticonQueryWrapper`, exactly one `{Query}` |
-| Pass-to-function panel | Set `panopticonRequestFunction` to a q function/lambda accepting `req` |
+| Pass-to-function panel | Set `panopticonRequestFunction` to a fully qualified preloaded q function accepting `req`; Helper Async also requires the q helper allowlist |
 | True push stream | Requires AsyncQ streaming helper or a q-side adapter; do not assume Panopticon stream definitions copy directly |
+
+The bundled Helper Async contract accepts `RequestID`, job IDs, and stream IDs only as non-empty q char vectors made from printable ASCII graphic characters (`!` through `~`, bytes 33–126), with a default maximum length of 128. Whitespace, control bytes, non-text values, and over-limit IDs are rejected without coercion or truncation so identifiers remain deterministic and safe to include in diagnostics.
 
 ## Supported Panopticon Parameters
 
@@ -351,7 +353,9 @@ Values are inserted as raw text, mirroring Panopticon-style query substitution. 
 
 ## Request Function Shape
 
-When `panopticonRequestFunction` is set, AsyncQ calls that function with the full request dictionary. Common fields:
+When `panopticonRequestFunction` is set, AsyncQ calls the configured function with the full request dictionary. For `executionMode="async"` through the bundled q helper, the setting must be a fully qualified name of a preloaded function and that symbol must be added to `.grafana.asyncq.TRUSTED_PANOPTICON_FUNCTIONS` after the function is defined. Inline function expressions are rejected by this helper boundary. Sync, Plugin Async, Legacy Async, and custom gateway paths have their own execution boundaries; validate their policy separately rather than assuming the helper allowlist applies.
+
+Common fields:
 
 - `req\`Query` is a dict with `RefID`, `Query`, `OriginalQuery`, `CompiledQuery`, `MaxDataPoints`, `Interval`, `TimeRange`, `PanopticonQueryWrapper`, and `PanopticonRequestFunction`.
 - `req\`Panopticon` is a dict with time aliases, text aliases, interval metadata, `RefID`, `Query`, `OriginalQuery`, and `CompiledQuery`.
@@ -366,6 +370,8 @@ Example:
   / Keep this function pure where possible.
   select from trade where time within (p`TimeWindowStart;p`TimeWindowEnd), sym=`AAPL
   }
+
+.grafana.asyncq.TRUSTED_PANOPTICON_FUNCTIONS:distinct .grafana.asyncq.TRUSTED_PANOPTICON_FUNCTIONS,`.migrate.panel
 ```
 
 Configure:
@@ -373,7 +379,7 @@ Configure:
 ```json
 {
   "compatibilityMode": "panopticon",
-  "executionMode": "pluginAsync",
+  "executionMode": "async",
   "queryText": "1+1",
   "panopticonRequestFunction": ".migrate.panel"
 }

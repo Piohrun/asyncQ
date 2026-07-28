@@ -422,7 +422,7 @@
           "executionMode": "async",
           "includeKeyColumns": false,
           "maxStreamRows": 1000,
-          "panopticonRequestFunction": "{[req] .demo.asyncq.panopticonRequest req}",
+          "panopticonRequestFunction": ".demo.asyncq.panopticonRequest",
           "pollIntervalMs": 500,
           "queryText": "1+1",
           "refId": "A",

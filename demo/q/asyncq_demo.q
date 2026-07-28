@@ -148,6 +148,8 @@ Grafana Live demos.
     ([] timeWindowStart:enlist p`TimeWindowStart; topLevelStart:enlist req`TimeWindowStart; focusTime:enlist req`FocusTime; intervalMs:enlist req`IntervalMs; refId:enlist qd`RefID; originalQuery:enlist qd`OriginalQuery; compiledQuery:enlist qd`CompiledQuery)
   };
 
+.grafana.asyncq.TRUSTED_PANOPTICON_FUNCTIONS:distinct .grafana.asyncq.TRUSTED_PANOPTICON_FUNCTIONS,`.demo.asyncq.panopticonRequest;
+
 .demo.asyncq.compatMatrixDirect:{
     ([] feature:enlist "plain q expression/function call"; verdict:enlist "Direct"; mode:enlist "sync or pluginAsync"; rows:enlist count .demo.asyncq.trade; observedAt:enlist .z.p)
   };
@@ -274,7 +276,7 @@ Grafana Live demos.
 -1 "Try async: .demo.asyncq.slowAgg[]";
 -1 "Try sync pool probe: .demo.asyncq.poolProbe[\"A\";3000]";
 -1 "Try Panopticon-style dict: .demo.asyncq.panopticonSummary[]";
--1 "Try Panopticon request function: {[req] .demo.asyncq.panopticonRequest req}";
+-1 "Try Panopticon request function: .demo.asyncq.panopticonRequest";
 -1 "Try compatibility matrix direct fixture: .demo.asyncq.compatMatrixDirect[]";
 -1 "Try legacy async adapter functions: .demo.legacy.submit/status/result/cancel";
 -1 "Try large report rows: .demo.asyncq.reportRows 10000";
