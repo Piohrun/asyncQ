@@ -916,7 +916,7 @@ func correctedIndex(k *kdb.K, i int) interface{} {
 	if k.Len() == 0 {
 		// need to return null of that type
 		if k.Type == kdb.K0 {
-			return &kdb.K{kdb.K0, kdb.NONE, make([]*kdb.K, 0)}
+			return &kdb.K{Type: kdb.K0, Attr: kdb.NONE, Data: make([]*kdb.K, 0)}
 		}
 		return nil
 
@@ -933,56 +933,56 @@ func correctedIndex(k *kdb.K, i int) interface{} {
 		return nil
 	}
 	var t = k.Data.(kdb.Table)
-	return &kdb.K{kdb.XD, kdb.NONE, correctedTableIndex(t, i)}
+	return &kdb.K{Type: kdb.XD, Attr: kdb.NONE, Data: correctedTableIndex(t, i)}
 }
 
 func indexKdbArray(k *kdb.K, i int) interface{} {
 	switch {
 	case k.Type == kdb.KB:
-		return &kdb.K{-k.Type, kdb.NONE, k.Data.([]bool)[i]}
+		return &kdb.K{Type: -k.Type, Attr: kdb.NONE, Data: k.Data.([]bool)[i]}
 	case k.Type == kdb.UU:
-		return &kdb.K{-k.Type, kdb.NONE, k.Data.([]uuid.UUID)[i]}
+		return &kdb.K{Type: -k.Type, Attr: kdb.NONE, Data: k.Data.([]uuid.UUID)[i]}
 	case k.Type == kdb.KG:
-		return &kdb.K{-k.Type, kdb.NONE, k.Data.([]byte)[i]}
+		return &kdb.K{Type: -k.Type, Attr: kdb.NONE, Data: k.Data.([]byte)[i]}
 	case k.Type == kdb.KH:
-		return &kdb.K{-k.Type, kdb.NONE, k.Data.([]int16)[i]}
+		return &kdb.K{Type: -k.Type, Attr: kdb.NONE, Data: k.Data.([]int16)[i]}
 	case k.Type == kdb.KI:
-		return &kdb.K{-k.Type, kdb.NONE, k.Data.([]int32)[i]}
+		return &kdb.K{Type: -k.Type, Attr: kdb.NONE, Data: k.Data.([]int32)[i]}
 	case k.Type == kdb.KJ:
-		return &kdb.K{-k.Type, kdb.NONE, k.Data.([]int64)[i]}
+		return &kdb.K{Type: -k.Type, Attr: kdb.NONE, Data: k.Data.([]int64)[i]}
 	case k.Type == kdb.KE:
-		return &kdb.K{-k.Type, kdb.NONE, k.Data.([]float32)[i]}
+		return &kdb.K{Type: -k.Type, Attr: kdb.NONE, Data: k.Data.([]float32)[i]}
 	case k.Type == kdb.KF:
-		return &kdb.K{-k.Type, kdb.NONE, k.Data.([]float64)[i]}
+		return &kdb.K{Type: -k.Type, Attr: kdb.NONE, Data: k.Data.([]float64)[i]}
 	case k.Type == kdb.KC:
-		return &kdb.K{-k.Type, kdb.NONE, k.Data.(string)[i]}
+		return &kdb.K{Type: -k.Type, Attr: kdb.NONE, Data: k.Data.(string)[i]}
 	case k.Type == kdb.KS:
-		return &kdb.K{-k.Type, kdb.NONE, k.Data.([]string)[i]}
+		return &kdb.K{Type: -k.Type, Attr: kdb.NONE, Data: k.Data.([]string)[i]}
 	case k.Type == kdb.KP:
-		return &kdb.K{-k.Type, kdb.NONE, k.Data.([]time.Time)[i]}
+		return &kdb.K{Type: -k.Type, Attr: kdb.NONE, Data: k.Data.([]time.Time)[i]}
 	case k.Type == kdb.KM:
-		return &kdb.K{-k.Type, kdb.NONE, k.Data.([]kdb.Month)[i]}
+		return &kdb.K{Type: -k.Type, Attr: kdb.NONE, Data: k.Data.([]kdb.Month)[i]}
 	case k.Type == kdb.KD:
-		return &kdb.K{-k.Type, kdb.NONE, k.Data.([]time.Time)[i]}
+		return &kdb.K{Type: -k.Type, Attr: kdb.NONE, Data: k.Data.([]time.Time)[i]}
 	case k.Type == kdb.KZ:
-		return &kdb.K{-k.Type, kdb.NONE, k.Data.([]time.Time)[i]}
+		return &kdb.K{Type: -k.Type, Attr: kdb.NONE, Data: k.Data.([]time.Time)[i]}
 	case k.Type == kdb.KN:
-		return &kdb.K{-k.Type, kdb.NONE, k.Data.([]time.Duration)[i]}
+		return &kdb.K{Type: -k.Type, Attr: kdb.NONE, Data: k.Data.([]time.Duration)[i]}
 	case k.Type == kdb.KU:
-		return &kdb.K{-k.Type, kdb.NONE, k.Data.([]kdb.Minute)[i]}
+		return &kdb.K{Type: -k.Type, Attr: kdb.NONE, Data: k.Data.([]kdb.Minute)[i]}
 	case k.Type == kdb.KV:
-		return &kdb.K{-k.Type, kdb.NONE, k.Data.([]kdb.Second)[i]}
+		return &kdb.K{Type: -k.Type, Attr: kdb.NONE, Data: k.Data.([]kdb.Second)[i]}
 	case k.Type == kdb.KT:
-		return &kdb.K{-k.Type, kdb.NONE, k.Data.([]kdb.Time)[i]}
+		return &kdb.K{Type: -k.Type, Attr: kdb.NONE, Data: k.Data.([]kdb.Time)[i]}
 	}
 	return nil
 }
 
 func correctedTableIndex(tbl kdb.Table, i int) kdb.Dict {
 	var d = kdb.Dict{}
-	d.Key = &kdb.K{kdb.KS, kdb.NONE, tbl.Columns}
+	d.Key = &kdb.K{Type: kdb.KS, Attr: kdb.NONE, Data: tbl.Columns}
 	vslice := make([]*kdb.K, len(tbl.Columns))
-	d.Value = &kdb.K{kdb.K0, kdb.NONE, vslice}
+	d.Value = &kdb.K{Type: kdb.K0, Attr: kdb.NONE, Data: vslice}
 	for ci := range tbl.Columns {
 		kd := correctedIndex(tbl.Data[ci], i)
 		vslice[ci] = kd.(*kdb.K)

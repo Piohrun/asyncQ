@@ -24,7 +24,7 @@ func TestPanopticonCompatibilityReturnFixtures(t *testing.T) {
 					kdb.Atom(kdb.KP, []time.Time{now, now.Add(time.Second)}),
 					kdb.SymbolV([]string{"AAPL", "MSFT"}),
 					kdb.FloatV([]float64{189.5, 421.25}),
-					&kdb.K{kdb.KB, kdb.NONE, []bool{true, false}},
+					&kdb.K{Type: kdb.KB, Attr: kdb.NONE, Data: []bool{true, false}},
 				},
 			),
 			wantFields: []string{"time", "sym", "price", "active"},
