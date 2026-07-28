@@ -88,7 +88,7 @@ func buildDashboard(f *excelize.File) {
 				Values:     "Summary!$B$2:$B$20",
 			},
 		},
-		Title: []excelize.RichTextRun{{Text: "Last Price by Symbol"}},
+		Title: excelize.ChartTitle{Paragraph: []excelize.RichTextRun{{Text: "Last Price by Symbol"}}},
 		Legend: excelize.ChartLegend{
 			Position: "bottom",
 		},
@@ -103,7 +103,7 @@ func buildDashboard(f *excelize.File) {
 				Values:     "Trades!$C$2:$C$51",
 			},
 		},
-		Title: []excelize.RichTextRun{{Text: "Latest Trade Prices"}},
+		Title: excelize.ChartTitle{Paragraph: []excelize.RichTextRun{{Text: "Latest Trade Prices"}}},
 		Legend: excelize.ChartLegend{
 			Position: "bottom",
 		},
