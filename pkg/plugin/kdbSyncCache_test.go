@@ -3,6 +3,7 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -373,44 +374,159 @@ func TestQueryDataCacheReturnsClonedFrames(t *testing.T) {
 
 func TestQueryDataCacheCoalescesConcurrentMisses(t *testing.T) {
 	ds := cachedTestDatasource()
+	ds.QueryCacheKeyMode = QueryCacheKeyModeShared
 	var calls int32
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
 	ds.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
 		atomic.AddInt32(&calls, 1)
-		entered <- struct{}{}
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
 		<-release
 		return kdb.Long(1), nil
 	}
 
-	query := cacheTestRequest(t, "A", "1", time.Time{}, time.Time{}).Queries[0]
+	queryA, model := preparedCacheTestQuery(t, ds, "A", "1")
+	queryB := queryA
+	queryB.RefID = "B"
+	const callers = 24
+	type outcome struct {
+		result syncQueryResult
+		refID  string
+		err    error
+	}
 	var wg sync.WaitGroup
-	errs := make(chan error, 2)
-	for i := 0; i < 2; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			res := ds.query(context.Background(), backend.PluginContext{}, query, "request")
-			errs <- res.Error
-		}()
+	waitersReady := sync.WaitGroup{}
+	waitersReady.Add(callers - 1)
+	outcomes := make(chan outcome, callers)
+	run := func(index int, ready *sync.WaitGroup) {
+		defer wg.Done()
+		if ready != nil {
+			ready.Done()
+		}
+		query := queryA
+		if index%2 != 0 {
+			query = queryB
+		}
+		fields := make([]interface{}, 0, 512)
+		fields = append(fields, "caller", index)
+		result, err := ds.runSyncQueryWithCache(backend.PluginContext{}, query, model, fields)
+		outcomes <- outcome{result: result, refID: query.RefID, err: err}
 	}
 
+	wg.Add(1)
+	go run(0, nil)
 	select {
 	case <-entered:
 	case <-time.After(time.Second):
 		t.Fatal("first kdb call did not start")
 	}
+
+	for i := 1; i < callers; i++ {
+		wg.Add(1)
+		go run(i, &waitersReady)
+	}
+	waitersReady.Wait()
+	time.Sleep(25 * time.Millisecond)
 	close(release)
 	wg.Wait()
-	close(errs)
-	for err := range errs {
-		if err != nil {
-			t.Fatalf("query returned error: %v", err)
+	close(outcomes)
+
+	results := make([]syncQueryResult, 0, callers)
+	for outcome := range outcomes {
+		if outcome.err != nil {
+			t.Fatalf("query returned error: %v", outcome.err)
 		}
+		if len(outcome.result.frames) != 1 {
+			t.Fatalf("expected one result frame, got %d", len(outcome.result.frames))
+		}
+		if got := outcome.result.frames[0].RefID; got != outcome.refID {
+			t.Fatalf("expected frame refID %q, got %q", outcome.refID, got)
+		}
+		diagnostics := diagnosticFieldMap(outcome.result.fields)
+		if diagnostics["queryCacheShared"] != true {
+			t.Fatalf("expected coalesced query diagnostics, got %#v", diagnostics)
+		}
+		results = append(results, outcome.result)
 	}
 	if calls != 1 {
 		t.Fatalf("expected concurrent cache miss to coalesce to one kdb call, got %d", calls)
 	}
+	assertDiagnosticFieldsIndependent(t, results)
+}
+
+func TestQueryDataCacheCoalescesConcurrentErrors(t *testing.T) {
+	ds := cachedTestDatasource()
+	var calls int32
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	wantErr := errors.New("test kdb failure")
+	ds.RunKdbQuerySync = func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error) {
+		atomic.AddInt32(&calls, 1)
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-release
+		return nil, wantErr
+	}
+
+	query, model := preparedCacheTestQuery(t, ds, "A", "1")
+	const callers = 24
+	type outcome struct {
+		result syncQueryResult
+		err    error
+	}
+	var wg sync.WaitGroup
+	waitersReady := sync.WaitGroup{}
+	waitersReady.Add(callers - 1)
+	outcomes := make(chan outcome, callers)
+	run := func(index int, ready *sync.WaitGroup) {
+		defer wg.Done()
+		if ready != nil {
+			ready.Done()
+		}
+		fields := make([]interface{}, 0, 512)
+		fields = append(fields, "caller", index)
+		result, err := ds.runSyncQueryWithCache(backend.PluginContext{}, query, model, fields)
+		outcomes <- outcome{result: result, err: err}
+	}
+
+	wg.Add(1)
+	go run(0, nil)
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("first kdb call did not start")
+	}
+
+	for i := 1; i < callers; i++ {
+		wg.Add(1)
+		go run(i, &waitersReady)
+	}
+	waitersReady.Wait()
+	time.Sleep(25 * time.Millisecond)
+	close(release)
+	wg.Wait()
+	close(outcomes)
+
+	results := make([]syncQueryResult, 0, callers)
+	for outcome := range outcomes {
+		if !errors.Is(outcome.err, wantErr) {
+			t.Fatalf("expected %v, got %v", wantErr, outcome.err)
+		}
+		diagnostics := diagnosticFieldMap(outcome.result.fields)
+		if _, ok := diagnostics["profileCacheSingleflightMs"]; !ok {
+			t.Fatalf("expected singleflight timing diagnostic, got %#v", diagnostics)
+		}
+		results = append(results, outcome.result)
+	}
+	if calls != 1 {
+		t.Fatalf("expected concurrent cache error to coalesce to one kdb call, got %d", calls)
+	}
+	assertDiagnosticFieldsIndependent(t, results)
 }
 
 func TestQueryDataDiskCachePersistsAcrossDatasourceInstances(t *testing.T) {
@@ -654,6 +770,51 @@ func asyncQDiagnosticsFromFrame(t *testing.T, frame *data.Frame) map[string]inte
 		t.Fatalf("expected %s map, got %#v", asyncQDiagnosticsMetaKey, custom[asyncQDiagnosticsMetaKey])
 	}
 	return diagnostics
+}
+
+func preparedCacheTestQuery(t *testing.T, ds *KdbDatasource, refID string, queryText string) (backend.DataQuery, QueryModel) {
+	t.Helper()
+	query := cacheTestRequest(t, refID, queryText, time.Time{}, time.Time{}).Queries[0]
+	var model QueryModel
+	if err := json.Unmarshal(query.JSON, &model); err != nil {
+		t.Fatalf("failed to decode cache test query: %v", err)
+	}
+	ds.normalizeQueryModel(&model)
+	if err := prepareQueryForExecution(backend.PluginContext{}, query, &model); err != nil {
+		t.Fatalf("failed to prepare cache test query: %v", err)
+	}
+	return query, model
+}
+
+func diagnosticFieldMap(fields []interface{}) map[string]interface{} {
+	diagnostics := make(map[string]interface{}, len(fields)/2)
+	for i := 0; i+1 < len(fields); i += 2 {
+		key, ok := fields[i].(string)
+		if ok {
+			diagnostics[key] = fields[i+1]
+		}
+	}
+	return diagnostics
+}
+
+func assertDiagnosticFieldsIndependent(t *testing.T, results []syncQueryResult) {
+	t.Helper()
+	if len(results) < 2 {
+		t.Fatalf("expected at least two results, got %d", len(results))
+	}
+	for i, result := range results {
+		if len(result.fields) < 2 || result.fields[0] != "caller" {
+			t.Fatalf("result %d does not contain the caller diagnostic: %#v", i, result.fields)
+		}
+	}
+
+	marker := &struct{}{}
+	results[0].fields[1] = marker
+	for i := 1; i < len(results); i++ {
+		if results[i].fields[1] == marker {
+			t.Fatalf("result %d shares diagnostic field storage with result 0", i)
+		}
+	}
 }
 
 func cacheTestRequest(t *testing.T, refID string, queryText string, from time.Time, to time.Time) *backend.QueryDataRequest {

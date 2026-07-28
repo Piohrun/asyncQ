@@ -274,6 +274,7 @@ func (d *KdbDatasource) runSyncQueryWithCache(pCtx backend.PluginContext, query 
 	singleflightMs := diagnosticDurationMs(time.Since(singleflightStart))
 	if err != nil {
 		if result, ok := value.(syncQueryResult); ok {
+			result.fields = cloneDiagnosticFields(result.fields)
 			result.fields = append(result.fields, "profileCacheSingleflightMs", singleflightMs)
 			return result, err
 		}
@@ -299,9 +300,9 @@ func (d *KdbDatasource) runSyncQueryWithCache(pCtx backend.PluginContext, query 
 		d.logDiagnostics("sync query cache "+status, cacheFields...)
 		return syncQueryResult{frames: frames, fields: cacheFields}, nil
 	case syncQueryResult:
+		result.fields = cloneDiagnosticFields(result.fields)
 		result.fields = append(result.fields, "profileCacheSingleflightMs", singleflightMs)
 		if shared {
-			result.fields = cloneDiagnosticFields(result.fields)
 			result.fields = append(result.fields, "queryCacheShared", true)
 			result.frames = cloneFramesForRefID(result.frames, query.RefID, query.RefID)
 		}
@@ -340,14 +341,16 @@ func (d *KdbDatasource) refreshSyncQueryCache(cache *syncQueryCache, diskCache *
 		})
 		if err != nil {
 			if result, ok := value.(syncQueryResult); ok {
-				d.logDiagnosticError("sync query cache refresh failed", appendDiagnosticError(result.fields, err)...)
+				fields := cloneDiagnosticFields(result.fields)
+				d.logDiagnosticError("sync query cache refresh failed", appendDiagnosticError(fields, err)...)
 				return
 			}
 			d.logDiagnosticError("sync query cache refresh failed", appendDiagnosticError(appendSyncQueryCacheDiagnosticFields(refreshFields, policy, "refresh", "none", cacheKey, 0, false, false, false), err)...)
 			return
 		}
 		if result, ok := value.(syncQueryResult); ok {
-			d.logDiagnostics("sync query cache refreshed", appendDiagnosticFrames(result.fields, result.frames)...)
+			fields := cloneDiagnosticFields(result.fields)
+			d.logDiagnostics("sync query cache refreshed", appendDiagnosticFrames(fields, result.frames)...)
 		}
 	}()
 	return true
