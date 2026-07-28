@@ -2,32 +2,14 @@ package plugin
 
 import (
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
-	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
 	kdb "github.com/sv/kdbgo"
 )
 
-const kdbEOF = "Failed to read message header:"
-
-// wrappers for correct run-time evaluation of KdbHandle pointer and to enable unit testing
-func (d *KdbDatasource) writeMessage(msgtype kdb.ReqType, obj *kdb.K) error {
-	return d.KdbHandle.WriteMessage(msgtype, obj)
-}
-
-func (d *KdbDatasource) readMessage() (*kdb.K, kdb.ReqType, error) {
-	return d.KdbHandle.ReadMessage()
-}
-
-// support maximum queue of 100 000 per handle
-func (d *KdbDatasource) getKdbSyncQueryId() uint32 {
-	if d.kdbSyncQueryCounter > 100000 {
-		d.kdbSyncQueryCounter = 0
-	}
-	d.kdbSyncQueryCounter += 1
-	return d.kdbSyncQueryCounter
+func (d *KdbDatasource) setupKdbConnectionHandlers() {
+	d.RunKdbQuerySync = d.runKdbQuerySync
 }
 
 func (d *KdbDatasource) runKdbQuerySync(query *kdb.K, timeout time.Duration, diagnosticFields ...interface{}) (*kdb.K, error) {
@@ -78,14 +60,19 @@ func syncPoolAcquireSource(reused bool) string {
 }
 
 func runKdbQueryOnConnection(conn *kdb.KDBConn, query *kdb.K, timeout time.Duration) (*kdb.K, bool, error) {
-	done := make(chan *kdbRawRead, 1)
+	type queryResult struct {
+		result *kdb.K
+		err    error
+	}
+
+	done := make(chan queryResult, 1)
 	go func() {
 		if err := conn.WriteMessage(kdb.SYNC, query); err != nil {
-			done <- &kdbRawRead{err: err}
+			done <- queryResult{err: err}
 			return
 		}
-		result, msgType, err := conn.ReadMessage()
-		done <- &kdbRawRead{result: result, msgType: msgType, err: err}
+		result, _, err := conn.ReadMessage()
+		done <- queryResult{result: result, err: err}
 	}()
 
 	select {
@@ -97,90 +84,6 @@ func runKdbQueryOnConnection(conn *kdb.KDBConn, query *kdb.K, timeout time.Durat
 	case <-time.After(timeout):
 		_ = conn.Close()
 		return nil, false, fmt.Errorf("query timed out after %v", timeout)
-	}
-}
-
-func (d *KdbDatasource) syncQueryRunner() {
-	log.DefaultLogger.Info("Beginning synchronous query listener")
-	var err error
-	// Open the kdb Handle
-	err = d.OpenConnection()
-	if err != nil {
-		log.DefaultLogger.Error(fmt.Sprintf("Error opening handle to kdb+ process when creating datasource: %v", err))
-	}
-	for {
-		select {
-		case signal, ok := <-d.signals:
-			if !ok || signal == 3 {
-				log.DefaultLogger.Info("Returning from query runner")
-				return
-			}
-		case query, ok := <-d.syncQueue:
-			if !ok {
-				log.DefaultLogger.Info("Sync query channel closed, returning from query runner")
-				return
-			}
-			if query == nil {
-				continue
-			}
-			// If handle isn't open, attempt to open
-			if !d.IsOpen {
-				log.DefaultLogger.Info("Handle not open, opening new handle...")
-				err = d.OpenConnection()
-				// Return error if unable to open handle
-				if err != nil {
-					log.DefaultLogger.Info(fmt.Sprintf("Unable to open handle on-demand in syncQueryRunner: %v", err))
-					d.syncResChan <- &kdbSyncRes{result: nil, err: err, id: query.id}
-					continue
-				}
-			}
-			// If handle is open, query the kdb+ process
-			err = d.WriteConnection(kdb.SYNC, query.query)
-			if err != nil {
-				log.DefaultLogger.Error("Error writing message", err.Error())
-				d.syncResChan <- &kdbSyncRes{result: nil, err: err, id: query.id}
-				continue
-			}
-
-			select {
-			case msg, ok := <-d.rawReadChan:
-				if !ok {
-					d.syncResChan <- &kdbSyncRes{result: nil, err: fmt.Errorf("kdb raw read channel closed"), id: query.id}
-					continue
-				}
-				d.syncResChan <- &kdbSyncRes{result: msg.result, err: msg.err, id: query.id}
-				if msg.err != nil && strings.Contains(msg.err.Error(), kdbEOF) {
-					log.DefaultLogger.Info("Closing rawReadChan within syncQueryRunner")
-					d.CloseConnection()
-				}
-			case <-time.After(query.timeout):
-				d.syncResChan <- &kdbSyncRes{result: nil, err: fmt.Errorf("Queried timed out after %v", query.timeout), id: query.id}
-				d.CloseConnection()
-			}
-		}
-	}
-}
-
-func (d *KdbDatasource) kdbHandleListener() {
-	for {
-		if !d.IsOpen {
-			log.DefaultLogger.Info("Handle not open, kdbHandleListener returning...")
-			return
-		}
-		res, msgType, err := d.ReadConnection()
-		if err != nil {
-			log.DefaultLogger.Info(err.Error())
-			if strings.Contains(err.Error(), kdbEOF) {
-				log.DefaultLogger.Info("Handle read error, publishing error and returning from kdbHandleListener")
-				if d.IsOpen {
-					log.DefaultLogger.Info("d.IsOpen inside kdbHandleListener, publishing read error to kdbRawRead channel")
-					d.IsOpen = false
-					d.rawReadChan <- &kdbRawRead{result: res, msgType: msgType, err: err}
-				}
-				return
-			}
-		}
-		d.rawReadChan <- &kdbRawRead{result: res, msgType: msgType, err: err}
 	}
 }
 

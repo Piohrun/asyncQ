@@ -115,24 +115,6 @@ type QueryModel struct {
 	OriginalQueryText           string `json:"-"`
 }
 
-type kdbSyncQuery struct {
-	query   *kdb.K
-	id      uint32
-	timeout time.Duration
-}
-
-type kdbRawRead struct {
-	result  *kdb.K
-	msgType kdb.ReqType
-	err     error
-}
-
-type kdbSyncRes struct {
-	result *kdb.K
-	err    error
-	id     uint32
-}
-
 type KdbDatasource struct {
 	Host                        string `json:"host"`
 	Port                        int    `json:"port"`
@@ -203,7 +185,6 @@ type KdbDatasource struct {
 	CaCert           string
 	TlsServerConfig  *tls.Config
 	DialTimeout      time.Duration
-	KdbHandle        *kdb.KDBConn
 	asyncJobs        chan struct{}
 	syncPool         chan *kdb.KDBConn
 	syncPoolSlots    chan struct{}
@@ -218,19 +199,7 @@ type KdbDatasource struct {
 	excelDownloads   map[string]excelReportDownload
 	excelDownloadsMu sync.Mutex
 
-	signals             chan int
-	syncQueue           chan *kdbSyncQuery
-	rawReadChan         chan *kdbRawRead
-	syncResChan         chan *kdbSyncRes
-	kdbSyncQueryCounter uint32
-	IsOpen              bool
-
-	KdbHandleListener func()
-	RunKdbQuerySync   func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error)
-	OpenConnection    func() error
-	CloseConnection   func() error
-	WriteConnection   func(kdb.ReqType, *kdb.K) error
-	ReadConnection    func() (*kdb.K, kdb.ReqType, error)
+	RunKdbQuerySync func(*kdb.K, time.Duration, ...interface{}) (*kdb.K, error)
 }
 
 // NewKdbDatasource creates a new datasource instance.
@@ -322,17 +291,7 @@ func NewKdbDatasource(_ context.Context, settings backend.DataSourceInstanceSett
 	}
 	client.DialTimeout = timeOutDuration
 	client.setupKdbConnectionHandlers()
-	client.IsOpen = false
 	client.normalizeDatasourceDefaults()
-
-	log.DefaultLogger.Info("Making synchronous query channel")
-	client.syncQueue = make(chan *kdbSyncQuery)
-
-	log.DefaultLogger.Info("Making synchronous response channel")
-	client.syncResChan = make(chan *kdbSyncRes)
-
-	log.DefaultLogger.Info("Making signals channel")
-	client.signals = make(chan int)
 
 	log.DefaultLogger.Info("KDB Datasource created successfully", "syncMaxConnections", client.SyncMaxConnections, "asyncMaxJobs", client.AsyncMaxJobs)
 	return &client, nil
@@ -411,37 +370,7 @@ func (d *KdbDatasource) Dispose() {
 	log.DefaultLogger.Info("Dispose called")
 	d.closeSyncPool()
 	d.closeSyncQueryCache()
-	if d.IsOpen {
-		log.DefaultLogger.Info("Handle open when dispose called, closing handle")
-		if err := d.CloseConnection(); err != nil {
-			log.DefaultLogger.Error("Error closing KDB connection", "error", err)
-		}
-	}
-	safeCloseIntChan(d.signals)
-	safeCloseSyncQueryChan(d.syncQueue)
-	safeCloseSyncResChan(d.syncResChan)
 	safeCloseStructChan(d.asyncJobs)
-}
-
-func safeCloseIntChan(ch chan int) {
-	defer func() { _ = recover() }()
-	if ch != nil {
-		close(ch)
-	}
-}
-
-func safeCloseSyncQueryChan(ch chan *kdbSyncQuery) {
-	defer func() { _ = recover() }()
-	if ch != nil {
-		close(ch)
-	}
-}
-
-func safeCloseSyncResChan(ch chan *kdbSyncRes) {
-	defer func() { _ = recover() }()
-	if ch != nil {
-		close(ch)
-	}
 }
 
 func safeCloseStructChan(ch chan struct{}) {
@@ -467,37 +396,6 @@ func (d *KdbDatasource) newConnection() (*kdb.KDBConn, error) {
 	}
 	log.DefaultLogger.Info("Dialled kdb+ successfully", "host", d.Host, "port", d.Port)
 	return conn, nil
-}
-
-func (d *KdbDatasource) openConnection() error {
-	conn, err := d.newConnection()
-	if err != nil {
-		d.KdbHandle = nil
-		return err
-	}
-	d.KdbHandle = conn
-	d.IsOpen = true
-
-	log.DefaultLogger.Info("Making raw response channel")
-	d.rawReadChan = make(chan *kdbRawRead, 16)
-
-	log.DefaultLogger.Info("Beginning handle listener")
-	go d.KdbHandleListener()
-	return nil
-}
-
-func (d *KdbDatasource) closeConnection() error {
-	if !d.IsOpen {
-		log.DefaultLogger.Info("Connection already closed", "host", d.Host, "port", d.Port)
-		return nil
-	}
-	log.DefaultLogger.Info("Closing connection", "host", d.Host, "port", d.Port)
-	err := d.KdbHandle.Close()
-	if err != nil {
-		log.DefaultLogger.Error("Error closing handle", "host", d.Host, "port", d.Port, "error", err)
-	}
-	d.IsOpen = false
-	return err
 }
 
 func (d *KdbDatasource) QueryData(ctx context.Context, req *backend.QueryDataRequest) (*backend.QueryDataResponse, error) {
