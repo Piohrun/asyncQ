@@ -20,6 +20,14 @@ Grafana Live demos.
 .demo.asyncq.REPORTBASE:.z.p-0D01:00:00.000000000;
 .demo.asyncq.MAXROWS:5000;
 .demo.asyncq.JOBDELAY:0D00:00:03.000000000;
+.demo.asyncq.JOB_RETENTION:0D01:00:00.000000000;
+.demo.asyncq.MAX_RETAINED_JOBS:1000;
+.demo.asyncq.MAX_COMPLETIONS_PER_TICK:16;
+/ Mutable demo settings are constrained by conservative hard ceilings in validateJobConfig.
+.demo.asyncq.LIVE_JOB_STATUSES:("queued";"running");
+.demo.asyncq.TERMINAL_JOB_STATUSES:("done";"error";"cancelled");
+.demo.asyncq.JOB_COLUMNS:`jobId`status`progress`query`request`result`error`message`errorClass`stackTrace`submitted`due`finished`worker`resultType;
+.demo.asyncq.JOB_COLUMN_TYPES:0 0 9 0 0 0 0 0 0 0 12 12 12 0 0h;
 .demo.asyncq.JOBS:([] jobId:(); status:(); progress:`float$(); query:(); request:(); result:(); error:(); message:(); errorClass:(); stackTrace:(); submitted:`timestamp$(); due:`timestamp$(); finished:`timestamp$(); worker:(); resultType:());
 
 .demo.asyncq.text:{[cell]
@@ -38,12 +46,153 @@ Grafana Live demos.
     where .demo.asyncq.matchText[jobId;] each .demo.asyncq.JOBS`jobId
   };
 
+.demo.asyncq.validateJobConfig:{
+    if[not ("queued";"running")~.demo.asyncq.LIVE_JOB_STATUSES; '"demo LIVE_JOB_STATUSES invariant mismatch"];
+    if[not ("done";"error";"cancelled")~.demo.asyncq.TERMINAL_JOB_STATUSES; '"demo TERMINAL_JOB_STATUSES invariant mismatch"];
+    if[-16h<>type .demo.asyncq.JOBDELAY; '"demo JOBDELAY must be a non-negative timespan atom"];
+    if[0D00:00:00.000000000>.demo.asyncq.JOBDELAY; '"demo JOBDELAY must be a non-negative timespan atom"];
+    if[1D00:00:00.000000000<.demo.asyncq.JOBDELAY; '"demo JOBDELAY exceeds the one-day hard ceiling"];
+    if[-16h<>type .demo.asyncq.JOB_RETENTION; '"demo JOB_RETENTION must be a non-negative timespan atom"];
+    if[0D00:00:00.000000000>.demo.asyncq.JOB_RETENTION; '"demo JOB_RETENTION must be a non-negative timespan atom"];
+    if[30D00:00:00.000000000<.demo.asyncq.JOB_RETENTION; '"demo JOB_RETENTION exceeds the 30-day hard ceiling"];
+    if[not .grafana.asyncq.util.integerAtom .demo.asyncq.MAX_RETAINED_JOBS; '"demo MAX_RETAINED_JOBS must be a positive integer atom"];
+    if[1>.demo.asyncq.MAX_RETAINED_JOBS; '"demo MAX_RETAINED_JOBS must be a positive integer atom"];
+    if[10000<.demo.asyncq.MAX_RETAINED_JOBS; '"demo MAX_RETAINED_JOBS exceeds the 10000-job hard ceiling"];
+    if[not .grafana.asyncq.util.integerAtom .demo.asyncq.MAX_COMPLETIONS_PER_TICK; '"demo MAX_COMPLETIONS_PER_TICK must be a positive integer atom"];
+    if[1>.demo.asyncq.MAX_COMPLETIONS_PER_TICK; '"demo MAX_COMPLETIONS_PER_TICK must be a positive integer atom"];
+    if[256<.demo.asyncq.MAX_COMPLETIONS_PER_TICK; '"demo MAX_COMPLETIONS_PER_TICK exceeds the 256-job hard ceiling"];
+    (::)
+  };
+
+.demo.asyncq.validateJobSchema:{
+    expectedColumns:`jobId`status`progress`query`request`result`error`message`errorClass`stackTrace`submitted`due`finished`worker`resultType;
+    expectedTypes:0 0 9 0 0 0 0 0 0 0 12 12 12 0 0h;
+    if[not expectedColumns~.demo.asyncq.JOB_COLUMNS; '"demo JOB_COLUMNS invariant mismatch"];
+    if[not expectedTypes~.demo.asyncq.JOB_COLUMN_TYPES; '"demo JOB_COLUMN_TYPES invariant mismatch"];
+    if[98h<>type .demo.asyncq.JOBS; '"demo JOBS must be an unkeyed table"];
+    if[not .demo.asyncq.JOB_COLUMNS~cols .demo.asyncq.JOBS; '"demo JOBS schema mismatch"];
+    if[10000<count .demo.asyncq.JOBS; '"demo JOBS exceeds the 10000-row hard ceiling"];
+    columnTypes:type each value flip .demo.asyncq.JOBS;
+    if[not .demo.asyncq.JOB_COLUMN_TYPES~columnTypes; '"demo JOBS column types mismatch"];
+    (::)
+  };
+
+.demo.asyncq.allCharVectors:{[values]
+    all 10h=type each values
+  };
+
+.demo.asyncq.validateJobRows:{
+    jobs:.demo.asyncq.JOBS;
+    if[0=count jobs; :(::)];
+    ids:jobs`jobId;
+    .grafana.asyncq.util.normalizeJobId each ids;
+    duplicateRows:where (til count ids)<>ids?ids;
+    if[count duplicateRows; '"duplicate retained job id: ",ids first duplicateRows];
+
+    statuses:jobs`status;
+    if[not .demo.asyncq.allCharVectors statuses; '"demo JOBS status values must be char vectors"];
+    if[not all statuses in (.demo.asyncq.LIVE_JOB_STATUSES,.demo.asyncq.TERMINAL_JOB_STATUSES); '"demo JOBS contains an invalid status"];
+    if[not .demo.asyncq.allCharVectors jobs`error; '"demo JOBS error values must be char vectors"];
+    if[not .demo.asyncq.allCharVectors jobs`message; '"demo JOBS message values must be char vectors"];
+    if[not .demo.asyncq.allCharVectors jobs`errorClass; '"demo JOBS errorClass values must be char vectors"];
+    if[not .demo.asyncq.allCharVectors jobs`stackTrace; '"demo JOBS stackTrace values must be char vectors"];
+    if[not .demo.asyncq.allCharVectors jobs`worker; '"demo JOBS worker values must be char vectors"];
+    if[not .demo.asyncq.allCharVectors jobs`resultType; '"demo JOBS resultType values must be char vectors"];
+
+    queryTypes:type each jobs`query;
+    requestTypes:type each jobs`request;
+    validQueries:(10h=queryTypes)|{(::)~x} each jobs`query;
+    validRequests:(99h=requestTypes)|{(::)~x} each jobs`request;
+    if[not all validQueries; '"demo JOBS query values must be char vectors or generic null"];
+    if[not all validRequests; '"demo JOBS request values must be dictionaries or generic null"];
+    if[not all 1=count each jobs`result; '"demo JOBS result cells must contain one wrapped payload"];
+
+    terminalMask:statuses in .demo.asyncq.TERMINAL_JOB_STATUSES;
+    liveMask:not terminalMask;
+    if[any liveMask & 10h<>queryTypes; '"live demo jobs must retain a char-vector query"];
+    if[any liveMask & 99h<>requestTypes; '"live demo jobs must retain a request dictionary"];
+    if[any null jobs`submitted; '"demo JOBS submitted timestamps must not be null"];
+    if[any null jobs`due; '"demo JOBS due timestamps must not be null"];
+    if[any terminalMask & null jobs`finished; '"terminal demo jobs must have a finished timestamp"];
+    if[any liveMask & not null jobs`finished; '"live demo jobs must not have a finished timestamp"];
+    progressValues:jobs`progress;
+    if[any null progressValues; '"demo JOBS progress values must not be null"];
+    invalidProgress:(0f>progressValues)|(progressValues>1f);
+    if[any invalidProgress; '"demo JOBS progress values must be between 0 and 1"];
+    (::)
+  };
+
+.demo.asyncq.validateJobs:{
+    .demo.asyncq.validateJobConfig[];
+    .demo.asyncq.validateJobSchema[];
+    .demo.asyncq.validateJobRows[];
+    (::)
+  };
+
+.demo.asyncq.requireSingleJobRow:{[jobId;rows]
+    if[1<count rows; '"duplicate retained job id: ",jobId];
+    if[0=count rows; '"job not found"];
+    first select from .demo.asyncq.JOBS where i=first rows
+  };
+
+.demo.asyncq.validateSubmitRequest:{[req]
+    if[99h<>type req; '"demo async submit request must be a dictionary"];
+    jobId:.grafana.asyncq.util.normalizeJobId .grafana.asyncq.util.get[req;`RequestID;""];
+    queryDict:.grafana.asyncq.util.get[req;`Query;(::)];
+    if[99h<>type queryDict; '"demo async request Query must be a dictionary"];
+    query:.grafana.asyncq.util.get[queryDict;`Query;(::)];
+    if[10h<>type query; '"demo async request Query.Query must be a char vector"];
+    functionName:.grafana.asyncq.util.get[queryDict;`PanopticonRequestFunction;""];
+    if[not ""~functionName; .grafana.asyncq.util.resolvePanopticonFunction functionName];
+    `JobID`Query!(jobId;query)
+  };
+
+.demo.asyncq.cleanupJobs:{[reserve]
+    if[not .grafana.asyncq.util.integerAtom reserve; '"demo job cleanup reserve must be a non-negative integer atom"];
+    if[0>reserve; '"demo job cleanup reserve must be a non-negative integer atom"];
+    .demo.asyncq.validateJobs[];
+    limit:.demo.asyncq.MAX_RETAINED_JOBS;
+    if[limit<reserve; '"demo job capacity is smaller than the requested reservation"];
+
+    terminalMask:(.demo.asyncq.JOBS`status) in .demo.asyncq.TERMINAL_JOB_STATUSES;
+    terminalRows:where terminalMask;
+    if[count terminalRows;
+      .demo.asyncq.JOBS::update query:(::), request:(::) from .demo.asyncq.JOBS where i in terminalRows];
+
+    now:.z.p;
+    cutoff:now-.demo.asyncq.JOB_RETENTION;
+    if[(null cutoff)|cutoff>now; '"demo JOB_RETENTION overflows timestamp arithmetic"];
+    expiredRows:where terminalMask & (.demo.asyncq.JOBS`finished)<cutoff;
+    if[count expiredRows;
+      .demo.asyncq.JOBS::delete from .demo.asyncq.JOBS where i in expiredRows];
+
+    target:limit-reserve;
+    excess:(count .demo.asyncq.JOBS)-target;
+    if[0>=excess; :(::)];
+
+    terminalMask:(.demo.asyncq.JOBS`status) in .demo.asyncq.TERMINAL_JOB_STATUSES;
+    terminalRows:where terminalMask;
+    orderedRows:terminalRows iasc (.demo.asyncq.JOBS`finished) terminalRows;
+    evictCount:excess&count orderedRows;
+    evictRows:evictCount#orderedRows;
+    if[count evictRows;
+      .demo.asyncq.JOBS::delete from .demo.asyncq.JOBS where i in evictRows];
+    if[excess>evictCount; '"demo job capacity exhausted: retained live jobs fill MAX_RETAINED_JOBS"];
+    (::)
+  };
+
 .demo.asyncq.statusDict:{[jobId;status;progress;err]
     .grafana.asyncq.util.statusDict `JobID`Status`Progress`Error`Message`ErrorClass`StackTrace`Worker`Started`Finished`ResultType!(jobId; status; progress; err; err; ""; ""; .grafana.asyncq.util.worker[]; 0Np; 0Np; "")
   };
 
 .demo.asyncq.statusFromRow:{[row;status;progress]
     .grafana.asyncq.util.statusDict `JobID`Status`Progress`Error`Message`ErrorClass`StackTrace`Worker`Started`Finished`ResultType!(row`jobId; status; progress; row`error; row`message; row`errorClass; row`stackTrace; row`worker; row`submitted; row`finished; row`resultType)
+  };
+
+.demo.asyncq.currentStatusFromRow:{[row]
+    status:.demo.asyncq.text row`status;
+    progress:$[status in .demo.asyncq.LIVE_JOB_STATUSES;0.5;row`progress];
+    .demo.asyncq.statusFromRow[row;status;progress]
   };
 
 .demo.asyncq.seed:{[n]
@@ -167,38 +316,51 @@ Grafana Live demos.
   };
 
 .demo.asyncq.submit:{[req]
-    jobId:.demo.asyncq.get[req;`RequestID;string .z.p];
-    query:req[`Query;`Query];
-    now:.z.p;
-    worker:.grafana.asyncq.util.worker[];
+    validated:.demo.asyncq.validateSubmitRequest req;
+    jobId:validated`JobID;
+    query:validated`Query;
+    .demo.asyncq.cleanupJobs 0;
     rows:.demo.asyncq.byJobId jobId;
-    .demo.asyncq.JOBS::delete from .demo.asyncq.JOBS where i in rows;
-    .demo.asyncq.JOBS::.demo.asyncq.JOBS,enlist `jobId`status`progress`query`request`result`error`message`errorClass`stackTrace`submitted`due`finished`worker`resultType!(enlist jobId;enlist "queued";0f;enlist query;enlist req;(::);enlist "";enlist "";enlist "";enlist "";now;now+.demo.asyncq.JOBDELAY;0Np;enlist worker;enlist "");
+    if[1<count rows; '"duplicate retained job id: ",jobId];
+    if[1=count rows;
+      row:.demo.asyncq.requireSingleJobRow[jobId;rows];
+      :.demo.asyncq.statusFromRow[row;.demo.asyncq.text row`status;row`progress]];
+    .demo.asyncq.cleanupJobs 1;
+    now:.z.p;
+    due:now+.demo.asyncq.JOBDELAY;
+    if[(null due)|due<now; '"demo JOBDELAY overflows timestamp arithmetic"];
+    worker:.grafana.asyncq.util.worker[];
+    .demo.asyncq.JOBS::.demo.asyncq.JOBS,enlist `jobId`status`progress`query`request`result`error`message`errorClass`stackTrace`submitted`due`finished`worker`resultType!(jobId;"queued";0f;query;req;enlist (::);"";"";"";"";now;due;0Np;worker;"");
     .grafana.asyncq.util.statusDict `JobID`Status`Progress`Error`Message`ErrorClass`StackTrace`Worker`Started`Finished`ResultType!(jobId; "queued"; 0f; ""; ""; ""; ""; worker; now; 0Np; "")
   };
 
 .demo.asyncq.status:{[jobId]
+    jobId:.grafana.asyncq.util.normalizeJobId jobId;
+    .demo.asyncq.cleanupJobs 0;
     rows:.demo.asyncq.byJobId jobId;
-    if[0=count rows; '"job not found"];
-    row:first select from .demo.asyncq.JOBS where i=first rows;
-    status:.demo.asyncq.text row`status;
-    progress:$[status in ("queued";"running");0.5;row`progress];
-    .demo.asyncq.statusFromRow[row;status;progress]
+    row:.demo.asyncq.requireSingleJobRow[jobId;rows];
+    .demo.asyncq.currentStatusFromRow row
   };
 
 .demo.asyncq.result:{[jobId]
+    jobId:.grafana.asyncq.util.normalizeJobId jobId;
+    .demo.asyncq.cleanupJobs 0;
     rows:.demo.asyncq.byJobId jobId;
-    if[0=count rows; '"job not found"];
-    row:first select from .demo.asyncq.JOBS where i=first rows;
+    row:.demo.asyncq.requireSingleJobRow[jobId;rows];
     if[not (.demo.asyncq.text row`status)~"done"; '"job not done"];
-    row`result
+    first row`result
   };
 
 .demo.asyncq.cancel:{[jobId]
+    jobId:.grafana.asyncq.util.normalizeJobId jobId;
+    .demo.asyncq.cleanupJobs 0;
     rows:.demo.asyncq.byJobId jobId;
     if[0=count rows; :.demo.asyncq.statusDict[jobId;"missing";0f;"job not found"]];
-    .demo.asyncq.JOBS::update status:enlist "cancelled", progress:1f, message:enlist "cancelled by client", finished:.z.p from .demo.asyncq.JOBS where i=first rows;
-    .demo.asyncq.status jobId
+    row:.demo.asyncq.requireSingleJobRow[jobId;rows];
+    if[not (.demo.asyncq.text row`status) in .demo.asyncq.TERMINAL_JOB_STATUSES;
+      .demo.asyncq.JOBS::update status:enlist "cancelled", progress:1f, query:(::), request:(::), result:enlist enlist (::), message:enlist "cancelled by client", finished:.z.p from .demo.asyncq.JOBS where i=first rows;
+      row:first select from .demo.asyncq.JOBS where i=first rows];
+    .demo.asyncq.currentStatusFromRow row
   };
 
 .demo.legacy.submit:{[req]
@@ -222,23 +384,35 @@ Grafana Live demos.
   };
 
 .demo.asyncq.completeJob:{[idx]
+    if[not .grafana.asyncq.util.integerAtom idx; '"demo completion row index must be a non-negative integer atom"];
+    if[0>idx; '"demo completion row index must be a non-negative integer atom"];
+    if[count[.demo.asyncq.JOBS]<=idx; '"demo completion row index is out of range"];
     row:first select from .demo.asyncq.JOBS where i=idx;
+    jobId:.grafana.asyncq.util.normalizeJobId row`jobId;
+    rows:.demo.asyncq.byJobId jobId;
+    .demo.asyncq.requireSingleJobRow[jobId;rows];
+    if[not (.demo.asyncq.text row`status) in .demo.asyncq.LIVE_JOB_STATUSES; '"demo job is not pending completion"];
     req:row`request;
     trapped:.grafana.asyncq.util.trapEval req;
     ok:first trapped;
     payload:last trapped;
     $[ok;
-        .demo.asyncq.JOBS::update status:enlist "done", progress:1f, result:enlist payload, error:enlist "", message:enlist "", errorClass:enlist "", stackTrace:enlist "", finished:.z.p, resultType:enlist .grafana.asyncq.util.describe payload from .demo.asyncq.JOBS where i=idx;
-        .demo.asyncq.JOBS::update status:enlist "error", progress:1f, result:enlist (::), error:enlist payload`Error, message:enlist payload`Message, errorClass:enlist payload`ErrorClass, stackTrace:enlist payload`StackTrace, finished:.z.p, resultType:enlist "" from .demo.asyncq.JOBS where i=idx
+        .demo.asyncq.JOBS::update status:enlist "done", progress:1f, query:(::), request:(::), result:enlist enlist payload, error:enlist "", message:enlist "", errorClass:enlist "", stackTrace:enlist "", finished:.z.p, resultType:enlist .grafana.asyncq.util.describe payload from .demo.asyncq.JOBS where i=idx;
+        .demo.asyncq.JOBS::update status:enlist "error", progress:1f, query:(::), request:(::), result:enlist enlist (::), error:enlist .grafana.asyncq.util.text payload`Error, message:enlist .grafana.asyncq.util.text payload`Message, errorClass:enlist .grafana.asyncq.util.text payload`ErrorClass, stackTrace:enlist .grafana.asyncq.util.text payload`StackTrace, finished:.z.p, resultType:enlist "" from .demo.asyncq.JOBS where i=idx
       ];
+    (::)
   };
 
 .demo.asyncq.completeDue:{
-    if[0=count .demo.asyncq.JOBS; :()];
-    pending:{.demo.asyncq.text[x] in ("queued";"running")} each .demo.asyncq.JOBS`status;
+    .demo.asyncq.cleanupJobs 0;
+    if[0=count .demo.asyncq.JOBS; :(::)];
+    pending:{.demo.asyncq.text[x] in .demo.asyncq.LIVE_JOB_STATUSES} each .demo.asyncq.JOBS`status;
     due:(.demo.asyncq.JOBS`due)<=.z.p;
-    .demo.asyncq.completeJob each where pending & due;
-    ::
+    completionLimit:.demo.asyncq.MAX_COMPLETIONS_PER_TICK&.demo.asyncq.MAX_RETAINED_JOBS;
+    dueRows:where pending & due;
+    completionRows:(completionLimit&count dueRows)#dueRows;
+    .demo.asyncq.completeJob each completionRows;
+    (::)
   };
 
 .demo.asyncq.streamIds:{[ids]
