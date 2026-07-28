@@ -8,9 +8,14 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   linux-plugin:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@v4
@@ -34,8 +39,43 @@ jobs:
           chmod +x dist/gpx_asyncq-kdbbackend-datasource_linux_amd64 dist/gpx_asyncq-kdbbackend-datasource_linux_arm64
           file dist/gpx_asyncq-kdbbackend-datasource_linux_amd64 dist/gpx_asyncq-kdbbackend-datasource_linux_arm64
 
+      - name: Sign and verify plugin distributions
+        env:
+          GRAFANA_ACCESS_POLICY_TOKEN: ${{ secrets.GRAFANA_ACCESS_POLICY_TOKEN }}
+          GRAFANA_ROOT_URLS: ${{ vars.GRAFANA_ROOT_URLS }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${GRAFANA_ACCESS_POLICY_TOKEN:-}" ]]; then
+            echo "::error::GRAFANA_ACCESS_POLICY_TOKEN is required to sign release plugins"
+            exit 1
+          fi
+
+          distributions=(
+            "dist"
+            "dist-panel/asyncq-masterdata-panel"
+            "dist-panel/asyncq-excel-report-panel"
+          )
+
+          for dist_dir in "${distributions[@]}"; do
+            sign_args=(--distDir "$dist_dir")
+            if [[ -n "${GRAFANA_ROOT_URLS:-}" ]]; then
+              sign_args+=(--rootUrls "$GRAFANA_ROOT_URLS")
+            fi
+
+            npm run sign -- "${sign_args[@]}"
+
+            if [[ ! -s "$dist_dir/MANIFEST.txt" ]]; then
+              echo "::error::Signing did not produce a non-empty $dist_dir/MANIFEST.txt"
+              exit 1
+            fi
+          done
+
       - name: Package plugin
         run: |
+          test -s dist/MANIFEST.txt
+          test -s dist-panel/asyncq-masterdata-panel/MANIFEST.txt
+          test -s dist-panel/asyncq-excel-report-panel/MANIFEST.txt
           mkdir -p release/asyncq-kdbbackend-datasource
           cp -R dist/. release/asyncq-kdbbackend-datasource/
           mkdir -p release/asyncq-masterdata-panel

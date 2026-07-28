@@ -16,11 +16,12 @@
     "typecheck": "tsc --noEmit",
     "typecheck:panel": "tsc --noEmit -p tsconfig.panel.json",
     "typecheck:excel-report-panel": "tsc --noEmit -p tsconfig.excel-report-panel.json",
-    "sign": "npx --yes @grafana/sign-plugin@latest"
+    "sign": "sign-plugin"
   },
   "author": "AsyncQ contributors; derived from AquaQ Analytics' kdb+ backend datasource",
   "license": "Apache-2.0",
   "devDependencies": {
+    "@grafana/sign-plugin": "3.3.3",
     "@grafana/tsconfig": "^2.0.1",
     "@playwright/test": "^1.60.0",
     "@swc/core": "^1.15.0",
