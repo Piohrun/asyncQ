@@ -659,11 +659,22 @@ func buildPanopticonContextKdbLists(query backend.DataQuery) ([]string, []*kdb.K
 	return keys, values
 }
 
-func parseKdbResponseToFrames(kdbResponse *kdb.K, model QueryModel, refID string) ([]*data.Frame, error) {
-	var frames []*data.Frame
-	switch {
-	case kdbResponse == nil:
+func parseKdbResponseToFrames(kdbResponse *kdb.K, model QueryModel, refID string) (frames []*data.Frame, err error) {
+	if kdbResponse == nil {
 		return nil, fmt.Errorf("kdb+ returned nil response")
+	}
+	responseType := kdbResponse.Type
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			frames = nil
+			err = fmt.Errorf("unable to parse kdb+ response safely: unexpected parser failure for type %d", responseType)
+		}
+	}()
+	if err := validateKdbObject(kdbResponse); err != nil {
+		return nil, fmt.Errorf("invalid kdb+ response: %w", err)
+	}
+
+	switch {
 	case kdbResponse.Type == kdb.XT:
 		frame, err := ParseSimpleKdbTable(kdbResponse)
 		if err != nil {

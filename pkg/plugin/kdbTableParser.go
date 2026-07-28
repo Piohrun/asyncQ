@@ -10,56 +10,395 @@ import (
 	kdb "github.com/sv/kdbgo"
 )
 
-func charParser(data *kdb.K) []string {
+const (
+	maxKdbObjectDepth           = 256
+	maxKdbBinaryPrimitiveIndex  = 33
+	maxKdbTernaryPrimitiveIndex = 2
+)
+
+func validateKdbObject(value *kdb.K) error {
+	return validateKdbObjectAt(value, "object", 0, make(map[*kdb.K]struct{}))
+}
+
+func validateKdbObjectAt(value *kdb.K, location string, depth int, ancestors map[*kdb.K]struct{}) error {
+	if value == nil {
+		return fmt.Errorf("%s is nil", location)
+	}
+	if depth > maxKdbObjectDepth {
+		return fmt.Errorf("%s exceeds maximum nesting depth", location)
+	}
+	if _, exists := ancestors[value]; exists {
+		return fmt.Errorf("%s contains a cycle", location)
+	}
+	if value.Type >= kdb.K0 && (value.Attr < kdb.NONE || value.Attr > kdb.GROUPED) {
+		return fmt.Errorf("%s has invalid attribute %d", location, value.Attr)
+	}
+	ancestors[value] = struct{}{}
+	defer delete(ancestors, value)
+
+	switch {
+	case value.Type < kdb.K0:
+		if err := validateKdbAtom(value); err != nil {
+			return fmt.Errorf("%s: %w", location, err)
+		}
+		return nil
+	case value.Type == kdb.K0:
+		items, ok := value.Data.([]*kdb.K)
+		if !ok {
+			return fmt.Errorf("%s has invalid data for generic list: expected []*kdb.K, got %T", location, value.Data)
+		}
+		for i, item := range items {
+			if err := validateKdbObjectAt(item, fmt.Sprintf("%s item %d", location, i), depth+1, ancestors); err != nil {
+				return err
+			}
+		}
+		return nil
+	case value.Type > kdb.K0 && value.Type <= kdb.KT:
+		if _, err := kdbVectorLength(value); err != nil {
+			return fmt.Errorf("%s: %w", location, err)
+		}
+		return nil
+	case value.Type == kdb.XT:
+		table, ok := value.Data.(kdb.Table)
+		if !ok {
+			return fmt.Errorf("%s has invalid table data: expected kdb.Table, got %T", location, value.Data)
+		}
+		return validateKdbTableAt(table, location, depth, ancestors)
+	case value.Type == kdb.XD:
+		dict, ok := value.Data.(kdb.Dict)
+		if !ok {
+			return fmt.Errorf("%s has invalid dictionary data: expected kdb.Dict, got %T", location, value.Data)
+		}
+		if dict.Key == nil {
+			return fmt.Errorf("%s dictionary key is nil", location)
+		}
+		if dict.Value == nil {
+			return fmt.Errorf("%s dictionary value is nil", location)
+		}
+		if err := validateKdbObjectAt(dict.Key, location+" dictionary key", depth+1, ancestors); err != nil {
+			return err
+		}
+		if err := validateKdbObjectAt(dict.Value, location+" dictionary value", depth+1, ancestors); err != nil {
+			return err
+		}
+		if dict.Key.Type == kdb.XT && dict.Value.Type == kdb.XT {
+			keyTable := dict.Key.Data.(kdb.Table)
+			valueTable := dict.Value.Data.(kdb.Table)
+			keyRows, err := tableRowCount(keyTable)
+			if err != nil {
+				return fmt.Errorf("%s keyed table key rows: %w", location, err)
+			}
+			valueRows, err := tableRowCount(valueTable)
+			if err != nil {
+				return fmt.Errorf("%s keyed table value rows: %w", location, err)
+			}
+			if keyRows != valueRows {
+				return fmt.Errorf("%s keyed table key/value row counts differ: %d and %d", location, keyRows, valueRows)
+			}
+		}
+		return nil
+	case value.Type == kdb.KFUNC:
+		if _, ok := value.Data.(kdb.Function); !ok {
+			return fmt.Errorf("%s has invalid function data: expected kdb.Function, got %T", location, value.Data)
+		}
+		return nil
+	case value.Type == kdb.KFUNCUP:
+		if _, ok := value.Data.(byte); !ok {
+			return fmt.Errorf("%s has invalid unary-function data: expected byte, got %T", location, value.Data)
+		}
+		return nil
+	case value.Type == kdb.KFUNCBP:
+		operator, ok := value.Data.(byte)
+		if !ok {
+			return fmt.Errorf("%s has invalid binary-function data: expected byte, got %T", location, value.Data)
+		}
+		if operator > maxKdbBinaryPrimitiveIndex {
+			return fmt.Errorf("%s has invalid binary-function index %d", location, operator)
+		}
+		return nil
+	case value.Type == kdb.KFUNCTR:
+		operator, ok := value.Data.(byte)
+		if !ok {
+			return fmt.Errorf("%s has invalid ternary-function data: expected byte, got %T", location, value.Data)
+		}
+		if operator > maxKdbTernaryPrimitiveIndex {
+			return fmt.Errorf("%s has invalid ternary-function index %d", location, operator)
+		}
+		return nil
+	case value.Type == kdb.KPROJ || value.Type == kdb.KCOMP:
+		items, ok := value.Data.([]*kdb.K)
+		if !ok {
+			return fmt.Errorf("%s has invalid function-list data: expected []*kdb.K, got %T", location, value.Data)
+		}
+		for i, item := range items {
+			if err := validateKdbObjectAt(item, fmt.Sprintf("%s function item %d", location, i), depth+1, ancestors); err != nil {
+				return err
+			}
+		}
+		return nil
+	case value.Type >= kdb.KEACH && value.Type <= kdb.KEACHLEFT:
+		operand, ok := value.Data.(*kdb.K)
+		if !ok {
+			return fmt.Errorf("%s has invalid adverb data: expected *kdb.K, got %T", location, value.Data)
+		}
+		return validateKdbObjectAt(operand, location+" adverb operand", depth+1, ancestors)
+	default:
+		return fmt.Errorf("%s has unsupported kdb+ type %d", location, value.Type)
+	}
+}
+
+func validateKdbTableAt(table kdb.Table, location string, depth int, ancestors map[*kdb.K]struct{}) error {
+	if len(table.Columns) != len(table.Data) {
+		return fmt.Errorf("%s table column name/data counts differ: %d and %d", location, len(table.Columns), len(table.Data))
+	}
+	rowCount := -1
+	for i, column := range table.Data {
+		if column == nil {
+			return fmt.Errorf("%s table column %d is nil", location, i)
+		}
+		if column.Type < kdb.K0 || column.Type > kdb.KT {
+			return fmt.Errorf("%s table column %d is not a vector", location, i)
+		}
+		if err := validateKdbObjectAt(column, fmt.Sprintf("%s table column %d", location, i), depth+1, ancestors); err != nil {
+			return err
+		}
+		length, err := kdbVectorLength(column)
+		if err != nil {
+			return fmt.Errorf("%s table column %d: %w", location, i, err)
+		}
+		if rowCount == -1 {
+			rowCount = length
+			continue
+		}
+		if rowCount != length {
+			return fmt.Errorf("%s table columns have unequal row lengths: %d and %d", location, rowCount, length)
+		}
+	}
+	return nil
+}
+
+func tableRowCount(table kdb.Table) (int, error) {
+	if len(table.Columns) != len(table.Data) {
+		return 0, fmt.Errorf("table column name/data counts differ: %d and %d", len(table.Columns), len(table.Data))
+	}
+	if len(table.Data) == 0 {
+		return 0, nil
+	}
+	return kdbVectorLength(table.Data[0])
+}
+
+func validateKdbAtom(value *kdb.K) error {
+	valid := false
+	switch value.Type {
+	case -kdb.KB:
+		_, valid = value.Data.(bool)
+	case -kdb.UU:
+		_, valid = value.Data.(uuid.UUID)
+	case -kdb.KG, -kdb.KC:
+		_, valid = value.Data.(byte)
+	case -kdb.KH:
+		_, valid = value.Data.(int16)
+	case -kdb.KI:
+		_, valid = value.Data.(int32)
+	case -kdb.KJ:
+		_, valid = value.Data.(int64)
+	case -kdb.KE:
+		_, valid = value.Data.(float32)
+	case -kdb.KF:
+		_, valid = value.Data.(float64)
+	case -kdb.KS:
+		_, valid = value.Data.(string)
+	case -kdb.KP:
+		switch value.Data.(type) {
+		case time.Time, time.Duration:
+			valid = true
+		}
+	case -kdb.KM:
+		switch value.Data.(type) {
+		case kdb.Month, int32:
+			valid = true
+		}
+	case -kdb.KD:
+		switch value.Data.(type) {
+		case time.Time, int32:
+			valid = true
+		}
+	case -kdb.KZ:
+		switch value.Data.(type) {
+		case time.Time, float64:
+			valid = true
+		}
+	case -kdb.KN:
+		_, valid = value.Data.(time.Duration)
+	case -kdb.KU:
+		switch value.Data.(type) {
+		case kdb.Minute, int32:
+			valid = true
+		}
+	case -kdb.KV:
+		switch value.Data.(type) {
+		case kdb.Second, int32:
+			valid = true
+		}
+	case -kdb.KT:
+		switch value.Data.(type) {
+		case kdb.Time, int32:
+			valid = true
+		}
+	default:
+		return fmt.Errorf("unsupported kdb+ atom type %d", value.Type)
+	}
+	if !valid {
+		return fmt.Errorf("invalid data for kdb+ atom type %d: got %T", value.Type, value.Data)
+	}
+	return nil
+}
+
+func kdbVectorLength(value *kdb.K) (int, error) {
+	if value == nil {
+		return 0, fmt.Errorf("vector is nil")
+	}
+	switch value.Type {
+	case kdb.K0:
+		data, ok := value.Data.([]*kdb.K)
+		if !ok {
+			return 0, fmt.Errorf("invalid data for generic list: expected []*kdb.K, got %T", value.Data)
+		}
+		return len(data), nil
+	case kdb.KB:
+		return typedKdbVectorLength[bool](value, "[]bool")
+	case kdb.UU:
+		return typedKdbVectorLength[uuid.UUID](value, "[]uuid.UUID")
+	case kdb.KG:
+		return typedKdbVectorLength[byte](value, "[]byte")
+	case kdb.KH:
+		return typedKdbVectorLength[int16](value, "[]int16")
+	case kdb.KI:
+		return typedKdbVectorLength[int32](value, "[]int32")
+	case kdb.KJ:
+		return typedKdbVectorLength[int64](value, "[]int64")
+	case kdb.KE:
+		return typedKdbVectorLength[float32](value, "[]float32")
+	case kdb.KF:
+		return typedKdbVectorLength[float64](value, "[]float64")
+	case kdb.KC:
+		switch data := value.Data.(type) {
+		case string:
+			return len(data), nil
+		case []byte:
+			return len(data), nil
+		default:
+			return 0, invalidVectorDataError(value, "string or []byte")
+		}
+	case kdb.KS:
+		return typedKdbVectorLength[string](value, "[]string")
+	case kdb.KP, kdb.KD, kdb.KZ:
+		return typedKdbVectorLength[time.Time](value, "[]time.Time")
+	case kdb.KM:
+		return typedKdbVectorLength[kdb.Month](value, "[]kdb.Month")
+	case kdb.KN:
+		return typedKdbVectorLength[time.Duration](value, "[]time.Duration")
+	case kdb.KU:
+		return typedKdbVectorLength[kdb.Minute](value, "[]kdb.Minute")
+	case kdb.KV:
+		return typedKdbVectorLength[kdb.Second](value, "[]kdb.Second")
+	case kdb.KT:
+		return typedKdbVectorLength[kdb.Time](value, "[]kdb.Time")
+	default:
+		return 0, fmt.Errorf("unsupported kdb+ vector type %d", value.Type)
+	}
+}
+
+func typedKdbVectorLength[T any](value *kdb.K, expected string) (int, error) {
+	data, ok := value.Data.([]T)
+	if !ok {
+		return 0, invalidVectorDataError(value, expected)
+	}
+	return len(data), nil
+}
+
+func invalidVectorDataError(value *kdb.K, expected string) error {
+	return fmt.Errorf("invalid data for kdb+ vector type %d: expected %s, got %T", value.Type, expected, value.Data)
+}
+
+func charParser(data *kdb.K) ([]string, error) {
+	if data == nil || data.Type != kdb.KC {
+		return nil, fmt.Errorf("object is not a character vector")
+	}
 	if text, ok := data.Data.(string); ok {
 		out := make([]string, len(text))
 		for i := range text {
 			out[i] = string(text[i])
 		}
-		return out
+		return out, nil
 	}
 	if bytes, ok := data.Data.([]byte); ok {
 		out := make([]string, len(bytes))
 		for i, value := range bytes {
 			out[i] = string(value)
 		}
-		return out
+		return out, nil
 	}
-	byteArray := make([]string, data.Len())
-	for i := 0; i < data.Len(); i++ {
-		byteArray[i] = string(data.Index(i).(byte))
-	}
-	return byteArray
+	return nil, invalidVectorDataError(data, "string or []byte")
 }
 
 func stringParser(data *kdb.K) ([]string, error) {
-	stringCol := data.Data.([]*kdb.K)
-	stringArray := make([]string, data.Len())
+	if data == nil || data.Type != kdb.K0 {
+		return nil, fmt.Errorf("object is not a generic list")
+	}
+	stringCol, ok := data.Data.([]*kdb.K)
+	if !ok {
+		return nil, fmt.Errorf("invalid generic list data: expected []*kdb.K, got %T", data.Data)
+	}
+	stringArray := make([]string, len(stringCol))
 	for i, word := range stringCol {
-		if word.Type != kdb.KC {
-			return nil, fmt.Errorf("A column is present which is neither a vector nor a string column. kdb+ type at index %v: %v", i, word.Type)
+		if word == nil {
+			return nil, fmt.Errorf("generic list item %d is nil", i)
 		}
-		stringArray[i] = word.Data.(string)
+		if word.Type != kdb.KC {
+			return nil, fmt.Errorf("generic list item %d is not a character vector: type %d", i, word.Type)
+		}
+		switch text := word.Data.(type) {
+		case string:
+			stringArray[i] = text
+		case []byte:
+			stringArray[i] = string(text)
+		default:
+			return nil, fmt.Errorf("generic list item %d has invalid character data: got %T", i, word.Data)
+		}
 	}
 	return stringArray, nil
 }
 
-func genericListStringColumn(data *kdb.K) []string {
-	items := data.Data.([]*kdb.K)
+func genericListStringColumn(data *kdb.K) ([]string, error) {
+	if data == nil || data.Type != kdb.K0 {
+		return nil, fmt.Errorf("object is not a generic list")
+	}
+	items, ok := data.Data.([]*kdb.K)
+	if !ok {
+		return nil, fmt.Errorf("invalid generic list data: expected []*kdb.K, got %T", data.Data)
+	}
 	out := make([]string, len(items))
 	for i, item := range items {
-		out[i] = kdbObjectString(item)
+		value, err := kdbObjectString(item)
+		if err != nil {
+			return nil, fmt.Errorf("generic list item %d: %w", i, err)
+		}
+		out[i] = value
 	}
-	return out
+	return out, nil
 }
 
-func standardColumnParser(inputData *kdb.K) interface{} {
+func standardColumnParser(inputData *kdb.K) (interface{}, error) {
+	if err := validateKdbObject(inputData); err != nil {
+		return nil, err
+	}
 
 	switch {
 	case inputData.Type == kdb.K0:
 		stringColumn, err := stringParser(inputData)
 		if err == nil {
-			return stringColumn
+			return stringColumn, nil
 		}
 		return genericListStringColumn(inputData)
 	case inputData.Type == kdb.KC:
@@ -72,7 +411,7 @@ func standardColumnParser(inputData *kdb.K) interface{} {
 		for i, dur := range durArr {
 			durIntArr[i] = int64(dur)
 		}
-		return durIntArr
+		return durIntArr, nil
 
 	case inputData.Type == kdb.KT:
 		//Time
@@ -82,7 +421,7 @@ func standardColumnParser(inputData *kdb.K) interface{} {
 			timeArr[index] = int32(time.Time(entry).Hour()*3600000 + time.Time(entry).Minute()*60000 + time.Time(entry).Second()*1000 + time.Time(entry).Nanosecond()/1000000)
 
 		}
-		return timeArr
+		return timeArr, nil
 
 	case inputData.Type == kdb.UU:
 		//GUID
@@ -93,7 +432,7 @@ func standardColumnParser(inputData *kdb.K) interface{} {
 			guidArr[i] = entry.String()
 		}
 
-		return guidArr
+		return guidArr, nil
 
 	case inputData.Type == kdb.KU:
 		//Minute
@@ -102,7 +441,7 @@ func standardColumnParser(inputData *kdb.K) interface{} {
 		for index, entry := range minArr {
 			minTimeArr[index] = int32(time.Time(entry).Minute() + time.Time(entry).Hour()*60)
 		}
-		return minTimeArr
+		return minTimeArr, nil
 
 	case inputData.Type == kdb.KV:
 		//Second
@@ -111,7 +450,7 @@ func standardColumnParser(inputData *kdb.K) interface{} {
 		for index, entry := range secArr {
 			secTimeArr[index] = int32(time.Time(entry).Second() + time.Time(entry).Minute()*60 + time.Time(entry).Hour()*3600)
 		}
-		return secTimeArr
+		return secTimeArr, nil
 
 	case inputData.Type == kdb.KM:
 		// Month
@@ -120,27 +459,42 @@ func standardColumnParser(inputData *kdb.K) interface{} {
 		for index, val := range monthArr {
 			monthIntArr[index] = int32(val)
 		}
-		return monthIntArr
+		return monthIntArr, nil
 
 	default:
-		return inputData.Data
+		return inputData.Data, nil
 	}
 }
 
 func ParseSimpleKdbTable(res *kdb.K) (*data.Frame, error) {
+	if err := validateKdbObject(res); err != nil {
+		return nil, fmt.Errorf("invalid table: %w", err)
+	}
+	if res.Type != kdb.XT {
+		return nil, fmt.Errorf("object is not a table")
+	}
 	frame := data.NewFrame("response")
 	kdbTable := res.Data.(kdb.Table)
 	tabData := kdbTable.Data
 	frame.Fields = make([]*data.Field, 0, len(kdbTable.Columns))
 
 	for colIndex, columnName := range kdbTable.Columns {
-		frame.Fields = append(frame.Fields, data.NewField(columnName, nil, standardColumnParser(tabData[colIndex])))
-
+		column, err := standardColumnParser(tabData[colIndex])
+		if err != nil {
+			return nil, fmt.Errorf("table column %d: %w", colIndex, err)
+		}
+		frame.Fields = append(frame.Fields, data.NewField(columnName, nil, column))
 	}
 	return frame, nil
 }
 
 func ParseKeyedKdbTableAsFrame(res *kdb.K) (*data.Frame, error) {
+	if err := validateKdbObject(res); err != nil {
+		return nil, fmt.Errorf("invalid keyed table: %w", err)
+	}
+	if res.Type != kdb.XD {
+		return nil, fmt.Errorf("object is not a dictionary")
+	}
 	kdbDict := res.Data.(kdb.Dict)
 	if kdbDict.Key.Type != kdb.XT || kdbDict.Value.Type != kdb.XT {
 		return nil, fmt.Errorf("dictionary is not a keyed table")
@@ -153,7 +507,15 @@ func ParseKeyedKdbTableAsFrame(res *kdb.K) (*data.Frame, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(keyFrame.Fields) > 0 && len(valueFrame.Fields) > 0 && keyFrame.Fields[0].Len() != valueFrame.Fields[0].Len() {
+	keyRows, err := tableRowCount(kdbDict.Key.Data.(kdb.Table))
+	if err != nil {
+		return nil, fmt.Errorf("key table row count: %w", err)
+	}
+	valueRows, err := tableRowCount(kdbDict.Value.Data.(kdb.Table))
+	if err != nil {
+		return nil, fmt.Errorf("value table row count: %w", err)
+	}
+	if keyRows != valueRows {
 		return nil, fmt.Errorf("key and value table row counts differ")
 	}
 	frame := data.NewFrame("response")
@@ -164,6 +526,9 @@ func ParseKeyedKdbTableAsFrame(res *kdb.K) (*data.Frame, error) {
 }
 
 func ParseKdbObjectAsFrame(res *kdb.K) (*data.Frame, error) {
+	if err := validateKdbObject(res); err != nil {
+		return nil, fmt.Errorf("invalid object: %w", err)
+	}
 	frame := data.NewFrame("response")
 	values, err := kdbObjectColumn(res)
 	if err != nil {
@@ -174,6 +539,12 @@ func ParseKdbObjectAsFrame(res *kdb.K) (*data.Frame, error) {
 }
 
 func ParseKdbDictAsFrame(res *kdb.K) (*data.Frame, error) {
+	if err := validateKdbObject(res); err != nil {
+		return nil, fmt.Errorf("invalid dictionary: %w", err)
+	}
+	if res.Type != kdb.XD {
+		return nil, fmt.Errorf("object is not a dictionary")
+	}
 	d := res.Data.(kdb.Dict)
 	columnNames, err := dictColumnNames(d.Key)
 	if err != nil {
@@ -186,7 +557,10 @@ func ParseKdbDictAsFrame(res *kdb.K) (*data.Frame, error) {
 	if len(columnNames) != len(values) {
 		return nil, fmt.Errorf("dictionary key/value lengths differ")
 	}
-	depth := dictFrameDepth(values)
+	depth, err := dictFrameDepth(values)
+	if err != nil {
+		return nil, err
+	}
 	frame := data.NewFrame("response")
 	for i, name := range columnNames {
 		col, err := kdbObjectColumnWithDepth(values[i], depth)
@@ -199,6 +573,9 @@ func ParseKdbDictAsFrame(res *kdb.K) (*data.Frame, error) {
 }
 
 func ParseKdbDictListAsFrame(res *kdb.K) (*data.Frame, error) {
+	if err := validateKdbObject(res); err != nil {
+		return nil, fmt.Errorf("invalid dictionary list: %w", err)
+	}
 	if res.Type != kdb.K0 {
 		return nil, fmt.Errorf("object is not a generic list")
 	}
@@ -252,10 +629,14 @@ func ParseKdbDictListAsFrame(res *kdb.K) (*data.Frame, error) {
 				columns[colIndex] = append(columns[colIndex], nil)
 				continue
 			}
-			columns[colIndex] = append(columns[colIndex], kdbCellValue(value))
+			cell, err := kdbCellValue(value)
+			if err != nil {
+				return nil, fmt.Errorf("column %d: %w", colIndex, err)
+			}
+			columns[colIndex] = append(columns[colIndex], cell)
 		}
 	}
-	return frameFromInterfaceColumns(columnNames, columns), nil
+	return frameFromInterfaceColumns(columnNames, columns)
 }
 
 func parseKdbDictListUniformRows(rows []*kdb.K) (*data.Frame, bool, error) {
@@ -287,38 +668,60 @@ func parseKdbDictListUniformRows(rows []*kdb.K) (*data.Frame, bool, error) {
 			return nil, false, nil
 		}
 		for colIndex, value := range values {
-			columns[colIndex] = append(columns[colIndex], kdbCellValue(value))
+			cell, err := kdbCellValue(value)
+			if err != nil {
+				return nil, false, fmt.Errorf("item %d value %d: %w", rowIndex, colIndex, err)
+			}
+			columns[colIndex] = append(columns[colIndex], cell)
 		}
 	}
-	return frameFromInterfaceColumns(columnNames, columns), true, nil
+	frame, err := frameFromInterfaceColumns(columnNames, columns)
+	return frame, true, err
 }
 
-func frameFromInterfaceColumns(columnNames []string, columns [][]interface{}) *data.Frame {
+func frameFromInterfaceColumns(columnNames []string, columns [][]interface{}) (*data.Frame, error) {
+	if len(columnNames) != len(columns) {
+		return nil, fmt.Errorf("column name/data counts differ")
+	}
 	frame := data.NewFrame("response")
 	frame.Fields = make([]*data.Field, 0, len(columnNames))
 	for i, name := range columnNames {
 		frame.Fields = append(frame.Fields, data.NewField(name, nil, typedInterfaceColumn(columns[i])))
 	}
-	return frame
+	return frame, nil
 }
 
 func dictColumnNames(keys *kdb.K) ([]string, error) {
+	if err := validateKdbObject(keys); err != nil {
+		return nil, fmt.Errorf("invalid dictionary keys: %w", err)
+	}
 	switch keys.Type {
 	case -kdb.KS:
 		return []string{keys.Data.(string)}, nil
 	case kdb.KS:
 		return keys.Data.([]string), nil
 	case kdb.KC:
-		return []string{keys.Data.(string)}, nil
+		switch value := keys.Data.(type) {
+		case string:
+			return []string{value}, nil
+		case []byte:
+			return []string{string(value)}, nil
+		default:
+			return nil, fmt.Errorf("invalid character dictionary key data: got %T", keys.Data)
+		}
 	case kdb.K0:
 		items := keys.Data.([]*kdb.K)
 		names := make([]string, len(items))
 		for i, item := range items {
-			names[i] = kdbObjectString(item)
+			name, err := kdbObjectString(item)
+			if err != nil {
+				return nil, fmt.Errorf("dictionary key %d: %w", i, err)
+			}
+			names[i] = name
 		}
 		return names, nil
 	default:
-		return nil, fmt.Errorf("unsupported dictionary key type %v", keys.Type)
+		return nil, fmt.Errorf("unsupported dictionary key type %d", keys.Type)
 	}
 }
 
@@ -346,20 +749,37 @@ func sameStringSlice(a []string, b []string) bool {
 	return true
 }
 
-func kdbCellValue(value *kdb.K) interface{} {
+func kdbCellValue(value *kdb.K) (interface{}, error) {
 	if value == nil {
-		return nil
+		return nil, fmt.Errorf("value is nil")
+	}
+	if err := validateKdbObject(value); err != nil {
+		return nil, err
 	}
 	if value.Type < kdb.K0 {
 		return kdbAtomValue(value)
 	}
 	if value.Type == kdb.KC {
-		return value.Data.(string)
+		switch text := value.Data.(type) {
+		case string:
+			return text, nil
+		case []byte:
+			return string(text), nil
+		}
 	}
-	if value.Type > kdb.K0 && value.Type <= kdb.KT && value.Len() == 1 {
+	if value.Type > kdb.K0 && value.Type <= kdb.KT {
+		length, err := kdbVectorLength(value)
+		if err != nil {
+			return nil, err
+		}
+		if length != 1 {
+			text, err := kdbObjectString(value)
+			return text, err
+		}
 		if item, ok := correctedIndex(value, 0).(*kdb.K); ok {
 			return kdbAtomValue(item)
 		}
+		return nil, fmt.Errorf("value could not be indexed")
 	}
 	return kdbObjectString(value)
 }
@@ -666,13 +1086,23 @@ func dictValues(values *kdb.K, keyCount int) ([]*kdb.K, error) {
 	if values == nil {
 		return nil, fmt.Errorf("dictionary values are nil")
 	}
+	if err := validateKdbObject(values); err != nil {
+		return nil, fmt.Errorf("invalid dictionary values: %w", err)
+	}
 	if list, ok := values.Data.([]*kdb.K); ok {
 		return list, nil
 	}
 	if keyCount == 1 {
 		return []*kdb.K{values}, nil
 	}
-	if values.Type > kdb.K0 && values.Type <= kdb.KT && values.Len() == keyCount {
+	if values.Type > kdb.K0 && values.Type <= kdb.KT {
+		length, err := kdbVectorLength(values)
+		if err != nil {
+			return nil, err
+		}
+		if length != keyCount {
+			return nil, fmt.Errorf("dictionary values are not compatible with %d keys", keyCount)
+		}
 		out := make([]*kdb.K, keyCount)
 		for i := 0; i < keyCount; i++ {
 			item, ok := correctedIndex(values, i).(*kdb.K)
@@ -686,73 +1116,150 @@ func dictValues(values *kdb.K, keyCount int) ([]*kdb.K, error) {
 	return nil, fmt.Errorf("dictionary values are not compatible with %d keys", keyCount)
 }
 
-func dictFrameDepth(values []*kdb.K) int {
+func dictFrameDepth(values []*kdb.K) (int, error) {
 	depth := 1
-	for _, value := range values {
+	lengths := make([]int, len(values))
+	for i, value := range values {
 		if value == nil || value.Type < kdb.K0 {
+			lengths[i] = 1
 			continue
 		}
 		if value.Type == kdb.KC {
+			lengths[i] = 1
 			continue
 		}
-		if value.Len() > depth {
-			depth = value.Len()
+		length, err := kdbVectorLength(value)
+		if err != nil {
+			return 0, fmt.Errorf("dictionary value %d: %w", i, err)
+		}
+		lengths[i] = length
+		if length > depth {
+			depth = length
 		}
 	}
-	return depth
+	targetLength := -1
+	hasSingleton := false
+	for i, length := range lengths {
+		if length == 1 {
+			hasSingleton = true
+			continue
+		}
+		if targetLength == -1 {
+			targetLength = length
+			continue
+		}
+		if length != targetLength {
+			return 0, fmt.Errorf("dictionary values have incompatible lengths at index %d: %d and %d", i, length, targetLength)
+		}
+	}
+	if targetLength == 0 && hasSingleton {
+		return 0, fmt.Errorf("dictionary values mix empty and singleton columns")
+	}
+	return depth, nil
 }
 
 func kdbObjectColumn(value *kdb.K) (interface{}, error) {
-	return kdbObjectColumnWithDepth(value, kdbObjectDepth(value))
+	depth, err := kdbObjectDepth(value)
+	if err != nil {
+		return nil, err
+	}
+	return kdbObjectColumnWithDepth(value, depth)
 }
 
 func kdbObjectColumnWithDepth(value *kdb.K, depth int) (interface{}, error) {
 	if value == nil {
-		return []interface{}{nil}, nil
+		return nil, fmt.Errorf("value is nil")
+	}
+	if err := validateKdbObject(value); err != nil {
+		return nil, err
+	}
+	if depth < 0 {
+		return nil, fmt.Errorf("column depth cannot be negative")
 	}
 	if value.Type < kdb.K0 {
-		return projectAtom(kdbAtomValue(value), depth), nil
+		atom, err := kdbAtomValue(value)
+		if err != nil {
+			return nil, err
+		}
+		return projectAtom(atom, depth)
 	}
 	if value.Type == kdb.KC {
-		if depth <= 1 {
-			return []string{value.Data.(string)}, nil
+		var text string
+		switch data := value.Data.(type) {
+		case string:
+			text = data
+		case []byte:
+			text = string(data)
+		default:
+			return nil, fmt.Errorf("invalid character vector data: got %T", value.Data)
 		}
-		return projectAtom(value.Data.(string), depth), nil
+		if depth <= 1 {
+			return []string{text}, nil
+		}
+		return projectAtom(text, depth)
 	}
 	if value.Type == kdb.K0 {
 		if strings, err := stringParser(value); err == nil {
 			return resizeColumn(strings, depth), nil
 		}
-		return resizeColumn(genericListStringColumn(value), depth), nil
+		strings, err := genericListStringColumn(value)
+		if err != nil {
+			return nil, err
+		}
+		return resizeColumn(strings, depth), nil
 	}
-	return resizeParsedColumn(standardColumnParser(value), depth), nil
+	column, err := standardColumnParser(value)
+	if err != nil {
+		return nil, err
+	}
+	return resizeParsedColumn(column, depth), nil
 }
 
-func kdbObjectDepth(value *kdb.K) int {
-	if value == nil || value.Type < kdb.K0 || value.Type == kdb.KC {
-		return 1
-	}
-	return value.Len()
-}
-
-func kdbAtomValue(value *kdb.K) interface{} {
-	if value.Type == -kdb.KC {
-		return string(value.Data.(byte))
-	}
-	return value.Data
-}
-
-func kdbObjectString(value *kdb.K) string {
+func kdbObjectDepth(value *kdb.K) (int, error) {
 	if value == nil {
-		return ""
+		return 0, fmt.Errorf("value is nil")
+	}
+	if err := validateKdbObject(value); err != nil {
+		return 0, err
+	}
+	if value.Type < kdb.K0 || value.Type == kdb.KC {
+		return 1, nil
+	}
+	return kdbVectorLength(value)
+}
+
+func kdbAtomValue(value *kdb.K) (interface{}, error) {
+	if value == nil || value.Type >= kdb.K0 {
+		return nil, fmt.Errorf("object is not a kdb+ atom")
+	}
+	if err := validateKdbAtom(value); err != nil {
+		return nil, err
 	}
 	if value.Type == -kdb.KC {
-		return string(value.Data.(byte))
+		return string(value.Data.(byte)), nil
+	}
+	return value.Data, nil
+}
+
+func kdbObjectString(value *kdb.K) (string, error) {
+	if value == nil {
+		return "", fmt.Errorf("object is nil")
+	}
+	if err := validateKdbObject(value); err != nil {
+		return "", err
+	}
+	if value.Type == -kdb.KC {
+		return string(value.Data.(byte)), nil
 	}
 	if value.Type == kdb.KC {
-		return value.Data.(string)
+		switch text := value.Data.(type) {
+		case string:
+			return text, nil
+		case []byte:
+			return string(text), nil
+		}
 	}
-	return fmt.Sprint(value.Data)
+	return fmt.Sprint(value.Data), nil
 }
 
 func resizeParsedColumn(col interface{}, depth int) interface{} {
@@ -792,23 +1299,57 @@ func resizeColumn[T any](col []T, depth int) []T {
 }
 
 func ParseGroupedKdbTable(res *kdb.K, includeKeys bool) ([]*data.Frame, error) {
+	if err := validateKdbObject(res); err != nil {
+		return nil, fmt.Errorf("invalid grouped table: %w", err)
+	}
+	if res.Type != kdb.XD {
+		return nil, fmt.Errorf("object is not a dictionary")
+	}
 	kdbDict := res.Data.(kdb.Dict)
 	if kdbDict.Key.Type != kdb.XT || kdbDict.Value.Type != kdb.XT {
-		return nil, fmt.Errorf("Either the key or the value of the returned dictionary object is not a table of type 98.")
+		return nil, fmt.Errorf("grouped table key and value must both be tables")
 	}
-	rc := kdbDict.Key.Len()
+	keyTable := kdbDict.Key.Data.(kdb.Table)
 	valData := kdbDict.Value.Data.(kdb.Table)
+	if len(keyTable.Data) == 0 {
+		return nil, fmt.Errorf("grouped table key table has no columns")
+	}
+	rc, err := kdbVectorLength(keyTable.Data[0])
+	if err != nil {
+		return nil, fmt.Errorf("grouped table key rows: %w", err)
+	}
+	if len(valData.Data) == 0 {
+		if rc == 0 {
+			return []*data.Frame{}, nil
+		}
+		return nil, fmt.Errorf("grouped table value table has no columns")
+	}
+	valueRows, err := kdbVectorLength(valData.Data[0])
+	if err != nil {
+		return nil, fmt.Errorf("grouped table value rows: %w", err)
+	}
+	if rc != valueRows {
+		return nil, fmt.Errorf("grouped table key/value row counts differ: %d and %d", rc, valueRows)
+	}
 	frameArray := make([]*data.Frame, rc)
-	k := kdbDict.Key.Data.(kdb.Table)
-	keyColCount := len(k.Columns)
+	keyColCount := len(keyTable.Columns)
 	for row := 0; row < rc; row++ {
-		keyData := correctedTableIndex(k, row)
-		frameName := parseFrameName(keyData.Value)
+		keyData, err := correctedTableIndexValidated(keyTable, row)
+		if err != nil {
+			return nil, fmt.Errorf("grouped table key row %d: %w", row, err)
+		}
+		frameName, err := parseFrameName(keyData.Value)
+		if err != nil {
+			return nil, fmt.Errorf("grouped table key row %d name: %w", row, err)
+		}
 		frame := data.NewFrame(frameName)
-		rowData := correctedTableIndex(valData, row)
+		rowData, err := correctedTableIndexValidated(valData, row)
+		if err != nil {
+			return nil, fmt.Errorf("grouped table value row %d: %w", row, err)
+		}
 		depth, err := getDepth(rowData.Value.Data.([]*kdb.K))
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("grouped table value row %d: %w", row, err)
 		}
 		var masterCols []string
 		var masterData []*kdb.K
@@ -819,32 +1360,64 @@ func ParseGroupedKdbTable(res *kdb.K, includeKeys bool) ([]*data.Frame, error) {
 			masterCols = rowData.Key.Data.([]string)
 			masterData = rowData.Value.Data.([]*kdb.K)
 		}
+		if len(masterCols) != len(masterData) {
+			return nil, fmt.Errorf("grouped table row %d column name/data counts differ", row)
+		}
 		for i, colName := range masterCols {
-			KObj := masterData[i]
+			kObj := masterData[i]
+			if kObj == nil {
+				return nil, fmt.Errorf("grouped table row %d column %d is nil", row, i)
+			}
 			var dat interface{}
-			if KObj.Type < 0 {
-				if KObj.Type == -kdb.KC {
-					KObj.Data = string(KObj.Data.(byte))
+			if kObj.Type < 0 {
+				atom, err := kdbAtomValue(kObj)
+				if err != nil {
+					return nil, fmt.Errorf("grouped table row %d column %d: %w", row, i, err)
 				}
-				dat = projectAtom(KObj.Data, depth)
+				dat, err = projectAtom(atom, depth)
+				if err != nil {
+					return nil, fmt.Errorf("grouped table row %d column %d: %w", row, i, err)
+				}
 			} else {
 				switch {
-				case KObj.Type == kdb.KC:
+				case kObj.Type == kdb.KC:
 					// if the column is a key column, this is a string. Otherwise it is a char list
-					if i < keyColCount || KObj.Len() != depth {
-						dat = projectAtom(KObj.Data, depth)
-					} else {
-						dat = charParser(KObj)
+					length, err := kdbVectorLength(kObj)
+					if err != nil {
+						return nil, fmt.Errorf("grouped table row %d column %d: %w", row, i, err)
 					}
-				case KObj.Type > kdb.K0:
-					dat = standardColumnParser(KObj)
-				case KObj.Type == kdb.K0:
-					stringColumn, err := stringParser(KObj)
-					if err == nil {
+					if i < keyColCount || length != depth {
+						text, err := kdbObjectString(kObj)
+						if err != nil {
+							return nil, fmt.Errorf("grouped table row %d column %d: %w", row, i, err)
+						}
+						dat, err = projectAtom(text, depth)
+						if err != nil {
+							return nil, fmt.Errorf("grouped table row %d column %d: %w", row, i, err)
+						}
+					} else {
+						dat, err = charParser(kObj)
+						if err != nil {
+							return nil, fmt.Errorf("grouped table row %d column %d: %w", row, i, err)
+						}
+					}
+				case kObj.Type > kdb.K0:
+					dat, err = standardColumnParser(kObj)
+					if err != nil {
+						return nil, fmt.Errorf("grouped table row %d column %d: %w", row, i, err)
+					}
+				case kObj.Type == kdb.K0:
+					stringColumn, stringErr := stringParser(kObj)
+					if stringErr == nil {
 						dat = stringColumn
 					} else {
-						dat = genericListStringColumn(KObj)
+						dat, err = genericListStringColumn(kObj)
+						if err != nil {
+							return nil, fmt.Errorf("grouped table row %d column %d: %w", row, i, err)
+						}
 					}
+				default:
+					return nil, fmt.Errorf("grouped table row %d column %d has unsupported type %d", row, i, kObj.Type)
 				}
 			}
 			frame.Fields = append(frame.Fields, data.NewField(colName, nil, dat))
@@ -854,143 +1427,220 @@ func ParseGroupedKdbTable(res *kdb.K, includeKeys bool) ([]*data.Frame, error) {
 	return frameArray, nil
 }
 
-func parseFrameName(key *kdb.K) string {
-	// handling for homogenous dictionaries
-	var frameNameArray []string
-	if key.Type != kdb.K0 {
-		if key.Type == kdb.KC {
-			for _, l := range key.Data.([]interface{}) {
-				frameNameArray = append(frameNameArray, string(l.(byte)))
-			}
-		} else {
-			for _, val := range key.Data.([]interface{}) {
-				frameNameArray = append(frameNameArray, fmt.Sprint(val))
-			}
-		}
-		// handling for heterogenous dictionaries
-	} else {
-		for _, obj := range key.Data.([]*kdb.K) {
-			if obj.Type == -kdb.KC {
-				frameNameArray = append(frameNameArray, string(obj.Data.(byte)))
-			} else {
-				frameNameArray = append(frameNameArray, fmt.Sprint(obj.Data))
-			}
-		}
+func parseFrameName(key *kdb.K) (string, error) {
+	if err := validateKdbObject(key); err != nil {
+		return "", err
 	}
-	// concat all key strings together
-	return strings.Join(frameNameArray, " - ")
+	if key.Type == kdb.K0 {
+		items := key.Data.([]*kdb.K)
+		names := make([]string, len(items))
+		for i, item := range items {
+			name, err := kdbObjectString(item)
+			if err != nil {
+				return "", fmt.Errorf("key item %d: %w", i, err)
+			}
+			names[i] = name
+		}
+		return strings.Join(names, " - "), nil
+	}
+	if key.Type < kdb.K0 {
+		return kdbObjectString(key)
+	}
+	if key.Type > kdb.K0 && key.Type <= kdb.KT {
+		length, err := kdbVectorLength(key)
+		if err != nil {
+			return "", err
+		}
+		names := make([]string, length)
+		for i := 0; i < length; i++ {
+			item, ok := correctedIndex(key, i).(*kdb.K)
+			if !ok || item == nil {
+				return "", fmt.Errorf("key item %d could not be indexed", i)
+			}
+			name, err := kdbObjectString(item)
+			if err != nil {
+				return "", fmt.Errorf("key item %d: %w", i, err)
+			}
+			names[i] = name
+		}
+		return strings.Join(names, " - "), nil
+	}
+	return "", fmt.Errorf("unsupported frame-name type %d", key.Type)
 }
 
 func getDepth(colArray []*kdb.K) (int, error) {
 	d := -1
 	aggPresent := false
-	for _, K := range colArray {
-		if K.Type < 0 {
+	for i, value := range colArray {
+		if value == nil {
+			return 0, fmt.Errorf("column %d is nil", i)
+		}
+		if err := validateKdbObject(value); err != nil {
+			return 0, fmt.Errorf("column %d: %w", i, err)
+		}
+		if value.Type < kdb.K0 {
 			aggPresent = true
 			continue
 		}
-		if K.Type == kdb.KC {
+		if value.Type == kdb.KC {
 			continue
+		}
+		length, err := kdbVectorLength(value)
+		if err != nil {
+			return 0, fmt.Errorf("column %d: %w", i, err)
 		}
 		if d == -1 {
-			d = K.Len()
+			d = length
 			continue
 		}
-		if d != K.Len() {
-			return 0, fmt.Errorf("Columns are present of non-equal length")
+		if d != length {
+			return 0, fmt.Errorf("columns have unequal lengths: %d and %d", d, length)
 		}
 	}
 	if d == -1 {
 		if aggPresent {
 			return 1, nil
 		}
-		return 0, fmt.Errorf("At least one key's value is an empty list '()'")
+		return 0, fmt.Errorf("all column values are character vectors or the column list is empty")
 	}
 	return d, nil
 }
 
-func correctedIndex(k *kdb.K, i int) interface{} {
-	if k.Type < kdb.K0 || k.Type > kdb.XT {
+func correctedIndex(value *kdb.K, i int) interface{} {
+	if value == nil || i < 0 {
 		return nil
 	}
-	if k.Len() == 0 {
-		// need to return null of that type
-		if k.Type == kdb.K0 {
-			return &kdb.K{Type: kdb.K0, Attr: kdb.NONE, Data: make([]*kdb.K, 0)}
+	if value.Type == kdb.XT {
+		table, ok := value.Data.(kdb.Table)
+		if !ok {
+			return nil
 		}
-		return nil
-
+		row, err := correctedTableIndexSafe(table, i)
+		if err != nil {
+			return nil
+		}
+		return &kdb.K{Type: kdb.XD, Attr: kdb.NONE, Data: row}
 	}
-	if k.Type == kdb.K0 {
-		return k.Data.([]*kdb.K)[i]
-	}
-	if k.Type > kdb.K0 && k.Type <= kdb.KT {
-		return indexKdbArray(k, i)
-	}
-	// case for table
-	// need to return dict with header
-	if k.Type != kdb.XT {
+	if value.Type < kdb.K0 || value.Type > kdb.KT {
 		return nil
 	}
-	var t = k.Data.(kdb.Table)
-	return &kdb.K{Type: kdb.XD, Attr: kdb.NONE, Data: correctedTableIndex(t, i)}
-}
-
-func indexKdbArray(k *kdb.K, i int) interface{} {
-	switch {
-	case k.Type == kdb.KB:
-		return &kdb.K{Type: -k.Type, Attr: kdb.NONE, Data: k.Data.([]bool)[i]}
-	case k.Type == kdb.UU:
-		return &kdb.K{Type: -k.Type, Attr: kdb.NONE, Data: k.Data.([]uuid.UUID)[i]}
-	case k.Type == kdb.KG:
-		return &kdb.K{Type: -k.Type, Attr: kdb.NONE, Data: k.Data.([]byte)[i]}
-	case k.Type == kdb.KH:
-		return &kdb.K{Type: -k.Type, Attr: kdb.NONE, Data: k.Data.([]int16)[i]}
-	case k.Type == kdb.KI:
-		return &kdb.K{Type: -k.Type, Attr: kdb.NONE, Data: k.Data.([]int32)[i]}
-	case k.Type == kdb.KJ:
-		return &kdb.K{Type: -k.Type, Attr: kdb.NONE, Data: k.Data.([]int64)[i]}
-	case k.Type == kdb.KE:
-		return &kdb.K{Type: -k.Type, Attr: kdb.NONE, Data: k.Data.([]float32)[i]}
-	case k.Type == kdb.KF:
-		return &kdb.K{Type: -k.Type, Attr: kdb.NONE, Data: k.Data.([]float64)[i]}
-	case k.Type == kdb.KC:
-		return &kdb.K{Type: -k.Type, Attr: kdb.NONE, Data: k.Data.(string)[i]}
-	case k.Type == kdb.KS:
-		return &kdb.K{Type: -k.Type, Attr: kdb.NONE, Data: k.Data.([]string)[i]}
-	case k.Type == kdb.KP:
-		return &kdb.K{Type: -k.Type, Attr: kdb.NONE, Data: k.Data.([]time.Time)[i]}
-	case k.Type == kdb.KM:
-		return &kdb.K{Type: -k.Type, Attr: kdb.NONE, Data: k.Data.([]kdb.Month)[i]}
-	case k.Type == kdb.KD:
-		return &kdb.K{Type: -k.Type, Attr: kdb.NONE, Data: k.Data.([]time.Time)[i]}
-	case k.Type == kdb.KZ:
-		return &kdb.K{Type: -k.Type, Attr: kdb.NONE, Data: k.Data.([]time.Time)[i]}
-	case k.Type == kdb.KN:
-		return &kdb.K{Type: -k.Type, Attr: kdb.NONE, Data: k.Data.([]time.Duration)[i]}
-	case k.Type == kdb.KU:
-		return &kdb.K{Type: -k.Type, Attr: kdb.NONE, Data: k.Data.([]kdb.Minute)[i]}
-	case k.Type == kdb.KV:
-		return &kdb.K{Type: -k.Type, Attr: kdb.NONE, Data: k.Data.([]kdb.Second)[i]}
-	case k.Type == kdb.KT:
-		return &kdb.K{Type: -k.Type, Attr: kdb.NONE, Data: k.Data.([]kdb.Time)[i]}
+	length, err := kdbVectorLength(value)
+	if err != nil || i >= length {
+		return nil
 	}
-	return nil
-}
-
-func correctedTableIndex(tbl kdb.Table, i int) kdb.Dict {
-	var d = kdb.Dict{}
-	d.Key = &kdb.K{Type: kdb.KS, Attr: kdb.NONE, Data: tbl.Columns}
-	vslice := make([]*kdb.K, len(tbl.Columns))
-	d.Value = &kdb.K{Type: kdb.K0, Attr: kdb.NONE, Data: vslice}
-	for ci := range tbl.Columns {
-		kd := correctedIndex(tbl.Data[ci], i)
-		vslice[ci] = kd.(*kdb.K)
+	if value.Type == kdb.K0 {
+		return value.Data.([]*kdb.K)[i]
 	}
-	return d
+	return indexKdbArray(value, i)
 }
 
-func projectAtom(a interface{}, d int) interface{} {
+func indexKdbArray(value *kdb.K, i int) interface{} {
+	length, err := kdbVectorLength(value)
+	if err != nil || i < 0 || i >= length || value.Type <= kdb.K0 {
+		return nil
+	}
+	atom := &kdb.K{Type: -value.Type, Attr: kdb.NONE}
+	switch value.Type {
+	case kdb.KB:
+		atom.Data = value.Data.([]bool)[i]
+	case kdb.UU:
+		atom.Data = value.Data.([]uuid.UUID)[i]
+	case kdb.KG:
+		atom.Data = value.Data.([]byte)[i]
+	case kdb.KH:
+		atom.Data = value.Data.([]int16)[i]
+	case kdb.KI:
+		atom.Data = value.Data.([]int32)[i]
+	case kdb.KJ:
+		atom.Data = value.Data.([]int64)[i]
+	case kdb.KE:
+		atom.Data = value.Data.([]float32)[i]
+	case kdb.KF:
+		atom.Data = value.Data.([]float64)[i]
+	case kdb.KC:
+		switch text := value.Data.(type) {
+		case string:
+			atom.Data = text[i]
+		case []byte:
+			atom.Data = text[i]
+		}
+	case kdb.KS:
+		atom.Data = value.Data.([]string)[i]
+	case kdb.KP:
+		atom.Data = value.Data.([]time.Time)[i]
+	case kdb.KM:
+		atom.Data = value.Data.([]kdb.Month)[i]
+	case kdb.KD:
+		atom.Data = value.Data.([]time.Time)[i]
+	case kdb.KZ:
+		atom.Data = value.Data.([]time.Time)[i]
+	case kdb.KN:
+		atom.Data = value.Data.([]time.Duration)[i]
+	case kdb.KU:
+		atom.Data = value.Data.([]kdb.Minute)[i]
+	case kdb.KV:
+		atom.Data = value.Data.([]kdb.Second)[i]
+	case kdb.KT:
+		atom.Data = value.Data.([]kdb.Time)[i]
+	default:
+		return nil
+	}
+	return atom
+}
+
+func correctedTableIndexSafe(tbl kdb.Table, i int) (kdb.Dict, error) {
+	table := &kdb.K{Type: kdb.XT, Attr: kdb.NONE, Data: tbl}
+	if err := validateKdbObject(table); err != nil {
+		return kdb.Dict{}, err
+	}
+	return correctedTableIndexValidated(tbl, i)
+}
+
+// correctedTableIndexValidated indexes a table whose full shape and columns were
+// already validated by the caller. Its work is bounded by the column count.
+func correctedTableIndexValidated(tbl kdb.Table, i int) (kdb.Dict, error) {
+	if len(tbl.Columns) != len(tbl.Data) {
+		return kdb.Dict{}, fmt.Errorf("table column name/data counts differ: %d and %d", len(tbl.Columns), len(tbl.Data))
+	}
+	if len(tbl.Data) == 0 {
+		return kdb.Dict{}, fmt.Errorf("table has no columns")
+	}
+	rowCount, err := kdbVectorLength(tbl.Data[0])
+	if err != nil {
+		return kdb.Dict{}, err
+	}
+	if i < 0 || i >= rowCount {
+		return kdb.Dict{}, fmt.Errorf("row index %d is out of range for %d rows", i, rowCount)
+	}
+	values := make([]*kdb.K, len(tbl.Columns))
+	for columnIndex := range tbl.Columns {
+		column := tbl.Data[columnIndex]
+		if column == nil || column.Type < kdb.K0 || column.Type > kdb.KT {
+			return kdb.Dict{}, fmt.Errorf("column %d is not an indexable vector", columnIndex)
+		}
+		columnLength, err := kdbVectorLength(column)
+		if err != nil {
+			return kdb.Dict{}, fmt.Errorf("column %d: %w", columnIndex, err)
+		}
+		if i >= columnLength {
+			return kdb.Dict{}, fmt.Errorf("row index %d is out of range for column %d with %d rows", i, columnIndex, columnLength)
+		}
+		item, ok := correctedIndex(column, i).(*kdb.K)
+		if !ok || item == nil {
+			return kdb.Dict{}, fmt.Errorf("column %d could not be indexed at row %d", columnIndex, i)
+		}
+		values[columnIndex] = item
+	}
+	return kdb.Dict{
+		Key:   &kdb.K{Type: kdb.KS, Attr: kdb.NONE, Data: tbl.Columns},
+		Value: &kdb.K{Type: kdb.K0, Attr: kdb.NONE, Data: values},
+	}, nil
+}
+
+func projectAtom(a interface{}, d int) (interface{}, error) {
+	if d < 0 {
+		return nil, fmt.Errorf("projection depth cannot be negative")
+	}
 	var o interface{}
 	switch v := a.(type) {
 	case int8:
@@ -1186,7 +1836,7 @@ func projectAtom(a interface{}, d int) interface{} {
 		}
 		o = arr
 	default:
-		panic(fmt.Errorf("field '%s' specified with unsupported type %T", a, v))
+		return nil, fmt.Errorf("unsupported projected atom type %T", a)
 	}
-	return o
+	return o, nil
 }

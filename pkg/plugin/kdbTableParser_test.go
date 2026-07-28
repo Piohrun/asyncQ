@@ -1,12 +1,312 @@
 package plugin
 
 import (
+	"math"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/data"
 	kdb "github.com/sv/kdbgo"
 )
+
+func TestParseKdbResponseRejectsMalformedObjectsWithoutPanicking(t *testing.T) {
+	cyclicList := &kdb.K{Type: kdb.K0, Attr: kdb.NONE}
+	cyclicList.Data = []*kdb.K{cyclicList}
+
+	tests := []struct {
+		name     string
+		response *kdb.K
+		model    QueryModel
+		want     string
+	}{
+		{
+			name:     "nil response",
+			response: nil,
+			want:     "nil response",
+		},
+		{
+			name:     "vector with nil data",
+			response: &kdb.K{Type: kdb.KJ, Attr: kdb.NONE},
+			model:    QueryModel{CompatibilityMode: CompatibilityModePanopticon},
+			want:     "invalid data for kdb+ vector type 7",
+		},
+		{
+			name:     "vector with wrong concrete data",
+			response: &kdb.K{Type: kdb.KJ, Attr: kdb.NONE, Data: []int32{1}},
+			model:    QueryModel{CompatibilityMode: CompatibilityModePanopticon},
+			want:     "expected []int64",
+		},
+		{
+			name:     "atom with wrong concrete data",
+			response: &kdb.K{Type: -kdb.KJ, Attr: kdb.NONE, Data: int32(1)},
+			model:    QueryModel{CompatibilityMode: CompatibilityModePanopticon},
+			want:     "invalid data for kdb+ atom type -7",
+		},
+		{
+			name:     "unsupported vector type",
+			response: &kdb.K{Type: 3, Attr: kdb.NONE, Data: []byte{1}},
+			model:    QueryModel{CompatibilityMode: CompatibilityModePanopticon},
+			want:     "unsupported kdb+ vector type 3",
+		},
+		{
+			name:     "generic list with nil item",
+			response: &kdb.K{Type: kdb.K0, Attr: kdb.NONE, Data: []*kdb.K{nil}},
+			model:    QueryModel{CompatibilityMode: CompatibilityModePanopticon},
+			want:     "item 0 is nil",
+		},
+		{
+			name: "generic list with invalid primitive index",
+			response: kdb.NewList(
+				&kdb.K{Type: kdb.KFUNCBP, Attr: kdb.NONE, Data: byte(255)},
+			),
+			model: QueryModel{CompatibilityMode: CompatibilityModePanopticon},
+			want:  "invalid binary-function index",
+		},
+		{
+			name:     "cyclic generic list",
+			response: cyclicList,
+			model:    QueryModel{CompatibilityMode: CompatibilityModePanopticon},
+			want:     "contains a cycle",
+		},
+		{
+			name:     "table with wrong concrete data",
+			response: &kdb.K{Type: kdb.XT, Attr: kdb.NONE, Data: "not a table"},
+			want:     "invalid table data",
+		},
+		{
+			name: "table with different name and data counts",
+			response: &kdb.K{
+				Type: kdb.XT,
+				Attr: kdb.NONE,
+				Data: kdb.Table{
+					Columns: []string{"a", "b"},
+					Data:    []*kdb.K{kdb.LongV([]int64{1})},
+				},
+			},
+			want: "column name/data counts differ",
+		},
+		{
+			name: "table with nil column",
+			response: &kdb.K{
+				Type: kdb.XT,
+				Attr: kdb.NONE,
+				Data: kdb.Table{
+					Columns: []string{"a"},
+					Data:    []*kdb.K{nil},
+				},
+			},
+			want: "table column 0 is nil",
+		},
+		{
+			name: "table with atom column",
+			response: &kdb.K{
+				Type: kdb.XT,
+				Attr: kdb.NONE,
+				Data: kdb.Table{
+					Columns: []string{"a"},
+					Data:    []*kdb.K{kdb.Long(1)},
+				},
+			},
+			want: "table column 0 is not a vector",
+		},
+		{
+			name: "table with unequal row lengths",
+			response: kdb.NewTable(
+				[]string{"a", "b"},
+				[]*kdb.K{kdb.LongV([]int64{1, 2}), kdb.LongV([]int64{1})},
+			),
+			want: "table columns have unequal row lengths",
+		},
+		{
+			name:     "dictionary with wrong concrete data",
+			response: &kdb.K{Type: kdb.XD, Attr: kdb.NONE, Data: "not a dictionary"},
+			want:     "invalid dictionary data",
+		},
+		{
+			name: "dictionary with nil key",
+			response: &kdb.K{
+				Type: kdb.XD,
+				Attr: kdb.NONE,
+				Data: kdb.Dict{Value: kdb.Long(1)},
+			},
+			model: QueryModel{CompatibilityMode: CompatibilityModePanopticon},
+			want:  "dictionary key is nil",
+		},
+		{
+			name: "dictionary with nil value",
+			response: &kdb.K{
+				Type: kdb.XD,
+				Attr: kdb.NONE,
+				Data: kdb.Dict{Key: kdb.Symbol("a")},
+			},
+			model: QueryModel{CompatibilityMode: CompatibilityModePanopticon},
+			want:  "dictionary value is nil",
+		},
+		{
+			name: "dictionary with incompatible column lengths",
+			response: kdb.NewDict(
+				kdb.SymbolV([]string{"a", "b"}),
+				kdb.NewList(kdb.LongV([]int64{1, 2}), kdb.LongV([]int64{1, 2, 3})),
+			),
+			model: QueryModel{CompatibilityMode: CompatibilityModePanopticon},
+			want:  "dictionary values have incompatible lengths",
+		},
+		{
+			name: "keyed table with unequal key and value rows",
+			response: kdb.NewDict(
+				kdb.NewTable([]string{"sym"}, []*kdb.K{kdb.SymbolV([]string{"A", "B"})}),
+				kdb.NewTable([]string{"value"}, []*kdb.K{kdb.LongV([]int64{1})}),
+			),
+			want: "keyed table key/value row counts differ",
+		},
+		{
+			name: "grouped table with unequal aggregate lengths",
+			response: kdb.NewDict(
+				kdb.NewTable([]string{"sym"}, []*kdb.K{kdb.SymbolV([]string{"A"})}),
+				kdb.NewTable(
+					[]string{"bid", "ask"},
+					[]*kdb.K{
+						kdb.NewList(kdb.FloatV([]float64{1, 2})),
+						kdb.NewList(kdb.FloatV([]float64{1})),
+					},
+				),
+			),
+			want: "columns have unequal lengths",
+		},
+		{
+			name: "grouped table with no key columns",
+			response: kdb.NewDict(
+				kdb.NewTable(nil, nil),
+				kdb.NewTable([]string{"value"}, []*kdb.K{kdb.NewList()}),
+			),
+			want: "key table has no columns",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assertParseErrorWithoutPanic(t, tt.response, tt.model, tt.want)
+		})
+	}
+}
+
+func TestParseKdbResponseValidationDoesNotLeakColumnContents(t *testing.T) {
+	const sensitiveColumnName = "secret-column-value-that-must-not-appear"
+	response := &kdb.K{
+		Type: kdb.XT,
+		Attr: kdb.NONE,
+		Data: kdb.Table{
+			Columns: []string{sensitiveColumnName},
+			Data:    nil,
+		},
+	}
+
+	_, err := parseKdbResponseToFrames(response, QueryModel{}, "A")
+	if err == nil {
+		t.Fatal("expected malformed response error")
+	}
+	if strings.Contains(err.Error(), sensitiveColumnName) {
+		t.Fatalf("error leaked response contents: %v", err)
+	}
+}
+
+func assertParseErrorWithoutPanic(t *testing.T, response *kdb.K, model QueryModel, want string) {
+	t.Helper()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			t.Fatalf("parseKdbResponseToFrames panicked: %v", recovered)
+		}
+	}()
+
+	frames, err := parseKdbResponseToFrames(response, model, "A")
+	if err == nil {
+		t.Fatalf("expected error, got frames: %#v", frames)
+	}
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("unexpected error: got %q, want substring %q", err, want)
+	}
+	if strings.Contains(err.Error(), "unexpected parser failure") {
+		t.Fatalf("malformed response reached panic recovery instead of explicit validation: %v", err)
+	}
+}
+
+func TestParserHelpersRejectNilAndOutOfRangeInputs(t *testing.T) {
+	if item := correctedIndex(kdb.LongV([]int64{1}), 1); item != nil {
+		t.Fatalf("out-of-range corrected index returned %#v", item)
+	}
+	if _, err := parseFrameName(nil); err == nil {
+		t.Fatal("expected nil frame-name key error")
+	}
+	if _, err := getDepth([]*kdb.K{nil}); err == nil {
+		t.Fatal("expected nil grouped column error")
+	}
+}
+
+func TestKdbObjectValidationDepthBoundary(t *testing.T) {
+	accepted := nestedKdbList(maxKdbObjectDepth)
+	if _, err := ParseKdbObjectAsFrame(accepted); err != nil {
+		t.Fatalf("depth %d should be accepted: %v", maxKdbObjectDepth, err)
+	}
+
+	rejected := nestedKdbList(maxKdbObjectDepth + 1)
+	if _, err := ParseKdbObjectAsFrame(rejected); err == nil {
+		t.Fatalf("depth %d should be rejected", maxKdbObjectDepth+1)
+	} else if !strings.Contains(err.Error(), "exceeds maximum nesting depth") {
+		t.Fatalf("unexpected depth error: %v", err)
+	}
+}
+
+func TestParseKdbObjectAsFrameAcceptsDecodedTemporalShapes(t *testing.T) {
+	qEpoch := time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)
+	nullTimestamp := qEpoch.Add(time.Duration(kdb.Nj))
+	minuteValue := kdb.Minute(time.Time{})
+	secondValue := kdb.Second(time.Time{})
+	timeValue := kdb.Time(time.Time{})
+
+	tests := []struct {
+		name  string
+		value *kdb.K
+	}{
+		{name: "timestamp atom", value: &kdb.K{Type: -kdb.KP, Attr: kdb.NONE, Data: nullTimestamp}},
+		{name: "timestamp vector", value: &kdb.K{Type: kdb.KP, Attr: kdb.NONE, Data: []time.Time{qEpoch}}},
+		{name: "month atom null", value: &kdb.K{Type: -kdb.KM, Attr: kdb.NONE, Data: kdb.Month(kdb.Ni)}},
+		{name: "month vector", value: &kdb.K{Type: kdb.KM, Attr: kdb.NONE, Data: []kdb.Month{0}}},
+		{name: "date atom null", value: &kdb.K{Type: -kdb.KD, Attr: kdb.NONE, Data: int32(kdb.Ni)}},
+		{name: "date vector", value: &kdb.K{Type: kdb.KD, Attr: kdb.NONE, Data: []time.Time{qEpoch}}},
+		{name: "datetime atom null", value: &kdb.K{Type: -kdb.KZ, Attr: kdb.NONE, Data: math.NaN()}},
+		{name: "datetime vector", value: &kdb.K{Type: kdb.KZ, Attr: kdb.NONE, Data: []time.Time{qEpoch}}},
+		{name: "timespan atom null", value: &kdb.K{Type: -kdb.KN, Attr: kdb.NONE, Data: time.Duration(kdb.Nj)}},
+		{name: "timespan vector", value: &kdb.K{Type: kdb.KN, Attr: kdb.NONE, Data: []time.Duration{0}}},
+		{name: "minute atom null", value: &kdb.K{Type: -kdb.KU, Attr: kdb.NONE, Data: int32(kdb.Ni)}},
+		{name: "minute vector", value: &kdb.K{Type: kdb.KU, Attr: kdb.NONE, Data: []kdb.Minute{minuteValue}}},
+		{name: "second atom null", value: &kdb.K{Type: -kdb.KV, Attr: kdb.NONE, Data: int32(kdb.Ni)}},
+		{name: "second vector", value: &kdb.K{Type: kdb.KV, Attr: kdb.NONE, Data: []kdb.Second{secondValue}}},
+		{name: "time atom from indexed vector", value: &kdb.K{Type: -kdb.KT, Attr: kdb.NONE, Data: timeValue}},
+		{name: "time vector", value: &kdb.K{Type: kdb.KT, Attr: kdb.NONE, Data: []kdb.Time{timeValue}}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			frame, err := ParseKdbObjectAsFrame(tt.value)
+			if err != nil {
+				t.Fatalf("ParseKdbObjectAsFrame returned error: %v", err)
+			}
+			if got := frame.Fields[0].Len(); got != 1 {
+				t.Fatalf("unexpected field length: got %d want 1", got)
+			}
+		})
+	}
+}
+
+func nestedKdbList(depth int) *kdb.K {
+	value := kdb.Long(1)
+	for i := 0; i < depth; i++ {
+		value = kdb.NewList(value)
+	}
+	return value
+}
 
 func TestParsePanopticonScalarObjectAsFrame(t *testing.T) {
 	frames, err := parseKdbResponseToFrames(kdb.Long(42), QueryModel{CompatibilityMode: CompatibilityModePanopticon}, "A")
@@ -104,6 +404,28 @@ func TestParseSimpleTablePreservesGenericStringListColumn(t *testing.T) {
 	}
 }
 
+func TestParseSimpleTablePreservesSupportedOpaqueGenericValues(t *testing.T) {
+	res := kdb.NewTable(
+		[]string{"mixed"},
+		[]*kdb.K{
+			kdb.NewList(
+				kdb.Long(1),
+				&kdb.K{Type: kdb.KFUNCUP, Attr: kdb.NONE, Data: byte(0)},
+			),
+		},
+	)
+	frames, err := parseKdbResponseToFrames(res, QueryModel{}, "A")
+	if err != nil {
+		t.Fatalf("parseKdbResponseToFrames returned error: %v", err)
+	}
+	field := onlyFrame(t, frames).Fields[0]
+	for i, want := range []string{"1", "0"} {
+		if got := field.At(i); got != want {
+			t.Fatalf("unexpected opaque value at %d: got %#v want %#v", i, got, want)
+		}
+	}
+}
+
 func TestParsePanopticonGenericDictAsFrame(t *testing.T) {
 	res := kdb.NewDict(
 		kdb.SymbolV([]string{"sym", "count"}),
@@ -181,6 +503,33 @@ func TestParsePanopticonKeyedTableFlattensKeyAndValueColumns(t *testing.T) {
 	}
 }
 
+func TestParsePanopticonKeyedTableRejectsZeroColumnKeyWithValueRows(t *testing.T) {
+	res := kdb.NewDict(
+		kdb.NewTable(nil, nil),
+		kdb.NewTable([]string{"value"}, []*kdb.K{kdb.LongV([]int64{1})}),
+	)
+
+	assertParseErrorWithoutPanic(
+		t,
+		res,
+		QueryModel{CompatibilityMode: CompatibilityModePanopticon},
+		"keyed table key/value row counts differ: 0 and 1",
+	)
+}
+
+func TestParsePanopticonEmptyKeyedTableRemainsValid(t *testing.T) {
+	res := kdb.NewDict(kdb.NewTable(nil, nil), kdb.NewTable(nil, nil))
+
+	frames, err := parseKdbResponseToFrames(res, QueryModel{CompatibilityMode: CompatibilityModePanopticon}, "A")
+	if err != nil {
+		t.Fatalf("parseKdbResponseToFrames returned error: %v", err)
+	}
+	frame := onlyFrame(t, frames)
+	if len(frame.Fields) != 0 {
+		t.Fatalf("expected empty keyed frame, got %d fields", len(frame.Fields))
+	}
+}
+
 func TestParseGroupedTableConvertsMixedGenericListColumnToStrings(t *testing.T) {
 	res := kdb.NewDict(
 		kdb.NewTable([]string{"sym"}, []*kdb.K{
@@ -205,6 +554,20 @@ func TestParseGroupedTableConvertsMixedGenericListColumnToStrings(t *testing.T) 
 		if got := mixed.At(i); got != want {
 			t.Fatalf("unexpected grouped mixed value at %d: got %#v want %#v", i, got, want)
 		}
+	}
+}
+
+func TestParseEmptyGroupedTableWithoutValueColumns(t *testing.T) {
+	res := kdb.NewDict(
+		kdb.NewTable([]string{"sym"}, []*kdb.K{kdb.SymbolV(nil)}),
+		kdb.NewTable(nil, nil),
+	)
+	frames, err := parseKdbResponseToFrames(res, QueryModel{}, "A")
+	if err != nil {
+		t.Fatalf("parseKdbResponseToFrames returned error: %v", err)
+	}
+	if len(frames) != 0 {
+		t.Fatalf("expected no frames, got %d", len(frames))
 	}
 }
 
@@ -305,4 +668,33 @@ func fieldByName(t *testing.T, frame *data.Frame, name string) *data.Field {
 	}
 	t.Fatalf("field %q not found", name)
 	return nil
+}
+
+func BenchmarkCorrectedTableIndexValidated(b *testing.B) {
+	const rowCount = 8192
+	longs := make([]int64, rowCount)
+	symbols := make([]string, rowCount)
+	for i := 0; i < rowCount; i++ {
+		longs[i] = int64(i)
+		symbols[i] = "sym"
+	}
+	table := kdb.Table{
+		Columns: []string{"id", "sym", "value"},
+		Data: []*kdb.K{
+			kdb.LongV(longs),
+			kdb.SymbolV(symbols),
+			kdb.LongV(longs),
+		},
+	}
+	if err := validateKdbObject(&kdb.K{Type: kdb.XT, Attr: kdb.NONE, Data: table}); err != nil {
+		b.Fatalf("invalid benchmark table: %v", err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := correctedTableIndexValidated(table, i%rowCount); err != nil {
+			b.Fatal(err)
+		}
+	}
 }
