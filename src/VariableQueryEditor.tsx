@@ -1,5 +1,10 @@
-import React, {ChangeEvent, useState} from 'react';
+import React, { ChangeEvent } from 'react';
 import { MyVariableQuery } from './types';
+import {
+  normalizeVariableQuery,
+  normalizeVariableQueryTimeout,
+  variableQueryDefinition,
+} from './variableQuery';
 
 interface VariableQueryProps {
     query: MyVariableQuery;
@@ -7,26 +12,26 @@ interface VariableQueryProps {
 }
 
 export const VariableQueryEditor: React.FC<VariableQueryProps> = ({ onChange, query }) => {
-    const [state, setState] = useState(query);
+    const state = normalizeVariableQuery(query);
 
-    const saveQuery = () => {
-        onChange(state, `${state.queryText} (${state.timeOut})`);
+    const updateQuery = (nextQuery: MyVariableQuery) => {
+        const normalized = normalizeVariableQuery(nextQuery);
+        onChange(normalized, variableQueryDefinition(normalized));
     };
 
     const handleTimeOutChange = (event: ChangeEvent<HTMLInputElement>) =>{
-    if((/^\d+$/.test(event.target.value) || event.target.value==="")){
-        console.log(event.target.value)
-        setState({
+        if (/^\d*$/.test(event.target.value)) {
+            updateQuery({
             ...state,
-            timeOut:event.target.value,
+                timeOut: String(normalizeVariableQueryTimeout(event.target.value)),
+            });
+        }
+    };
 
-        })}};
-
-    const handleQueryChange = (event: React.FormEvent<HTMLInputElement>) =>
-        setState({
+    const handleQueryChange = (event: ChangeEvent<HTMLInputElement>) =>
+        updateQuery({
             ...state,
             queryText: event.currentTarget.value,
-
         });
 
     return (
@@ -36,9 +41,8 @@ export const VariableQueryEditor: React.FC<VariableQueryProps> = ({ onChange, qu
                 <input
                     name="queryText"
                     className="gf-form-input"
-                    onBlur={saveQuery}
                     onChange={handleQueryChange}
-                    value={state.queryText}
+                    value={state.queryText ?? ''}
                 />
             </div>
             <div className="gf-form">
@@ -46,9 +50,8 @@ export const VariableQueryEditor: React.FC<VariableQueryProps> = ({ onChange, qu
                 <input
                     name="timeOut"
                     className="gf-form-input"
-                    onBlur={saveQuery}
                     onChange={handleTimeOutChange}
-                    value={state.timeOut}
+                    value={state.timeOut ?? ''}
                 />
             </div>
 

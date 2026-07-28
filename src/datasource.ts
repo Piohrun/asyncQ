@@ -4,23 +4,31 @@ import {
   DataQueryResponse,
   DataSourceInstanceSettings,
   FieldType,
+  LegacyMetricFindQueryOptions,
   LiveChannelScope,
   LoadingState,
+  MetricFindValue,
   ScopedVars,
   dataFrameFromJSON,
 } from '@grafana/data';
 import {
   DataSourceWithBackend,
+  BackendDataSourceResponse,
   getBackendSrv,
   getGrafanaLiveSrv,
   getTemplateSrv,
   toDataQueryResponse,
 } from '@grafana/runtime';
-import { defer, merge, Observable, of } from 'rxjs';
+import { defer, lastValueFrom, merge, Observable, of } from 'rxjs';
 import { finalize, map, shareReplay, takeWhile } from 'rxjs/operators';
 
 import { MyDataSourceOptions, MyQuery, MyVariableQuery } from './types';
 import { expandPanopticonDashboardParameters } from './panopticonParameters';
+import {
+  buildVariableQueryRequest,
+  extractVariableQueryValues,
+  variableQueryErrorMessage,
+} from './variableQuery';
 
 const defaultMode = 'sync';
 
@@ -530,44 +538,33 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
     return undefined;
   }
 
-  async metricFindQuery(query: MyVariableQuery, options?: any): Promise<any> {
+  async metricFindQuery(
+    query: MyVariableQuery,
+    options?: LegacyMetricFindQueryOptions
+  ): Promise<MetricFindValue[]> {
     const templateSrv = getTemplateSrv();
-    let timeout = parseInt(query.timeOut, 10);
-    const body: any = {
-      queries: [
-        {
-          datasourceId: this.id,
-          orgId: this.id,
-          queryText: query.queryText ? templateSrv.replace(query.queryText) : '',
-          timeOut: timeout,
-          executionMode: 'sync',
-        },
-      ],
-    };
+    const body = buildVariableQueryRequest(
+      query,
+      query.queryText ? templateSrv.replace(query.queryText, options?.scopedVars) : '',
+      options,
+      { uid: this.uid, type: this.type }
+    );
 
-    const backendQuery = getBackendSrv()
-      .datasourceRequest({
+    try {
+      const response = await lastValueFrom(
+        getBackendSrv().fetch<BackendDataSourceResponse>({
         url: '/api/ds/query',
         method: 'POST',
         data: body,
-      })
-      .then((response: any) => {
-        let parsedResponse = toDataQueryResponse(response);
-        let responseValues: any[] = [];
-        for (let frame in parsedResponse.data) {
-          responseValues = responseValues.concat(
-            parsedResponse.data[frame].fields[0].values.toArray().map((x: any) => {
-              return { text: x };
-            })
-          );
-        }
-        return responseValues;
-      })
-      .catch((err) => {
-        console.log(err);
-        err.isHandled = true;
-        return { text: 'ERROR' };
-      });
-    return backendQuery;
+        })
+      );
+      const parsedResponse = toDataQueryResponse(response, body.queries);
+      if (parsedResponse.error) {
+        throw new Error(variableQueryErrorMessage(parsedResponse.error));
+      }
+      return extractVariableQueryValues(parsedResponse.data);
+    } catch (error) {
+      throw new Error(`Variable query failed: ${variableQueryErrorMessage(error)}`);
+    }
   }
 }

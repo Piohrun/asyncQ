@@ -150,7 +150,7 @@ export interface MySecureJsonData {
   caCert?: string;
 }
 
-export interface MyVariableQuery extends DataQuery{
+export interface MyVariableQuery extends DataQuery {
   queryText?: string;
-  timeOut: string;
+  timeOut?: string;
 }
