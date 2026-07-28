@@ -53,7 +53,7 @@ AsyncQ can also cache successful sync query results in the datasource instance. 
 | Formatted time macros | Direct | q string literal, e.g. `{TimeWindowStart:yyyy-MM-dd HH:mm:ss.SSS}` | Format support covers common Java-style date tokens; validate unusual formats. |
 | `{Interval}`, `{IntervalNs}`, `{IntervalMs}` | Direct | q long | Derived from Grafana query interval. |
 | `{MaxDataPoints}`, `{RefID}`, `{OrgID}`, user/datasource macros | Direct | q long or q string | Available in query text, wrapper, and request dict. |
-| Panopticon dashboard/action parameters | Config-only | Create Grafana variables with matching names; AsyncQ expands `{parameter}` and `{parameter:delimiter}` in Panopticon mode | Values are inserted as raw text. Multi-select quoting and symbol-list semantics must still match the q query. |
+| Panopticon dashboard/action parameters | Config-only | Create Grafana variables with matching names; AsyncQ expands `{parameter}` and `{parameter:delimiter}` in Panopticon mode | Every external scalar/array element must match the conservative single-token policy. Unsafe values fail instead of being escaped or transformed. Query-authored delimiters remain trusted, bounded q syntax. |
 | Cascading/filter variables | Config-only or Visual rewrite | Use Grafana variables backed by sync q queries | Panopticon-specific filter UX must be rebuilt with Grafana variable controls. |
 | Panopticon session, entitlement, workbook state | Adapter needed | Reproduce expected fields in `panopticonRequestFunction` or plugin adapter | Same credentials may not be enough if gateway expects Panopticon session IDs or entitlements. |
 | Client-side calculated parameters | Visual rewrite or q adapter | Move calculation into q, Grafana transform, or variable expression | Do not assume Panopticon client transforms exist in Grafana. |
@@ -345,11 +345,20 @@ Dashboard/action parameters can be kept in Panopticon curly-brace form when a Gr
 
 | Parameter | Expansion |
 | --- | --- |
-| `{symbol}` | Raw Grafana variable value for `symbol` |
-| `{symbol:,}` | Multi-value `symbol` joined with `,` |
-| `{symbol: }` | Multi-value `symbol` joined with a space |
+| `{symbol}` | Validated single-token Grafana variable value for `symbol` |
+| `{symbol:,}` | Independently validated multi-value `symbol` elements joined with trusted query-authored `,` |
+| `{symbol: }` | Independently validated multi-value `symbol` elements joined with trusted query-authored space |
 
-Values are inserted as raw text, mirroring Panopticon-style query substitution. Keep q quoting in the query, for example ``sym=`{symbol}`` for a single symbol or ``sym in `$" " vs "{symbols: }"`` for a multi-symbol variable joined by spaces. Grafana variables must still be created with the correct values; the plugin does not infer dashboard parameter definitions from a Panopticon workbook.
+The same validation applies to standard Grafana `$word`, `[[word]]`, and `${word}` substitution in executable q. Grafana also parses `[[word:format]]`, `${word:format}`, and `${word.fieldPath:format}`. AsyncQ rejects field paths and any resolved authored-format reference because those paths can override the custom formatter. It likewise rejects resolved registry macros, custom-All values, scene interpolation, and malformed or inconsistent fourth-argument interpolation audits. Every resolved reference must map exactly once and in order to the validated formatter result; unresolved references may remain literal. AsyncQ cannot infer whether the placeholder is inside q text, symbol, or expression context, so it does not quote, escape, strip, or otherwise transform external values. Each scalar or multi-value element must already be exactly one of:
+
+- an ASCII identifier/data token with nonempty identifier-like dot-separated segments and no leading dot, such as `AAPL` or `region.eu`;
+- a finite decimal/exponent number;
+- a Grafana interval made from digits plus `ms`, `s`, `m`, `h`, `d`, `w`, `M`, or `y`;
+- an explicit ISO/q date, time, or timestamp shape.
+
+Quotes, slash comments, backslashes, whitespace/control bytes, Unicode, q separators/operators, brackets/braces, nested values, booleans, nulls, nonfinite numbers, and objects are rejected before dispatch. Missing variables and reserved backend macros remain literal. Standard Grafana arrays use `,`; Panopticon arrays use the delimiter written after `:`. That delimiter is trusted query-authored q syntax, so a space or semicolon may be intentional, but it is limited to 32 UTF-8 bytes and cannot contain braces or control characters. Parameter names are limited to 128 bytes, arrays to 1–1024 values, elements to 256 bytes, each replacement to 64 KiB, interpolation and dashboard-variable scans to 4096 entries, and the final template to 256 KiB.
+
+Keep q quoting or casting in the authored query, for example ``sym=`{symbol}`` for a single symbol or ``sym in `$" " vs "{symbols: }"`` for a multi-symbol variable joined by spaces. Safe Grafana built-ins such as `$__from`, `$__to`, `$__interval`, and `$__interval_ms` work when their resolved values have one of the allowed token shapes and pass through the audited formatter. In Panopticon mode, the reserved `$TimeWindowStart`, `$TimeWindowEnd`, `$Snapshot`, and `$FocusTime` macros intentionally follow the Go backend's substring-prefix behavior: `$TimeWindowStartSuffix`, for example, is protected for backend expansion as the reserved prefix plus `Suffix`. Avoid Grafana variable names that begin with one of those macros. Grafana variables must still be created with the correct values; the plugin does not infer dashboard parameter definitions from a Panopticon workbook.
 
 ## Request Function Shape
 

@@ -19,11 +19,12 @@ import {
   getTemplateSrv,
   toDataQueryResponse,
 } from '@grafana/runtime';
+import type { VariableInterpolation } from '@grafana/runtime';
 import { defer, lastValueFrom, merge, Observable, of } from 'rxjs';
 import { finalize, map, shareReplay, takeWhile } from 'rxjs/operators';
 
 import { MyDataSourceOptions, MyQuery, MyVariableQuery } from './types';
-import { expandPanopticonDashboardParameters } from './panopticonParameters';
+import { interpolateQTemplateVariables } from './panopticonParameters';
 import {
   buildVariableQueryRequest,
   extractVariableQueryValues,
@@ -93,15 +94,28 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
     const dashboardVariables = templateSrv.getVariables();
     const executionMode = query.executionMode || this.options.executionMode || defaultMode;
     const compatibilityMode = query.compatibilityMode || this.options.compatibilityMode || 'native';
-    let queryText = query.queryText ? templateSrv.replace(query.queryText, scopedVars) : '';
+    const grafanaReplace = (
+      target: string,
+      variables: ScopedVars | undefined,
+      formatter: (value: unknown, variable?: unknown, formatVariableValue?: unknown) => string,
+      interpolations: VariableInterpolation[]
+    ) => templateSrv.replace(target, variables, formatter, interpolations);
+    const queryText = interpolateQTemplateVariables(
+      query.queryText || '',
+      scopedVars,
+      dashboardVariables,
+      grafanaReplace,
+      compatibilityMode === 'panopticon'
+    );
     let panopticonQueryWrapper = query.panopticonQueryWrapper || this.options.panopticonQueryWrapper || '';
 
     if (compatibilityMode === 'panopticon') {
-      queryText = expandPanopticonDashboardParameters(queryText, scopedVars, dashboardVariables);
-      panopticonQueryWrapper = expandPanopticonDashboardParameters(
-        templateSrv.replace(panopticonQueryWrapper, scopedVars),
+      panopticonQueryWrapper = interpolateQTemplateVariables(
+        panopticonQueryWrapper,
         scopedVars,
-        dashboardVariables
+        dashboardVariables,
+        grafanaReplace,
+        true
       );
     }
 
@@ -543,9 +557,16 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
     options?: LegacyMetricFindQueryOptions
   ): Promise<MetricFindValue[]> {
     const templateSrv = getTemplateSrv();
+    const queryText = interpolateQTemplateVariables(
+      query.queryText || '',
+      options?.scopedVars,
+      templateSrv.getVariables(),
+      (target, scopedVars, formatter, interpolations) =>
+        templateSrv.replace(target, scopedVars, formatter, interpolations)
+    );
     const body = buildVariableQueryRequest(
       query,
-      query.queryText ? templateSrv.replace(query.queryText, options?.scopedVars) : '',
+      queryText,
       options,
       { uid: this.uid, type: this.type }
     );
