@@ -10,25 +10,51 @@ on:
       - main
       - master
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
+    name: Test and build
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out repository
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
         with:
           node-version: '22'
           cache: npm
 
-      - run: npm ci
-      - run: npm test
-      - run: npm run build:all
+      - name: Install frontend dependencies
+        run: npm ci
 
-      - uses: actions/setup-go@v5
+      - name: Test frontend
+        run: npm test
+
+      - name: Build frontend
+        run: npm run build:all
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
 
-      - run: go test ./pkg/...
-      - run: go build -o /tmp/gpx_asyncq-kdbbackend-datasource ./pkg
+      - name: Vet backend
+        run: go vet ./pkg/...
+
+      - name: Test backend
+        run: go test ./pkg/...
+
+      - name: Test backend with race detector
+        run: go test -count=1 -race ./pkg/...
+
+      - name: Build backend
+        run: go build -o /tmp/gpx_asyncq-kdbbackend-datasource ./pkg
