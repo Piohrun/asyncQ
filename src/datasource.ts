@@ -24,6 +24,14 @@ import { defer, lastValueFrom, merge, Observable, of } from 'rxjs';
 import { finalize, map, shareReplay, takeWhile } from 'rxjs/operators';
 
 import { MyDataSourceOptions, MyQuery, MyVariableQuery } from './types';
+import {
+  effectiveExecutionMode,
+  livePathFamily,
+  LiveChannelDescriptor,
+  normalizeLiveBounds,
+  NormalizedLiveBounds,
+  openLiveChannelSession,
+} from './liveQuery';
 import { interpolateQTemplateVariables } from './panopticonParameters';
 import {
   buildVariableQueryRequest,
@@ -31,9 +39,7 @@ import {
   variableQueryErrorMessage,
 } from './variableQuery';
 
-const defaultMode = 'sync';
-
-interface StreamSession {
+interface StreamSession extends LiveChannelDescriptor {
   framesByKey: Map<string, DataFrame>;
   maxRows: number;
   retentionMs: number;
@@ -50,9 +56,9 @@ interface AsyncSession {
 interface LiveRequestData extends MyQuery {
   intervalMs: number;
   maxDataPoints?: number;
-  timeRange: {
-    from?: string;
-    to?: string;
+  timeRange?: {
+    from: string;
+    to: string;
   };
 }
 
@@ -92,7 +98,7 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
   applyTemplateVariables(query: MyQuery, scopedVars?: ScopedVars) {
     const templateSrv = getTemplateSrv();
     const dashboardVariables = templateSrv.getVariables();
-    const executionMode = query.executionMode || this.options.executionMode || defaultMode;
+    const executionMode = effectiveExecutionMode(query.executionMode, this.options.executionMode);
     const compatibilityMode = query.compatibilityMode || this.options.compatibilityMode || 'native';
     const grafanaReplace = (
       target: string,
@@ -173,7 +179,7 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
   }
 
   private targetMode(target: MyQuery): string {
-    return target.executionMode || this.options.executionMode || defaultMode;
+    return effectiveExecutionMode(target.executionMode, this.options.executionMode);
   }
 
   private runLiveQuery(target: MyQuery, request: DataQueryRequest<MyQuery>): Observable<DataQueryResponse> {
@@ -182,62 +188,90 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
       return of({ data: [], state: LoadingState.Error, error: new Error('Grafana Live is not available') });
     }
 
-    const query = this.applyTemplateVariables(target, request.scopedVars);
-    const mode = query.executionMode === 'stream' ? 'stream' : 'async';
-    const maxRows = query.maxStreamRows || request.maxDataPoints || 1000;
-    const retentionMs = query.streamRetentionMs || 0;
-    const liveRequestData = this.liveRequestData(query, request);
-    const requestIdentity = this.liveRequestIdentity(mode, liveRequestData, request, maxRows, retentionMs);
-    const liveID = this.liveID(query, mode, request, requestIdentity);
-    const path = `${mode}/${liveID}`;
+    const preparedQuery = this.applyTemplateVariables(target, request.scopedVars);
+    const executionMode = effectiveExecutionMode(preparedQuery.executionMode, this.options.executionMode);
+    const bounds = normalizeLiveBounds({
+      maxRows: preparedQuery.maxStreamRows,
+      fallbackMaxRows: request.maxDataPoints,
+      retentionMs: preparedQuery.streamRetentionMs,
+      maxDataPoints: request.maxDataPoints,
+      intervalMs: request.intervalMs,
+    });
+    const query = {
+      ...preparedQuery,
+      executionMode,
+      maxStreamRows: bounds.maxRows,
+      streamRetentionMs: bounds.retentionMs,
+    };
+    const mode = livePathFamily(executionMode);
+    const maxRows = bounds.maxRows;
+    const retentionMs = bounds.retentionMs;
+    const liveRequestData = this.liveRequestData(query, request, bounds);
+    const requestIdentity = this.liveRequestIdentity(mode, liveRequestData, maxRows, retentionMs);
+    const channelBase = this.liveChannelBase(query, mode, request, requestIdentity);
 
     if (mode === 'stream') {
       return defer(() => {
-        const session = this.getOrCreateStreamSession(
-          live,
-          requestIdentity,
-          liveRequestData,
-          path,
-          liveID,
-          maxRows,
-          retentionMs
-        );
-        session.maxRows = Math.max(session.maxRows, maxRows);
-        session.retentionMs = retentionMs;
-        const snapshot = this.snapshotFrames(session.framesByKey, maxRows, retentionMs);
-        if (snapshot.length > 0) {
-          return merge(of({ data: snapshot, state: session.state, key: liveID }), session.response);
+        try {
+          const session = this.getOrCreateStreamSession(
+            live,
+            requestIdentity,
+            liveRequestData,
+            channelBase,
+            maxRows,
+            retentionMs
+          );
+          session.maxRows = Math.max(session.maxRows, maxRows);
+          session.retentionMs = retentionMs;
+          const snapshot = this.snapshotFrames(session.framesByKey, maxRows, retentionMs);
+          if (snapshot.length > 0) {
+            return merge(of({ data: snapshot, state: session.state, key: session.liveID }), session.response);
+          }
+          return session.response;
+        } catch (error) {
+          return of({
+            data: [],
+            state: LoadingState.Error,
+            error: this.liveChannelError(error),
+          });
         }
-        return session.response;
       });
     }
 
-    return this.runAsyncLiveQuery(live, liveRequestData, path, liveID, maxRows);
+    return this.runAsyncLiveQuery(live, liveRequestData, channelBase, maxRows);
   }
 
   private runAsyncLiveQuery(
     live: ReturnType<typeof getGrafanaLiveSrv>,
     liveRequestData: LiveRequestData,
-    path: string,
-    liveID: string,
+    channelBase: string,
     maxRows: number
   ): Observable<DataQueryResponse> {
     return defer(() => {
-      const session: AsyncSession = {
-        framesByKey: new Map<string, DataFrame>(),
-        maxRows,
-        state: LoadingState.Streaming,
-      };
-      const responseKey = `async-${this.stableHash(liveID)}`;
+      try {
+        const opened = openLiveChannelSession(
+          undefined,
+          false,
+          'async',
+          channelBase,
+          (channel) => ({
+            ...channel,
+            response: live!.getStream({
+              scope: LiveChannelScope.DataSource,
+              stream: this.uid,
+              path: channel.path,
+              data: liveRequestData,
+            } as any),
+          })
+        );
+        const session: AsyncSession = {
+          framesByKey: new Map<string, DataFrame>(),
+          maxRows,
+          state: LoadingState.Streaming,
+        };
+        const responseKey = `async-${this.stableHash(opened.liveID)}`;
 
-      return live!
-        .getStream({
-          scope: LiveChannelScope.DataSource,
-          stream: this.uid,
-          path,
-          data: liveRequestData,
-        } as any)
-        .pipe(
+        return opened.response.pipe(
           map((event: any) => {
             if (!event?.message) {
               return {
@@ -276,147 +310,156 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
           takeWhile((response) => response.state !== LoadingState.Done && response.state !== LoadingState.Error, true),
           finalize(() => session.framesByKey.clear())
         );
+      } catch (error) {
+        return of({
+          data: [],
+          state: LoadingState.Error,
+          error: this.liveChannelError(error),
+        });
+      }
     });
   }
 
-  private liveRequestData(query: MyQuery, request: DataQueryRequest<MyQuery>): LiveRequestData {
+  private liveRequestData(
+    query: MyQuery,
+    request: DataQueryRequest<MyQuery>,
+    bounds: NormalizedLiveBounds
+  ): LiveRequestData {
+    const from = request.range?.from?.toISOString();
+    const to = request.range?.to?.toISOString();
     return {
       ...query,
       refId: query.refId,
-      maxDataPoints: request.maxDataPoints,
-      intervalMs: request.intervalMs,
-      timeRange: {
-        from: request.range?.from?.toISOString(),
-        to: request.range?.to?.toISOString(),
-      },
+      executionMode: effectiveExecutionMode(query.executionMode, this.options.executionMode),
+      maxStreamRows: bounds.maxRows,
+      streamRetentionMs: bounds.retentionMs,
+      maxDataPoints: bounds.maxDataPoints,
+      intervalMs: bounds.intervalMs,
+      ...(from && to ? { timeRange: { from, to } } : {}),
     };
   }
 
   private liveRequestIdentity(
     mode: string,
     liveRequestData: LiveRequestData,
-    request: DataQueryRequest<MyQuery>,
     maxRows: number,
     retentionMs: number
   ): string {
     return this.stableSerialize({
       datasourceUID: this.uid,
       mode,
-      interval: request.interval,
       maxRows,
       retentionMs,
       request: liveRequestData,
     });
   }
 
-  private liveID(query: MyQuery, mode: string, request: DataQueryRequest<MyQuery>, requestIdentity: string): string {
-    // Grafana Live keys backend subscriptions by path, so the path must identify the effective request data.
+  private liveChannelBase(
+    query: MyQuery,
+    mode: string,
+    request: DataQueryRequest<MyQuery>,
+    requestIdentity: string
+  ): string {
     const identityHash = this.stableHash(requestIdentity);
     if (mode === 'stream') {
       const base = query.streamName
         ? `${query.streamName}-${query.refId || 'A'}`
         : `${request.panelId || 'panel'}-${query.refId || 'A'}`;
-      return this.liveChannelID(base, identityHash);
+      return `${base}-${identityHash}`;
     }
-
-    const nonce = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-    return this.liveChannelID(
-      `${request.requestId || request.panelId || 'query'}-${query.refId || 'A'}`,
-      `${identityHash}-${nonce}`
-    );
-  }
-
-  private liveChannelID(base: string, suffix: string): string {
-    const safeBase = base.replace(/[^A-Za-z0-9_\-./=]/g, '-');
-    const safeSuffix = suffix.replace(/[^A-Za-z0-9_\-./=]/g, '-');
-    const baseLength = Math.max(0, 96 - safeSuffix.length - 1);
-    return `${safeBase.slice(0, baseLength)}-${safeSuffix}`;
+    return `${request.requestId || request.panelId || 'query'}-${query.refId || 'A'}-${identityHash}`;
   }
 
   private getOrCreateStreamSession(
     live: ReturnType<typeof getGrafanaLiveSrv>,
     cacheKey: string,
     liveRequestData: LiveRequestData,
-    path: string,
-    liveID: string,
+    channelBase: string,
     maxRows: number,
     retentionMs: number
   ): StreamSession {
     const existing = this.streamSessions.get(cacheKey);
-    if (existing?.state === LoadingState.Streaming) {
-      return existing;
-    }
-    if (existing) {
+    const active = existing?.state === LoadingState.Streaming;
+    if (existing && !active) {
       this.streamSessions.delete(cacheKey);
     }
 
-    const session: StreamSession = {
-      framesByKey: new Map<string, DataFrame>(),
-      maxRows,
-      retentionMs,
-      response: of({ data: [], state: LoadingState.Streaming, key: liveID }),
-      state: LoadingState.Streaming,
-    };
+    return openLiveChannelSession(
+      existing,
+      active,
+      'stream',
+      channelBase,
+      (channel) => {
+        const session: StreamSession = {
+          ...channel,
+          framesByKey: new Map<string, DataFrame>(),
+          maxRows,
+          retentionMs,
+          response: of({ data: [], state: LoadingState.Streaming, key: channel.liveID }),
+          state: LoadingState.Streaming,
+        };
 
-    session.response = live!
-      .getStream({
-        scope: LiveChannelScope.DataSource,
-        stream: this.uid,
-        path,
-        data: liveRequestData,
-      } as any)
-      .pipe(
-        map((event: any) => {
-          if (!event?.message) {
-            return {
-              data: this.snapshotFrames(session.framesByKey, session.maxRows, session.retentionMs),
-              state: session.state,
-              key: liveID,
-            };
-          }
+        session.response = live!
+          .getStream({
+            scope: LiveChannelScope.DataSource,
+            stream: this.uid,
+            path: session.path,
+            data: liveRequestData,
+          } as any)
+          .pipe(
+            map((event: any) => {
+              if (!event?.message) {
+                return {
+                  data: this.snapshotFrames(session.framesByKey, session.maxRows, session.retentionMs),
+                  state: session.state,
+                  key: session.liveID,
+                };
+              }
 
-          const frame = dataFrameFromJSON(event.message);
-          const custom: any = frame.meta?.custom || {};
+              const frame = dataFrameFromJSON(event.message);
+              const custom: any = frame.meta?.custom || {};
 
-          if (custom.asyncqControl) {
-            const nextState = String(custom.asyncqState || '').toLowerCase();
-            if (custom.asyncqTerminal) {
-              session.state = nextState === 'error' ? LoadingState.Error : LoadingState.Done;
-            } else {
+              if (custom.asyncqControl) {
+                const nextState = String(custom.asyncqState || '').toLowerCase();
+                if (custom.asyncqTerminal) {
+                  session.state = nextState === 'error' ? LoadingState.Error : LoadingState.Done;
+                } else {
+                  session.state = LoadingState.Streaming;
+                }
+                return {
+                  data: this.snapshotFrames(session.framesByKey, session.maxRows, session.retentionMs),
+                  state: session.state,
+                  key: session.liveID,
+                };
+              }
+
+              const frameKey = `${frame.refId || liveRequestData.refId || 'A'}/${frame.name || 'response'}`;
+              session.framesByKey.set(
+                frameKey,
+                this.appendFrame(session.framesByKey.get(frameKey), frame, session.maxRows, session.retentionMs)
+              );
               session.state = LoadingState.Streaming;
-            }
-            return {
-              data: this.snapshotFrames(session.framesByKey, session.maxRows, session.retentionMs),
-              state: session.state,
-              key: liveID,
-            };
-          }
-
-          const frameKey = `${frame.refId || liveRequestData.refId || 'A'}/${frame.name || 'response'}`;
-          session.framesByKey.set(
-            frameKey,
-            this.appendFrame(session.framesByKey.get(frameKey), frame, session.maxRows, session.retentionMs)
+              return {
+                data: this.snapshotFrames(session.framesByKey, session.maxRows, session.retentionMs),
+                state: session.state,
+                key: session.liveID,
+              };
+            }),
+            takeWhile((response) => response.state !== LoadingState.Done && response.state !== LoadingState.Error, true),
+            // Keep cleanup upstream of shareReplay so it runs once when the shared source disconnects.
+            finalize(() => {
+              if (this.streamSessions.get(cacheKey) === session) {
+                this.streamSessions.delete(cacheKey);
+              }
+              session.framesByKey.clear();
+            }),
+            shareReplay({ bufferSize: 1, refCount: true })
           );
-          session.state = LoadingState.Streaming;
-          return {
-            data: this.snapshotFrames(session.framesByKey, session.maxRows, session.retentionMs),
-            state: session.state,
-            key: liveID,
-          };
-        }),
-        takeWhile((response) => response.state !== LoadingState.Done && response.state !== LoadingState.Error, true),
-        // Keep cleanup upstream of shareReplay so it runs once when the shared source disconnects.
-        finalize(() => {
-          if (this.streamSessions.get(cacheKey) === session) {
-            this.streamSessions.delete(cacheKey);
-          }
-          session.framesByKey.clear();
-        }),
-        shareReplay({ bufferSize: 1, refCount: true })
-      );
 
-    this.streamSessions.set(cacheKey, session);
-    return session;
+        this.streamSessions.set(cacheKey, session);
+        return session;
+      }
+    );
   }
 
   private snapshotFrames(framesByKey: Map<string, DataFrame>, maxRows: number, retentionMs = 0): DataFrame[] {
@@ -463,6 +506,10 @@ export class DataSource extends DataSourceWithBackend<MyQuery, MyDataSourceOptio
           }, {});
       }) || ''
     );
+  }
+
+  private liveChannelError(error: unknown): Error {
+    return error instanceof Error ? error : new Error('Grafana Live channel setup failed');
   }
 
   private appendFrame(

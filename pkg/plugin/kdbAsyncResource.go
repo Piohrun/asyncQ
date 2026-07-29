@@ -2,13 +2,18 @@ package plugin
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/data"
@@ -52,18 +57,28 @@ type asyncRunAndWaitStatusEvent struct {
 }
 
 func (d *KdbDatasource) handleAsyncRunAndWaitResource(ctx context.Context, req *backend.CallResourceRequest, sender backend.CallResourceResponseSender) error {
-	liveReq, query, model, requestID, err := d.decodeAsyncRunAndWaitRequest(req.Body)
-	if err != nil {
-		return sendResourceJSON(sender, http.StatusBadRequest, asyncRunAndWaitResponse{OK: false, Code: "bad-request", Error: err.Error()})
+	if d == nil {
+		return backend.PluginErrorf("async resource failed: datasource is nil")
 	}
-	if model.ExecutionMode == ExecutionModeStream {
+	if req == nil {
+		return backend.PluginErrorf("async resource failed: request is nil")
+	}
+	if resourceSenderIsNil(sender) {
+		return backend.PluginErrorf("async resource failed: sender is nil")
+	}
+	liveReq, query, model, requestID, err := d.decodeAsyncRunAndWaitRequest(req.PluginContext, req.Body)
+	if err != nil {
 		return sendResourceJSON(sender, http.StatusBadRequest, asyncRunAndWaitResponse{
-			OK:            false,
-			Code:          "unsupported-mode",
-			RefID:         liveReq.RefID,
-			RequestID:     requestID,
-			ExecutionMode: model.ExecutionMode,
-			Error:         "stream mode is an open subscription and is not supported by async/run-and-wait; use async/pluginAsync/deferredAsync/legacyAsync",
+			OK:    false,
+			Code:  "bad-request",
+			Error: "async request failed validation: " + err.Error(),
+		})
+	}
+	if d.asyncConfigured && !d.EnableAsync {
+		return sendResourceJSON(sender, http.StatusForbidden, asyncRunAndWaitResponse{
+			OK:    false,
+			Code:  "forbidden",
+			Error: "async queries are disabled for this datasource",
 		})
 	}
 
@@ -74,45 +89,12 @@ func (d *KdbDatasource) handleAsyncRunAndWaitResource(ctx context.Context, req *
 	var resp asyncRunAndWaitResponse
 	switch model.ExecutionMode {
 	case ExecutionModePluginAsync:
-		if err := prepareQueryForExecution(req.PluginContext, query, &model); err != nil {
-			d.logDiagnosticError("plugin async run-and-wait preparation failed", appendDiagnosticError(fields, err)...)
-			resp = newAsyncRunAndWaitResponse(liveReq, model, requestID)
-			resp.fail("prepare-failed", "error", "", err.Error(), 0, true, time.Now())
-			return sendResourceJSON(sender, http.StatusOK, resp)
-		}
 		resp = d.runPluginManagedAsyncQueryWait(ctx, req.PluginContext, liveReq, query, model, requestID)
 	case ExecutionModeDeferredAsync:
-		model.OriginalQueryText = model.QueryText
-		wrappedQuery, err := applyDeferredQueryWrapper(model.QueryText, model.DeferredQueryWrapper)
-		if err != nil {
-			d.logDiagnosticError("deferred async run-and-wait wrapper failed", appendDiagnosticError(fields, err)...)
-			resp = newAsyncRunAndWaitResponse(liveReq, model, requestID)
-			resp.fail("wrapper-failed", "error", "", err.Error(), 0, true, time.Now())
-			return sendResourceJSON(sender, http.StatusOK, resp)
-		}
-		model.QueryText = wrappedQuery
-		if err := prepareQueryForExecution(req.PluginContext, query, &model); err != nil {
-			d.logDiagnosticError("deferred async run-and-wait preparation failed", appendDiagnosticError(fields, err)...)
-			resp = newAsyncRunAndWaitResponse(liveReq, model, requestID)
-			resp.fail("prepare-failed", "error", "", err.Error(), 0, true, time.Now())
-			return sendResourceJSON(sender, http.StatusOK, resp)
-		}
 		resp = d.runPluginManagedAsyncQueryWait(ctx, req.PluginContext, liveReq, query, model, requestID)
 	case ExecutionModeLegacyAsync:
-		if err := prepareQueryForExecution(req.PluginContext, query, &model); err != nil {
-			d.logDiagnosticError("legacy async run-and-wait preparation failed", appendDiagnosticError(fields, err)...)
-			resp = newAsyncRunAndWaitResponse(liveReq, model, requestID)
-			resp.fail("prepare-failed", "error", "", err.Error(), 0, true, time.Now())
-			return sendResourceJSON(sender, http.StatusOK, resp)
-		}
 		resp = d.runLegacyAsyncQueryWait(ctx, req.PluginContext, liveReq, query, model, requestID)
-	case ExecutionModeAsync, "":
-		if err := prepareQueryForExecution(req.PluginContext, query, &model); err != nil {
-			d.logDiagnosticError("helper async run-and-wait preparation failed", appendDiagnosticError(fields, err)...)
-			resp = newAsyncRunAndWaitResponse(liveReq, model, requestID)
-			resp.fail("prepare-failed", "error", "", err.Error(), 0, true, time.Now())
-			return sendResourceJSON(sender, http.StatusOK, resp)
-		}
+	case ExecutionModeAsync:
 		resp = d.runHelperAsyncQueryWait(ctx, req.PluginContext, liveReq, query, model, requestID)
 	default:
 		return sendResourceJSON(sender, http.StatusBadRequest, asyncRunAndWaitResponse{
@@ -121,7 +103,7 @@ func (d *KdbDatasource) handleAsyncRunAndWaitResource(ctx context.Context, req *
 			RefID:         liveReq.RefID,
 			RequestID:     requestID,
 			ExecutionMode: model.ExecutionMode,
-			Error:         fmt.Sprintf("unsupported async execution mode %q", model.ExecutionMode),
+			Error:         "unsupported async execution mode",
 		})
 	}
 
@@ -132,22 +114,35 @@ func (d *KdbDatasource) handleAsyncRunAndWaitResource(ctx context.Context, req *
 	return sendResourceJSON(sender, status, resp)
 }
 
-func (d *KdbDatasource) decodeAsyncRunAndWaitRequest(raw []byte) (liveQueryRequest, backend.DataQuery, QueryModel, string, error) {
-	var body asyncRunAndWaitRequest
-	if err := json.Unmarshal(raw, &body); err != nil {
+func (d *KdbDatasource) decodeAsyncRunAndWaitRequest(pCtx backend.PluginContext, raw []byte) (liveQueryRequest, backend.DataQuery, QueryModel, string, error) {
+	fields, err := scanTopLevelJSONObject(raw, maxQueryJSONBytes, asyncRunAndWaitJSONFieldSpecs, false, "async request JSON")
+	if err != nil {
 		return liveQueryRequest{}, backend.DataQuery{}, QueryModel{}, "", err
 	}
-	if strings.TrimSpace(body.QueryText) == "" {
-		return liveQueryRequest{}, backend.DataQuery{}, QueryModel{}, "", fmt.Errorf("queryText is required")
+	if err := validateQueryEnvelopeObjects(fields, false, "async request JSON"); err != nil {
+		return liveQueryRequest{}, backend.DataQuery{}, QueryModel{}, "", err
 	}
-	if body.RefID == "" {
+	if _, ok := fields["queryText"]; !ok {
+		return liveQueryRequest{}, backend.DataQuery{}, QueryModel{}, "", fmt.Errorf("field %q is required", "queryText")
+	}
+	var body asyncRunAndWaitRequest
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return liveQueryRequest{}, backend.DataQuery{}, QueryModel{}, "", fmt.Errorf("async request JSON could not be decoded")
+	}
+	if _, present := fields["refId"]; !present {
 		body.RefID = "A"
 	}
-	if body.MaxDataPoints < 1 {
+	if err := validateRefID(body.RefID); err != nil {
+		return liveQueryRequest{}, backend.DataQuery{}, QueryModel{}, "", fmt.Errorf("refId is invalid: %w", err)
+	}
+	if _, present := fields["maxDataPoints"]; !present {
 		body.MaxDataPoints = 500
 	}
-	if body.IntervalMs < 1 {
+	if _, present := fields["intervalMs"]; !present {
 		body.IntervalMs = 1000
+	}
+	if body.IntervalMs < 0 || body.IntervalMs > int64(maxQueryInterval/time.Millisecond) {
+		return liveQueryRequest{}, backend.DataQuery{}, QueryModel{}, "", fmt.Errorf("intervalMs must be between 0 and %d", maxQueryInterval/time.Millisecond)
 	}
 
 	now := time.Now().UTC()
@@ -162,6 +157,9 @@ func (d *KdbDatasource) decodeAsyncRunAndWaitRequest(raw []byte) (liveQueryReque
 	if !from.Before(to) {
 		return liveQueryRequest{}, backend.DataQuery{}, QueryModel{}, "", fmt.Errorf("timeRange.from must be before timeRange.to")
 	}
+	if from.Before(minQTimestamp) || to.After(maxQTimestamp) {
+		return liveQueryRequest{}, backend.DataQuery{}, QueryModel{}, "", fmt.Errorf("timeRange is outside the finite q timestamp range")
+	}
 
 	liveReq := liveQueryRequest{
 		QueryModel:    body.QueryModel,
@@ -174,30 +172,54 @@ func (d *KdbDatasource) decodeAsyncRunAndWaitRequest(raw []byte) (liveQueryReque
 		},
 	}
 	model := body.QueryModel
-	normalizeQueryModel(&model)
-	d.normalizeAsyncQueryModel(liveReq, &model)
-	requestID := strings.TrimSpace(body.RequestID)
-	if requestID == "" {
-		requestID = fmt.Sprintf("async-wait-%d", time.Now().UnixNano())
+	queryType, err := decodedOptionalString(fields, "queryType")
+	if err != nil {
+		return liveQueryRequest{}, backend.DataQuery{}, QueryModel{}, "", err
 	}
-	queryJSON, _ := json.Marshal(model)
 	query := backend.DataQuery{
 		RefID:         body.RefID,
+		QueryType:     queryType,
 		MaxDataPoints: body.MaxDataPoints,
 		Interval:      time.Duration(body.IntervalMs) * time.Millisecond,
 		TimeRange: backend.TimeRange{
 			From: from,
 			To:   to,
 		},
-		JSON: queryJSON,
 	}
+	if err := validateQueryEnvelopeAndBounds(query, &model, fields); err != nil {
+		return liveQueryRequest{}, backend.DataQuery{}, QueryModel{}, "", err
+	}
+	if err := d.normalizeAndPrepareAsyncModel(pCtx, query, &model, fields, ExecutionModeAsync); err != nil {
+		return liveQueryRequest{}, backend.DataQuery{}, QueryModel{}, "", err
+	}
+	requestID := body.RequestID
+	if _, present := fields["requestId"]; present {
+		if err := validateExternalID(requestID, "requestId"); err != nil {
+			return liveQueryRequest{}, backend.DataQuery{}, QueryModel{}, "", err
+		}
+	} else {
+		requestID, err = newAsyncRequestID(rand.Reader)
+		if err != nil {
+			return liveQueryRequest{}, backend.DataQuery{}, QueryModel{}, "", fmt.Errorf("requestId could not be generated")
+		}
+	}
+	queryJSON, err := json.Marshal(model)
+	if err != nil {
+		return liveQueryRequest{}, backend.DataQuery{}, QueryModel{}, "", fmt.Errorf("normalized async request could not be encoded")
+	}
+	if len(queryJSON) > maxQueryJSONBytes {
+		return liveQueryRequest{}, backend.DataQuery{}, QueryModel{}, "", fmt.Errorf("normalized async request exceeds the %d-byte limit", maxQueryJSONBytes)
+	}
+	query.JSON = queryJSON
 	return liveReq, query, model, requestID, nil
 }
 
 func parseAsyncResourceTime(raw string, fallback time.Time, now time.Time) (time.Time, error) {
-	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return fallback, nil
+	}
+	if len(raw) > maxTimeoutTextBytes*2 || strings.TrimSpace(raw) != raw {
+		return time.Time{}, fmt.Errorf("time value is invalid or too long")
 	}
 	if raw == "now" {
 		return now, nil
@@ -217,36 +239,73 @@ func parseAsyncResourceTime(raw string, fallback time.Time, now time.Time) (time
 		return now.Add(d), nil
 	}
 	if n, err := strconv.ParseInt(raw, 10, 64); err == nil {
-		if len(raw) > 10 {
-			return time.UnixMilli(n).UTC(), nil
+		digits := raw
+		if strings.HasPrefix(digits, "-") {
+			digits = digits[1:]
 		}
-		return time.Unix(n, 0).UTC(), nil
+		var parsed time.Time
+		if len(digits) > 10 {
+			parsed = time.UnixMilli(n).UTC()
+		} else {
+			parsed = time.Unix(n, 0).UTC()
+		}
+		if parsed.Before(minQTimestamp) || parsed.After(maxQTimestamp) {
+			return time.Time{}, fmt.Errorf("time value is outside the finite q timestamp range")
+		}
+		return parsed, nil
 	}
 	if t, err := time.Parse(time.RFC3339Nano, raw); err == nil {
-		return t.UTC(), nil
+		t = t.UTC()
+		if t.Before(minQTimestamp) || t.After(maxQTimestamp) {
+			return time.Time{}, fmt.Errorf("time value is outside the finite q timestamp range")
+		}
+		return t, nil
 	}
-	return time.Time{}, fmt.Errorf("unsupported time value %q; use RFC3339, Unix seconds/milliseconds, now, or now-<duration>", raw)
+	return time.Time{}, fmt.Errorf("unsupported time value; use RFC3339, Unix seconds/milliseconds, now, now-<duration>, or now+<duration>")
 }
 
 func parseAsyncResourceRelativeDuration(raw string) (time.Duration, error) {
-	if raw == "" {
-		return 0, fmt.Errorf("missing relative duration")
+	if raw == "" || len(raw) > maxTimeoutTextBytes || strings.HasPrefix(raw, "-") || strings.HasPrefix(raw, "+") {
+		return 0, fmt.Errorf("invalid relative duration")
 	}
 	if strings.HasSuffix(raw, "d") {
-		n, err := strconv.ParseInt(strings.TrimSuffix(raw, "d"), 10, 64)
+		n, err := strconv.ParseUint(strings.TrimSuffix(raw, "d"), 10, 64)
 		if err != nil {
-			return 0, err
+			return 0, fmt.Errorf("invalid relative duration")
 		}
-		return time.Duration(n) * 24 * time.Hour, nil
+		return checkedRelativeDuration(n, 24*time.Hour)
 	}
 	if strings.HasSuffix(raw, "w") {
-		n, err := strconv.ParseInt(strings.TrimSuffix(raw, "w"), 10, 64)
+		n, err := strconv.ParseUint(strings.TrimSuffix(raw, "w"), 10, 64)
 		if err != nil {
-			return 0, err
+			return 0, fmt.Errorf("invalid relative duration")
 		}
-		return time.Duration(n) * 7 * 24 * time.Hour, nil
+		return checkedRelativeDuration(n, 7*24*time.Hour)
 	}
-	return time.ParseDuration(raw)
+	duration, err := time.ParseDuration(raw)
+	if err != nil || duration < 0 || duration > maxQueryInterval {
+		return 0, fmt.Errorf("invalid or oversized relative duration")
+	}
+	return duration, nil
+}
+
+func checkedRelativeDuration(value uint64, unit time.Duration) (time.Duration, error) {
+	maximum := uint64(maxQueryInterval / unit)
+	if value > maximum || value > uint64(math.MaxInt64/int64(unit)) {
+		return 0, fmt.Errorf("relative duration exceeds the supported range")
+	}
+	return time.Duration(value) * unit, nil
+}
+
+func newAsyncRequestID(reader io.Reader) (string, error) {
+	if reader == nil {
+		return "", fmt.Errorf("random source is unavailable")
+	}
+	var random [16]byte
+	if _, err := io.ReadFull(reader, random[:]); err != nil {
+		return "", err
+	}
+	return "async-wait-" + hex.EncodeToString(random[:]), nil
 }
 
 func newAsyncRunAndWaitResponse(liveReq liveQueryRequest, model QueryModel, requestID string) asyncRunAndWaitResponse {
@@ -262,33 +321,70 @@ func newAsyncRunAndWaitResponse(liveReq liveQueryRequest, model QueryModel, requ
 }
 
 func (r *asyncRunAndWaitResponse) addStatus(start time.Time, state string, status asyncQStatus, final bool) {
-	jobID := status.ID
+	state = boundedStatusText(state, 32)
+	jobID := boundedStatusText(status.ID, maxLiveIDBytes)
 	if jobID == "" {
-		jobID = r.RequestID
+		jobID = boundedStatusText(r.RequestID, maxLiveIDBytes)
 	}
 	r.JobID = jobID
 	r.Status = state
-	r.Statuses = append(r.Statuses, asyncRunAndWaitStatusEvent{
+	event := asyncRunAndWaitStatusEvent{
 		AtMs:      time.Since(start).Milliseconds(),
 		State:     state,
-		RawStatus: status.RawStatus,
+		RawStatus: boundedStatusText(status.RawStatus, 256),
 		JobID:     jobID,
-		Message:   status.Message,
-		Error:     status.Error,
-		Progress:  status.Progress,
+		Message:   boundedStatusText(status.Message, 1024),
+		Error:     boundedStatusText(status.Error, 2048),
+		Progress:  boundedStatusProgress(status.Progress),
 		Final:     final,
-	})
+	}
+	if count := len(r.Statuses); count > 0 && r.Statuses[count-1].State == event.State && !r.Statuses[count-1].Final {
+		r.Statuses[count-1] = event
+		return
+	}
+	if len(r.Statuses) < maxAsyncStatusEvents {
+		r.Statuses = append(r.Statuses, event)
+		return
+	}
+	// Keep the first observation and the most recent bounded transition
+	// history. A terminal event always replaces the oldest non-first event.
+	copy(r.Statuses[1:], r.Statuses[2:])
+	r.Statuses[len(r.Statuses)-1] = event
 }
 
 func (r *asyncRunAndWaitResponse) fail(code string, state string, jobID string, message string, progress float64, final bool, start time.Time) asyncRunAndWaitResponse {
 	r.OK = false
-	r.Code = code
-	r.Status = state
-	r.Error = message
+	r.Code = boundedStatusText(code, 64)
+	r.Status = boundedStatusText(state, 32)
+	r.Error = boundedStatusText(message, 2048)
 	r.DurationMs = time.Since(start).Milliseconds()
 	status := asyncQStatus{ID: jobID, Status: state, Error: message, Progress: progress}
 	r.addStatus(start, state, status, final)
 	return *r
+}
+
+func boundedStatusText(value string, maximum int) string {
+	if maximum <= 0 || value == "" {
+		return ""
+	}
+	if len(value) > maximum {
+		value = value[:maximum]
+	}
+	value = strings.ToValidUTF8(value, "\uFFFD")
+	if len(value) > maximum {
+		value = value[:maximum]
+		for len(value) > 0 && !utf8.ValidString(value) {
+			value = value[:len(value)-1]
+		}
+	}
+	return value
+}
+
+func boundedStatusProgress(value float64) float64 {
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return 0
+	}
+	return math.Max(0, math.Min(1, value))
 }
 
 func (r *asyncRunAndWaitResponse) complete(start time.Time, frames data.Frames, status asyncQStatus) asyncRunAndWaitResponse {

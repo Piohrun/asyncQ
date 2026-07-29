@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
@@ -30,6 +32,12 @@ const (
 	defaultExcelReportMaxFileBytes = int64(50 * 1024 * 1024)
 	defaultExcelReportTimeoutMs    = 60000
 	excelReportDownloadTTL         = 5 * time.Minute
+	maxExcelReportFileNameBytes    = 255
+)
+
+const (
+	excelReportInvalidRequestError = "report request is invalid"
+	excelReportUnavailableError    = "report generation failed"
 )
 
 const (
@@ -222,12 +230,13 @@ type excelSubmittedField struct {
 	Values []interface{} `json:"values"`
 }
 
-func (d *KdbDatasource) handleExcelReportResource(ctx context.Context, req *backend.CallResourceRequest, sender backend.CallResourceResponseSender, path string) error {
+func (d *KdbDatasource) handleExcelReportResource(ctx context.Context, req *backend.CallResourceRequest, sender backend.CallResourceResponseSender, path string, mediaType string) error {
 	switch path {
 	case "report/catalog":
 		catalog, err := d.excelReportCatalog()
 		if err != nil {
-			return sendResourceJSON(sender, http.StatusBadRequest, excelReportResourceResponse{OK: false, Error: err.Error()})
+			log.DefaultLogger.Error("excel report catalog failed", "datasourceUID", d.instanceUID, "error", err.Error())
+			return sendResourceJSON(sender, http.StatusServiceUnavailable, excelReportResourceResponse{OK: false, Error: "report catalog is unavailable"})
 		}
 		return sendResourceJSON(sender, http.StatusOK, publicExcelReportCatalog(catalog))
 	case "report/validate":
@@ -239,39 +248,32 @@ func (d *KdbDatasource) handleExcelReportResource(ctx context.Context, req *back
 		return sendResourceJSON(sender, status, validation)
 	case "report/generate":
 		var body excelReportGenerateRequest
-		if err := decodeExcelReportGenerateRequest(req.Body, &body); err != nil {
-			return sendResourceJSON(sender, http.StatusBadRequest, excelReportResourceResponse{OK: false, Error: err.Error()})
+		if err := decodeExcelReportGenerateRequest(req.Body, mediaType, &body); err != nil {
+			return sendResourceJSON(sender, http.StatusBadRequest, excelReportResourceResponse{OK: false, Error: excelReportInvalidRequestError})
 		}
 		generated, err := d.generateExcelReport(ctx, req.PluginContext, body)
 		if err != nil {
 			status, code := excelReportErrorStatus(err)
 			log.DefaultLogger.Error("excel report generation failed", "datasourceUID", d.instanceUID, "reportID", body.ReportID, "status", status, "code", code, "error", err.Error())
-			return sendResourceJSON(sender, status, excelReportResourceResponse{OK: false, Code: code, Report: body.ReportID, Error: err.Error()})
+			return sendResourceJSON(sender, status, excelReportResourceResponse{OK: false, Code: code, Report: body.ReportID, Error: excelReportPublicError(code)})
 		}
-		return sender.Send(&backend.CallResourceResponse{
-			Status: http.StatusOK,
-			Headers: map[string][]string{
-				"content-type":        {excelReportContentType},
-				"content-disposition": {excelReportContentDisposition(generated.FileName)},
-				"x-asyncq-file-name":  {generated.FileName},
-			},
-			Body: generated.Body,
-		})
+		return sendExcelReportWorkbook(sender, generated)
 	case "report/generate-link":
 		var body excelReportGenerateRequest
-		if err := decodeExcelReportGenerateRequest(req.Body, &body); err != nil {
-			return sendResourceJSON(sender, http.StatusBadRequest, excelReportGenerateLinkResponse{OK: false, Error: err.Error()})
+		if err := decodeExcelReportGenerateRequest(req.Body, mediaType, &body); err != nil {
+			return sendResourceJSON(sender, http.StatusBadRequest, excelReportGenerateLinkResponse{OK: false, Error: excelReportInvalidRequestError})
 		}
 		started := time.Now()
 		generated, err := d.generateExcelReport(ctx, req.PluginContext, body)
 		if err != nil {
 			status, code := excelReportErrorStatus(err)
 			log.DefaultLogger.Error("excel report generation failed", "datasourceUID", d.instanceUID, "reportID", body.ReportID, "status", status, "code", code, "error", err.Error())
-			return sendResourceJSON(sender, status, excelReportResourceResponse{OK: false, Code: code, Report: body.ReportID, Error: err.Error()})
+			return sendResourceJSON(sender, status, excelReportResourceResponse{OK: false, Code: code, Report: body.ReportID, Error: excelReportPublicError(code)})
 		}
 		token, err := d.storeExcelReportDownload(ctx, generated)
 		if err != nil {
-			return sendResourceJSON(sender, http.StatusInternalServerError, excelReportGenerateLinkResponse{OK: false, Error: err.Error()})
+			log.DefaultLogger.Error("excel report download storage failed", "datasourceUID", d.instanceUID, "reportID", body.ReportID, "error", err.Error())
+			return sendResourceJSON(sender, http.StatusInternalServerError, excelReportGenerateLinkResponse{OK: false, Error: excelReportUnavailableError})
 		}
 		return sendResourceJSON(sender, http.StatusOK, excelReportGenerateLinkResponse{
 			OK:           true,
@@ -288,21 +290,42 @@ func (d *KdbDatasource) handleExcelReportResource(ctx context.Context, req *back
 		if !ok {
 			return sendResourceJSON(sender, http.StatusNotFound, excelReportResourceResponse{OK: false, Error: "report download token was not found or has expired"})
 		}
-		return sender.Send(&backend.CallResourceResponse{
-			Status: http.StatusOK,
-			Headers: map[string][]string{
-				"content-type":        {excelReportContentType},
-				"content-disposition": {excelReportContentDisposition(generated.FileName)},
-				"x-asyncq-file-name":  {generated.FileName},
-			},
-			Body: generated.Body,
-		})
+		return sendExcelReportWorkbook(sender, generated)
 	default:
 		return sendResourceJSON(sender, http.StatusNotFound, excelReportResourceResponse{OK: false, Error: "unknown report resource path"})
 	}
 }
 
+func sendExcelReportWorkbook(sender backend.CallResourceResponseSender, generated excelReportGenerated) error {
+	if resourceSenderIsNil(sender) {
+		return backend.PluginErrorf("report response sender is nil")
+	}
+	if len(generated.Body) == 0 || int64(len(generated.Body)) > maxExcelReportFileBytes {
+		return backend.PluginErrorf("report response body is invalid")
+	}
+	fileName, err := sanitizeExcelReportFileName(generated.FileName)
+	if err != nil || fileName != generated.FileName {
+		return backend.PluginErrorf("report response filename is invalid")
+	}
+	return sender.Send(&backend.CallResourceResponse{
+		Status: http.StatusOK,
+		Headers: map[string][]string{
+			"content-type":           {excelReportContentType},
+			"content-disposition":    {excelReportContentDisposition(fileName)},
+			"x-asyncq-file-name":     {fileName},
+			"cache-control":          {"no-store"},
+			"x-content-type-options": {"nosniff"},
+			"referrer-policy":        {"no-referrer"},
+		},
+		Body: generated.Body,
+	})
+}
+
 func (d *KdbDatasource) storeExcelReportDownload(ctx context.Context, generated excelReportGenerated) (string, error) {
+	fileName, err := sanitizeExcelReportFileName(generated.FileName)
+	if err != nil || fileName != generated.FileName || len(generated.Body) == 0 || int64(len(generated.Body)) > maxExcelReportFileBytes {
+		return "", fmt.Errorf("generated report download is invalid")
+	}
 	token, err := newExcelReportDownloadToken()
 	if err != nil {
 		return "", err
@@ -369,20 +392,26 @@ func newExcelReportDownloadToken() (string, error) {
 }
 
 func excelReportDownloadToken(req *backend.CallResourceRequest) string {
-	if req == nil {
+	if req == nil || req.URL == "" {
 		return ""
 	}
-	if parsed, err := url.Parse(req.URL); err == nil {
-		if token := strings.TrimSpace(parsed.Query().Get("token")); token != "" {
-			return token
+	parsed, err := url.Parse(req.URL)
+	if err != nil {
+		return ""
+	}
+	values := parsed.Query()
+	tokens, present := values["token"]
+	if !present || len(values) != 1 || len(tokens) != 1 || len(tokens[0]) != 32 {
+		return ""
+	}
+	token := tokens[0]
+	for index := 0; index < len(token); index++ {
+		character := token[index]
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return ""
 		}
 	}
-	if strings.Contains(req.Path, "?") {
-		if parsed, err := url.Parse(req.Path); err == nil {
-			return strings.TrimSpace(parsed.Query().Get("token"))
-		}
-	}
-	return ""
+	return token
 }
 
 func publicExcelReportCatalog(catalog excelReportCatalog) excelReportPublicCatalog {
@@ -416,26 +445,66 @@ func excelReportErrorStatus(err error) (int, string) {
 	}
 }
 
-func decodeExcelReportGenerateRequest(raw []byte, target *excelReportGenerateRequest) error {
-	if len(raw) == 0 {
+func excelReportPublicError(code string) string {
+	switch code {
+	case "timeout":
+		return "report generation timed out"
+	case "unknown-report":
+		return "report was not found"
+	case "row-limit":
+		return "report exceeds its row limit"
+	case "file-size-limit":
+		return "report exceeds its file-size limit"
+	case "template-path":
+		return "report template configuration is invalid"
+	default:
+		return excelReportUnavailableError
+	}
+}
+
+func decodeExcelReportGenerateRequest(raw []byte, mediaType string, target *excelReportGenerateRequest) error {
+	if target == nil || len(raw) == 0 {
 		return fmt.Errorf("missing report generation request body")
 	}
-	if err := json.Unmarshal(raw, target); err != nil {
+	switch mediaType {
+	case resourceJSONMediaType:
+		if err := json.Unmarshal(raw, target); err != nil {
+			return fmt.Errorf("report generation JSON could not be decoded")
+		}
+	case resourceFormMediaType:
 		values, parseErr := url.ParseQuery(string(raw))
 		if parseErr != nil {
-			return err
+			return fmt.Errorf("report generation form could not be decoded")
 		}
-		payload := strings.TrimSpace(values.Get("payload"))
+		if len(values) != 1 || len(values["payload"]) != 1 {
+			return fmt.Errorf("report generation form must contain exactly one payload")
+		}
+		payload := strings.TrimSpace(values["payload"][0])
 		if payload == "" {
-			return err
+			return fmt.Errorf("report generation form payload is required")
 		}
 		if payloadErr := json.Unmarshal([]byte(payload), target); payloadErr != nil {
-			return payloadErr
+			return fmt.Errorf("report generation form payload could not be decoded")
 		}
+	default:
+		return fmt.Errorf("report generation media type is unsupported")
 	}
 	target.ReportID = strings.TrimSpace(target.ReportID)
-	if target.ReportID == "" {
-		return fmt.Errorf("reportId is required")
+	if target.ReportID == "" || len(target.ReportID) > maxFieldNameBytes || !utf8.ValidString(target.ReportID) {
+		return fmt.Errorf("reportId is invalid")
+	}
+	for _, r := range target.ReportID {
+		if unicode.IsControl(r) {
+			return fmt.Errorf("reportId is invalid")
+		}
+	}
+	if len(target.FileName) > maxPathTextBytes || !utf8.ValidString(target.FileName) {
+		return fmt.Errorf("report filename is invalid")
+	}
+	for _, r := range target.FileName {
+		if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' {
+			return fmt.Errorf("report filename is invalid")
+		}
 	}
 	return nil
 }
@@ -739,12 +808,16 @@ func (d *KdbDatasource) generateExcelReport(ctx context.Context, pCtx backend.Pl
 	if maxBytes := limits.MaxFileBytes; maxBytes > 0 && int64(buffer.Len()) > maxBytes {
 		return excelReportGenerated{}, fmt.Errorf("generated workbook size %d bytes exceeds maxFileBytes %d for report %q", buffer.Len(), maxBytes, report.ID)
 	}
-	fileName := excelReportFileName(report, request, time.Now().UTC())
+	fileName, err := excelReportFileName(report, request, time.Now().UTC())
+	if err != nil {
+		return excelReportGenerated{}, err
+	}
 	log.DefaultLogger.Info(
 		"excel report generated",
 		"datasourceUID", d.instanceUID,
 		"reportID", report.ID,
-		"requestedFileName", request.FileName,
+		"requestedFileNameBytes", len(request.FileName),
+		"requestedFileNameHash", diagnosticHash(request.FileName),
 		"resolvedFileName", fileName,
 		"frameCount", len(results),
 		"writtenFrames", writeStats.Frames,
@@ -1640,12 +1713,15 @@ func setExcelReportActiveSheet(workbook *excelize.File, report excelReportDefini
 	}
 }
 
-func excelReportFileName(report excelReportDefinition, request excelReportGenerateRequest, now time.Time) string {
-	name := firstNonEmpty(request.FileName, report.OutputName, report.ID+"-{timestamp}.xlsx")
-	name = renderExcelReportFileNameTemplate(name, report, request, now)
-	if !strings.HasSuffix(strings.ToLower(name), ".xlsx") {
-		name += ".xlsx"
+func excelReportFileName(report excelReportDefinition, request excelReportGenerateRequest, now time.Time) (string, error) {
+	name := request.FileName
+	if name == "" {
+		name = report.OutputName
 	}
+	if name == "" {
+		name = report.ID + "-{timestamp}.xlsx"
+	}
+	name = renderExcelReportFileNameTemplate(name, report, request, now)
 	return sanitizeExcelReportFileName(name)
 }
 
@@ -1700,14 +1776,48 @@ func excelReportType(report excelReportDefinition) string {
 	return report.ID
 }
 
-func sanitizeExcelReportFileName(name string) string {
+func sanitizeExcelReportFileName(name string) (string, error) {
+	if !utf8.ValidString(name) {
+		return "", fmt.Errorf("report filename must contain valid UTF-8")
+	}
+	for _, r := range name {
+		if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' {
+			return "", fmt.Errorf("report filename must not contain control characters")
+		}
+	}
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return "asyncq-report.xlsx"
+		name = "asyncq-report"
 	}
 	replacer := strings.NewReplacer("/", "_", "\\", "_", ":", "_", "*", "_", "?", "_", `"`, "_", "<", "_", ">", "_", "|", "_")
 	name = replacer.Replace(name)
-	return name
+	const suffix = ".xlsx"
+	if strings.HasSuffix(strings.ToLower(name), suffix) {
+		name = name[:len(name)-len(suffix)]
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "asyncq-report"
+	}
+	name = truncateUTF8Prefix(name, maxExcelReportFileNameBytes-len(suffix))
+	if name == "" {
+		return "", fmt.Errorf("report filename is invalid")
+	}
+	return name + suffix, nil
+}
+
+func truncateUTF8Prefix(value string, maximumBytes int) string {
+	if maximumBytes <= 0 {
+		return ""
+	}
+	if len(value) <= maximumBytes {
+		return value
+	}
+	value = value[:maximumBytes]
+	for len(value) > 0 && !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return value
 }
 
 func excelReportContentDisposition(fileName string) string {

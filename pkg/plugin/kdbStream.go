@@ -2,7 +2,6 @@ package plugin
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -54,6 +53,9 @@ type asyncQStatus struct {
 }
 
 func (d *KdbDatasource) SubscribeStream(ctx context.Context, req *backend.SubscribeStreamRequest) (response *backend.SubscribeStreamResponse, err error) {
+	if d == nil {
+		return &backend.SubscribeStreamResponse{Status: backend.SubscribeStreamStatusPermissionDenied}, backend.PluginErrorf("live subscription failed: datasource is nil")
+	}
 	ctx, finish, err := d.beginOperation(ctx)
 	if err != nil {
 		return &backend.SubscribeStreamResponse{Status: backend.SubscribeStreamStatusPermissionDenied}, err
@@ -62,30 +64,28 @@ func (d *KdbDatasource) SubscribeStream(ctx context.Context, req *backend.Subscr
 		err = disposedOperationError(ctx, err)
 		finish()
 	}()
+	if req == nil {
+		return &backend.SubscribeStreamResponse{Status: backend.SubscribeStreamStatusNotFound}, backend.PluginErrorf("live subscription failed: request is nil")
+	}
 	d.normalizeDatasourceDefaults()
-
-	if isAsyncPath(req.Path) {
-		if d.asyncConfigured && !d.EnableAsync {
-			return &backend.SubscribeStreamResponse{Status: backend.SubscribeStreamStatusPermissionDenied}, fmt.Errorf("async queries are disabled for this datasource")
+	admitted, admissionErr := d.admitLiveQueryRequest(req.PluginContext, req.Data, req.Path)
+	if admissionErr != nil {
+		status := backend.SubscribeStreamStatusPermissionDenied
+		if _, _, pathErr := admitLivePath(req.Path); pathErr != nil {
+			status = backend.SubscribeStreamStatusNotFound
 		}
-		if len(req.Data) == 0 {
-			return &backend.SubscribeStreamResponse{Status: backend.SubscribeStreamStatusNotFound}, fmt.Errorf("missing stream request data")
-		}
-		return &backend.SubscribeStreamResponse{Status: backend.SubscribeStreamStatusOK}, nil
+		return &backend.SubscribeStreamResponse{Status: status}, backend.PluginErrorf("live subscription failed validation: %v", admissionErr)
 	}
-	if isStreamPath(req.Path) {
-		if d.streamConfigured && !d.EnableStreaming {
-			return &backend.SubscribeStreamResponse{Status: backend.SubscribeStreamStatusPermissionDenied}, fmt.Errorf("streaming is disabled for this datasource")
-		}
-		if len(req.Data) == 0 {
-			return &backend.SubscribeStreamResponse{Status: backend.SubscribeStreamStatusNotFound}, fmt.Errorf("missing stream request data")
-		}
-		return &backend.SubscribeStreamResponse{Status: backend.SubscribeStreamStatusOK}, nil
+	if err := d.authorizeLiveAdmission(admitted); err != nil {
+		return &backend.SubscribeStreamResponse{Status: backend.SubscribeStreamStatusPermissionDenied}, err
 	}
-	return &backend.SubscribeStreamResponse{Status: backend.SubscribeStreamStatusNotFound}, fmt.Errorf("unsupported stream path: %s", req.Path)
+	return &backend.SubscribeStreamResponse{Status: backend.SubscribeStreamStatusOK}, nil
 }
 
-func (d *KdbDatasource) PublishStream(ctx context.Context, _ *backend.PublishStreamRequest) (response *backend.PublishStreamResponse, err error) {
+func (d *KdbDatasource) PublishStream(ctx context.Context, req *backend.PublishStreamRequest) (response *backend.PublishStreamResponse, err error) {
+	if d == nil {
+		return &backend.PublishStreamResponse{Status: backend.PublishStreamStatusPermissionDenied}, backend.PluginErrorf("live publication failed: datasource is nil")
+	}
 	ctx, finish, err := d.beginOperation(ctx)
 	if err != nil {
 		return &backend.PublishStreamResponse{Status: backend.PublishStreamStatusPermissionDenied}, err
@@ -94,11 +94,20 @@ func (d *KdbDatasource) PublishStream(ctx context.Context, _ *backend.PublishStr
 		err = disposedOperationError(ctx, err)
 		finish()
 	}()
+	if req == nil {
+		return &backend.PublishStreamResponse{Status: backend.PublishStreamStatusNotFound}, backend.PluginErrorf("live publication failed: request is nil")
+	}
 	d.normalizeDatasourceDefaults()
+	if _, _, pathErr := admitLivePath(req.Path); pathErr != nil {
+		return &backend.PublishStreamResponse{Status: backend.PublishStreamStatusNotFound}, backend.PluginErrorf("live publication failed validation: %v", pathErr)
+	}
 	return &backend.PublishStreamResponse{Status: backend.PublishStreamStatusPermissionDenied}, nil
 }
 
 func (d *KdbDatasource) RunStream(ctx context.Context, req *backend.RunStreamRequest, sender *backend.StreamSender) (err error) {
+	if d == nil {
+		return backend.PluginErrorf("live stream failed: datasource is nil")
+	}
 	ctx, finish, err := d.beginOperation(ctx)
 	if err != nil {
 		return err
@@ -107,126 +116,64 @@ func (d *KdbDatasource) RunStream(ctx context.Context, req *backend.RunStreamReq
 		err = disposedOperationError(ctx, err)
 		finish()
 	}()
+	if req == nil {
+		return backend.PluginErrorf("live stream failed: request is nil")
+	}
+	if sender == nil {
+		return backend.PluginErrorf("live stream failed: sender is nil")
+	}
 	d.normalizeDatasourceDefaults()
-
-	switch {
-	case isAsyncPath(req.Path):
-		return d.runAsyncQueryStream(ctx, req, sender)
-	case isStreamPath(req.Path):
-		return d.runKdbPushStream(ctx, req, sender)
-	default:
-		return fmt.Errorf("unsupported stream path: %s", req.Path)
-	}
-}
-
-func isAsyncPath(path string) bool {
-	return strings.HasPrefix(path, "async/")
-}
-
-func isStreamPath(path string) bool {
-	return strings.HasPrefix(path, "stream/")
-}
-
-func pathID(path string) string {
-	parts := strings.SplitN(path, "/", 2)
-	if len(parts) == 2 && parts[1] != "" {
-		return parts[1]
-	}
-	return fmt.Sprintf("%d", time.Now().UnixNano())
-}
-
-func decodeLiveQueryRequest(raw json.RawMessage, mode string, path string) (liveQueryRequest, backend.DataQuery, QueryModel, string, error) {
-	var liveReq liveQueryRequest
-	if err := json.Unmarshal(raw, &liveReq); err != nil {
-		return liveReq, backend.DataQuery{}, QueryModel{}, "", err
-	}
-	model := liveReq.QueryModel
-	normalizeQueryModel(&model)
-	if mode == ExecutionModeStream {
-		model.ExecutionMode = ExecutionModeStream
-	} else if model.ExecutionMode == "" || model.ExecutionMode == ExecutionModeSync || model.ExecutionMode == ExecutionModeStream {
-		model.ExecutionMode = ExecutionModeAsync
-	}
-	if liveReq.RefID == "" {
-		liveReq.RefID = "A"
-	}
-
-	from, _ := time.Parse(time.RFC3339Nano, liveReq.TimeRange.From)
-	to, _ := time.Parse(time.RFC3339Nano, liveReq.TimeRange.To)
-	queryJSON, _ := json.Marshal(model)
-	query := backend.DataQuery{
-		RefID:         liveReq.RefID,
-		MaxDataPoints: liveReq.MaxDataPoints,
-		Interval:      time.Duration(liveReq.IntervalMs) * time.Millisecond,
-		TimeRange: backend.TimeRange{
-			From: from,
-			To:   to,
-		},
-		JSON: queryJSON,
-	}
-	return liveReq, query, model, pathID(path), nil
-}
-
-func (d *KdbDatasource) runAsyncQueryStream(ctx context.Context, req *backend.RunStreamRequest, sender *backend.StreamSender) error {
-	liveReq, query, model, requestID, err := decodeLiveQueryRequest(req.Data, ExecutionModeAsync, req.Path)
+	admitted, err := d.admitLiveQueryRequest(req.PluginContext, req.Data, req.Path)
 	if err != nil {
-		d.logDiagnosticError("unable to decode async live query", "path", req.Path, "error", err.Error())
+		return backend.PluginErrorf("live stream failed validation: %v", err)
+	}
+	if err := d.authorizeLiveAdmission(admitted); err != nil {
 		return err
 	}
-	d.normalizeAsyncQueryModel(liveReq, &model)
+	switch admitted.family {
+	case ExecutionModeAsync:
+		return d.runAsyncQueryStream(ctx, req, sender, admitted)
+	case ExecutionModeStream:
+		return d.runKdbPushStream(ctx, req, sender, admitted)
+	default:
+		return backend.PluginErrorf("live stream failed validation: unsupported path family")
+	}
+}
+
+func (d *KdbDatasource) authorizeLiveAdmission(admitted admittedLiveQuery) error {
+	switch admitted.family {
+	case ExecutionModeAsync:
+		if d.asyncConfigured && !d.EnableAsync {
+			return backend.PluginErrorf("async queries are disabled for this datasource")
+		}
+	case ExecutionModeStream:
+		if d.streamConfigured && !d.EnableStreaming {
+			return backend.PluginErrorf("streaming is disabled for this datasource")
+		}
+	default:
+		return backend.PluginErrorf("live stream failed validation: unsupported path family")
+	}
+	return nil
+}
+
+func (d *KdbDatasource) runAsyncQueryStream(ctx context.Context, req *backend.RunStreamRequest, sender *backend.StreamSender, admitted admittedLiveQuery) error {
+	liveReq, query, model, requestID := admitted.liveReq, admitted.query, admitted.model, admitted.id
 	fields := d.diagnosticQueryFields(req.PluginContext, query, model, requestID)
 	fields = append(fields, "path", req.Path)
 	d.logDiagnostics("async query received", fields...)
 	switch model.ExecutionMode {
 	case ExecutionModePluginAsync:
-		if err := prepareQueryForExecution(req.PluginContext, query, &model); err != nil {
-			d.logDiagnosticError("plugin async query preparation failed", appendDiagnosticError(fields, err)...)
-			_ = sendControlFrame(sender, liveReq.RefID, model.ExecutionMode, "error", requestID, "", err.Error(), 0, true)
-			return nil
-		}
-		fields = append(d.diagnosticQueryFields(req.PluginContext, query, model, requestID), "path", req.Path)
-		d.logDiagnostics("plugin async query prepared", fields...)
 		return d.runPluginManagedAsyncQueryStream(ctx, req.PluginContext, liveReq, query, model, requestID, sender)
 	case ExecutionModeDeferredAsync:
-		model.OriginalQueryText = model.QueryText
-		wrappedQuery, err := applyDeferredQueryWrapper(model.QueryText, model.DeferredQueryWrapper)
-		if err != nil {
-			d.logDiagnosticError("deferred async wrapper failed", appendDiagnosticError(fields, err)...)
-			_ = sendControlFrame(sender, liveReq.RefID, model.ExecutionMode, "error", requestID, "", err.Error(), 0, true)
-			return nil
-		}
-		model.QueryText = wrappedQuery
-		if err := prepareQueryForExecution(req.PluginContext, query, &model); err != nil {
-			fields = append(d.diagnosticQueryFields(req.PluginContext, query, model, requestID), "path", req.Path)
-			d.logDiagnosticError("deferred async query preparation failed", appendDiagnosticError(fields, err)...)
-			_ = sendControlFrame(sender, liveReq.RefID, model.ExecutionMode, "error", requestID, "", err.Error(), 0, true)
-			return nil
-		}
-		fields = append(d.diagnosticQueryFields(req.PluginContext, query, model, requestID), "path", req.Path)
-		d.logDiagnostics("deferred async query prepared", fields...)
 		return d.runPluginManagedAsyncQueryStream(ctx, req.PluginContext, liveReq, query, model, requestID, sender)
 	case ExecutionModeLegacyAsync:
-		if err := prepareQueryForExecution(req.PluginContext, query, &model); err != nil {
-			d.logDiagnosticError("legacy async query preparation failed", appendDiagnosticError(fields, err)...)
-			_ = sendControlFrame(sender, liveReq.RefID, model.ExecutionMode, "error", requestID, "", err.Error(), 0, true)
-			return nil
-		}
-		fields = append(d.diagnosticQueryFields(req.PluginContext, query, model, requestID), "path", req.Path)
-		d.logDiagnostics("legacy async query prepared", fields...)
 		return d.runLegacyAsyncQueryStream(ctx, req.PluginContext, liveReq, query, model, requestID, sender)
-	case ExecutionModeAsync, "":
+	case ExecutionModeAsync:
 	default:
-		err := fmt.Errorf("unsupported async execution mode: %s", model.ExecutionMode)
+		err := fmt.Errorf("unsupported async execution mode")
 		d.logDiagnosticError("async query rejected", appendDiagnosticError(fields, err)...)
 		return err
 	}
-	if err := prepareQueryForExecution(req.PluginContext, query, &model); err != nil {
-		d.logDiagnosticError("helper async query preparation failed", appendDiagnosticError(fields, err)...)
-		_ = sendControlFrame(sender, liveReq.RefID, model.ExecutionMode, "error", requestID, "", err.Error(), 0, true)
-		return nil
-	}
-	fields = append(d.diagnosticQueryFields(req.PluginContext, query, model, requestID), "path", req.Path)
-	d.logDiagnostics("helper async query prepared", fields...)
 
 	timeout := asyncTimeoutDuration(model)
 	jobCtx, cancelJob := context.WithTimeout(ctx, timeout)
@@ -352,16 +299,6 @@ func (d *KdbDatasource) runAsyncQueryStream(ctx context.Context, req *backend.Ru
 				return err
 			}
 		}
-	}
-}
-
-func (d *KdbDatasource) normalizeAsyncQueryModel(liveReq liveQueryRequest, model *QueryModel) {
-	if liveReq.QueryModel.ExecutionMode == "" {
-		model.ExecutionMode = ""
-	}
-	d.normalizeQueryModel(model)
-	if model.ExecutionMode == "" || model.ExecutionMode == ExecutionModeSync || model.ExecutionMode == ExecutionModeStream {
-		model.ExecutionMode = ExecutionModeAsync
 	}
 }
 
@@ -537,23 +474,11 @@ func (d *KdbDatasource) releaseAsyncSlot() {
 	}
 }
 
-func (d *KdbDatasource) runKdbPushStream(ctx context.Context, req *backend.RunStreamRequest, sender *backend.StreamSender) error {
-	liveReq, query, model, streamID, err := decodeLiveQueryRequest(req.Data, ExecutionModeStream, req.Path)
-	if err != nil {
-		d.logDiagnosticError("unable to decode stream query", "path", req.Path, "error", err.Error())
-		return err
-	}
-	d.normalizeQueryModel(&model)
-	model.ExecutionMode = ExecutionModeStream
+func (d *KdbDatasource) runKdbPushStream(ctx context.Context, req *backend.RunStreamRequest, sender *backend.StreamSender, admitted admittedLiveQuery) error {
+	liveReq, query, model, streamID := admitted.liveReq, admitted.query, admitted.model, admitted.id
 	fields := d.diagnosticQueryFields(req.PluginContext, query, model, streamID)
 	fields = append(fields, "path", req.Path, "streamID", streamID)
 	d.logDiagnostics("stream query received", fields...)
-	if err := prepareQueryForExecution(req.PluginContext, query, &model); err != nil {
-		d.logDiagnosticError("stream query preparation failed", appendDiagnosticError(fields, err)...)
-		return err
-	}
-	fields = append(d.diagnosticQueryFields(req.PluginContext, query, model, streamID), "path", req.Path, "streamID", streamID)
-	d.logDiagnostics("stream query prepared", fields...)
 	startCtx, cancelStart := context.WithTimeout(ctx, asyncTimeoutDuration(model))
 	conn, err := d.newConnection(startCtx)
 	if err != nil {
@@ -895,6 +820,15 @@ func statusWithDefault(status string, fallback string) string {
 }
 
 func sendControlFrame(sender *backend.StreamSender, refID string, mode string, state string, id string, message string, errText string, progress float64, terminal bool) error {
+	if sender == nil {
+		return backend.PluginErrorf("live stream response sender is nil")
+	}
+	mode = boundedStatusText(mode, 32)
+	state = boundedStatusText(state, 32)
+	id = boundedStatusText(id, maxLiveIDBytes)
+	message = boundedStatusText(message, 1024)
+	errText = boundedStatusText(errText, 2048)
+	progress = boundedStatusProgress(progress)
 	frame := data.NewFrame("asyncq-status",
 		data.NewField("time", nil, []time.Time{time.Now()}),
 		data.NewField("state", nil, []string{state}),
@@ -908,11 +842,14 @@ func sendControlFrame(sender *backend.StreamSender, refID string, mode string, s
 }
 
 func markFrame(frame *data.Frame, mode string, state string, id string, terminal bool, control bool) {
+	if frame == nil {
+		return
+	}
 	frame.Meta = &data.FrameMeta{
 		Custom: map[string]interface{}{
-			"asyncqMode":     mode,
-			"asyncqState":    state,
-			"asyncqID":       id,
+			"asyncqMode":     boundedStatusText(mode, 32),
+			"asyncqState":    boundedStatusText(state, 32),
+			"asyncqID":       boundedStatusText(id, maxLiveIDBytes),
 			"asyncqTerminal": terminal,
 			"asyncqControl":  control,
 		},

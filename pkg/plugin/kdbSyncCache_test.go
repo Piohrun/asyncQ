@@ -1,10 +1,15 @@
 package plugin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -784,6 +789,8 @@ func TestCacheResourceClearEntryEvictsMemoryAndDisk(t *testing.T) {
 	err = ds.CallResource(context.Background(), &backend.CallResourceRequest{
 		PluginContext: backend.PluginContext{User: &backend.User{Role: "Editor"}},
 		Path:          "cache/clear-entry",
+		Method:        http.MethodPost,
+		Headers:       map[string][]string{"Content-Type": {"application/json"}},
 		Body:          raw,
 	}, backend.CallResourceResponseSenderFunc(func(resp *backend.CallResourceResponse) error {
 		resourceResp = resp
@@ -815,6 +822,8 @@ func TestCacheResourceControlsRequireEditorOrAdmin(t *testing.T) {
 	err = ds.CallResource(context.Background(), &backend.CallResourceRequest{
 		PluginContext: backend.PluginContext{User: &backend.User{Role: "Viewer"}},
 		Path:          "cache/clear",
+		Method:        http.MethodPost,
+		Headers:       map[string][]string{"Content-Type": {"application/json"}},
 		Body:          raw,
 	}, backend.CallResourceResponseSenderFunc(func(resp *backend.CallResourceResponse) error {
 		resourceResp = resp
@@ -831,6 +840,7 @@ func TestCacheResourceControlsRequireEditorOrAdmin(t *testing.T) {
 	err = ds.CallResource(context.Background(), &backend.CallResourceRequest{
 		PluginContext: backend.PluginContext{User: &backend.User{Role: "Viewer"}},
 		Path:          "cache/status",
+		Method:        http.MethodGet,
 	}, backend.CallResourceResponseSenderFunc(func(resp *backend.CallResourceResponse) error {
 		resourceResp = resp
 		return nil
@@ -856,6 +866,8 @@ func TestCacheResourceControlsCanBeDisabled(t *testing.T) {
 	err = ds.CallResource(context.Background(), &backend.CallResourceRequest{
 		PluginContext: backend.PluginContext{User: &backend.User{Role: "Admin"}},
 		Path:          "cache/clear",
+		Method:        http.MethodPost,
+		Headers:       map[string][]string{"Content-Type": {"application/json"}},
 		Body:          raw,
 	}, backend.CallResourceResponseSenderFunc(func(resp *backend.CallResourceResponse) error {
 		resourceResp = resp
@@ -867,6 +879,117 @@ func TestCacheResourceControlsCanBeDisabled(t *testing.T) {
 	if resourceResp == nil || resourceResp.Status != 403 {
 		t.Fatalf("expected disabled cache controls to be forbidden, got %#v", resourceResp)
 	}
+}
+
+func TestCacheResourceInventoriesAreBoundedBeforeMaterialization(t *testing.T) {
+	now := time.Now()
+	policy := syncQueryCachePolicy{
+		enabled: true,
+		ttl:     time.Minute,
+		disk: syncQueryDiskCachePolicy{
+			enabled: true,
+		},
+	}
+	memory := &syncQueryCache{
+		entries: map[string]*syncQueryCacheEntry{
+			strings.Repeat("a", 64): {createdAt: now, refID: "A"},
+		},
+		maxEntries: 2,
+	}
+	memoryStatus, err := memory.resourceStatus(policy, true, 1)
+	if err != nil || len(memoryStatus.Keys) != 1 {
+		t.Fatalf("exact memory inventory status=%#v error=%v", memoryStatus, err)
+	}
+	memory.entries[strings.Repeat("b", 64)] = &syncQueryCacheEntry{createdAt: now, refID: "B"}
+	memoryStatus, err = memory.resourceStatus(policy, true, 1)
+	if !errors.Is(err, errSyncQueryCacheResourceInventoryLimit) {
+		t.Fatalf("memory inventory over limit status=%#v error=%v", memoryStatus, err)
+	}
+	if memoryStatus.Keys != nil {
+		t.Fatalf("over-limit memory inventory materialized keys: %#v", memoryStatus.Keys)
+	}
+
+	cacheDir := t.TempDir()
+	firstName := strings.Repeat("c", 64) + ".json"
+	if err := os.WriteFile(filepath.Join(cacheDir, firstName), []byte("contents must not be decoded"), 0o600); err != nil {
+		t.Fatalf("write first cache fixture: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cacheDir, "unrelated-file"), []byte("junk"), 0o600); err != nil {
+		t.Fatalf("write junk fixture: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(cacheDir, strings.Repeat("d", 64)+".json"), 0o700); err != nil {
+		t.Fatalf("write directory fixture: %v", err)
+	}
+	disk := &syncQueryDiskCache{dir: cacheDir, maxEntries: 2, maxBytes: 1024}
+	diskStatus, err := disk.resourceStatus(policy, true, 1)
+	if err != nil || diskStatus.Entries != 1 || len(diskStatus.Keys) != 1 {
+		t.Fatalf("exact disk inventory status=%#v error=%v", diskStatus, err)
+	}
+	if diskStatus.Keys[0].Key != strings.TrimSuffix(firstName, ".json") || diskStatus.Keys[0].RefID != "" {
+		t.Fatalf("disk inventory unexpectedly decoded file contents: %#v", diskStatus.Keys[0])
+	}
+
+	secondName := strings.Repeat("e", 64) + ".json"
+	if err := os.WriteFile(filepath.Join(cacheDir, secondName), []byte("also not JSON"), 0o600); err != nil {
+		t.Fatalf("write second cache fixture: %v", err)
+	}
+	diskStatus, err = disk.resourceStatus(policy, true, 1)
+	if !errors.Is(err, errSyncQueryCacheResourceInventoryLimit) {
+		t.Fatalf("disk inventory over limit status=%#v error=%v", diskStatus, err)
+	}
+	if diskStatus.Keys != nil {
+		t.Fatalf("over-limit disk inventory materialized public keys: %#v", diskStatus.Keys)
+	}
+}
+
+func TestCacheResourceStatusRedactsDiskPathsAndFilesystemErrors(t *testing.T) {
+	t.Run("successful status", func(t *testing.T) {
+		secretBase := filepath.Join(t.TempDir(), "operator-secret-cache-path")
+		ds := diskCachedTestDatasource(secretBase)
+		response := callResourceForTest(t, ds, &backend.CallResourceRequest{
+			Path:   "cache/status",
+			Method: http.MethodGet,
+		})
+		if response.Status != http.StatusOK {
+			t.Fatalf("cache status=%d body=%s", response.Status, response.Body)
+		}
+		if bytes.Contains(response.Body, []byte(secretBase)) || bytes.Contains(response.Body, []byte(`"path"`)) {
+			t.Fatalf("cache status exposed its disk path: %s", response.Body)
+		}
+	})
+
+	t.Run("filesystem failure", func(t *testing.T) {
+		secretBase := filepath.Join(t.TempDir(), "operator-secret-cache-path")
+		ds := diskCachedTestDatasource(secretBase)
+		cachePath := ds.syncQueryDiskCacheDir()
+		if err := os.MkdirAll(filepath.Dir(cachePath), 0o700); err != nil {
+			t.Fatalf("create cache parent: %v", err)
+		}
+		if err := os.WriteFile(cachePath, []byte("not a directory"), 0o600); err != nil {
+			t.Fatalf("create invalid cache path: %v", err)
+		}
+
+		response := callResourceForTest(t, ds, &backend.CallResourceRequest{
+			Path:   "cache/status",
+			Method: http.MethodGet,
+		})
+		if response.Status != http.StatusServiceUnavailable {
+			t.Fatalf("cache failure status=%d body=%s", response.Status, response.Body)
+		}
+		assertSecureJSONHeaders(t, response)
+		var publicError resourceErrorResponse
+		if err := json.Unmarshal(response.Body, &publicError); err != nil {
+			t.Fatalf("decode cache status error: %v", err)
+		}
+		if publicError.Error != cacheResourceStatusUnavailable {
+			t.Fatalf("public cache error=%q", publicError.Error)
+		}
+		if bytes.Contains(response.Body, []byte(secretBase)) ||
+			bytes.Contains(response.Body, []byte(cachePath)) ||
+			bytes.Contains(response.Body, []byte("not a directory")) {
+			t.Fatalf("cache failure exposed filesystem details: %s", response.Body)
+		}
+	})
 }
 
 func cachedTestDatasource() *KdbDatasource {

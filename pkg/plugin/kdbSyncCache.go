@@ -5,7 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -112,7 +115,7 @@ type syncQueryMemoryStatus struct {
 
 type syncQueryDiskStatus struct {
 	Enabled    bool                    `json:"enabled"`
-	Path       string                  `json:"path,omitempty"`
+	Path       string                  `json:"-"`
 	Exists     bool                    `json:"exists"`
 	Entries    int                     `json:"entries"`
 	Bytes      int64                   `json:"bytes"`
@@ -129,6 +132,19 @@ type syncQueryCacheKeyInfo struct {
 	Storage   string `json:"storage"`
 	RefID     string `json:"refID,omitempty"`
 	SizeBytes int64  `json:"sizeBytes,omitempty"`
+}
+
+const (
+	syncQueryCacheResourceReadDirChunk      = 256
+	maxSyncQueryCacheResourceScannedEntries = maxResourceJSONCacheKeys
+)
+
+var errSyncQueryCacheResourceInventoryLimit = errors.New("cache resource inventory limit exceeded")
+
+type syncQueryDiskCacheResourceFile struct {
+	key     string
+	size    int64
+	modTime time.Time
 }
 
 type syncQueryCacheKeyPayload struct {
@@ -739,6 +755,47 @@ func (c *syncQueryCache) status(policy syncQueryCachePolicy, includeKeys bool) s
 	return status
 }
 
+func (c *syncQueryCache) resourceStatus(policy syncQueryCachePolicy, includeKeys bool, maxKeys int) (syncQueryMemoryStatus, error) {
+	status := syncQueryMemoryStatus{
+		Enabled: policy.enabled,
+	}
+	if c == nil {
+		return status, nil
+	}
+	status.MaxEntries = c.maxEntries
+	if maxKeys < 0 {
+		return status, errSyncQueryCacheResourceInventoryLimit
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	status.Entries = len(c.entries)
+	if !includeKeys {
+		return status, nil
+	}
+	if len(c.entries) > maxKeys {
+		return status, errSyncQueryCacheResourceInventoryLimit
+	}
+
+	now := time.Now()
+	status.Keys = make([]syncQueryCacheKeyInfo, 0, len(c.entries))
+	for key, entry := range c.entries {
+		age := now.Sub(entry.createdAt)
+		status.Keys = append(status.Keys, syncQueryCacheKeyInfo{
+			Key:     key,
+			AgeMs:   age.Milliseconds(),
+			Stale:   age > policy.ttl,
+			Storage: "memory",
+			RefID:   entry.refID,
+		})
+	}
+	sort.Slice(status.Keys, func(i, j int) bool {
+		return status.Keys[i].Key < status.Keys[j].Key
+	})
+	return status, nil
+}
+
 func (c *syncQueryDiskCache) get(key string, refID string, policy syncQueryCachePolicy) (syncQueryCacheLookup, bool, error) {
 	now := time.Now()
 	c.mu.Lock()
@@ -917,6 +974,114 @@ func (c *syncQueryDiskCache) status(policy syncQueryCachePolicy, includeKeys boo
 		return status.Keys[i].Key < status.Keys[j].Key
 	})
 	return status
+}
+
+func (c *syncQueryDiskCache) resourceStatus(policy syncQueryCachePolicy, includeKeys bool, maxKeys int) (syncQueryDiskStatus, error) {
+	status := syncQueryDiskStatus{
+		Enabled: policy.enabled && policy.disk.enabled,
+	}
+	if c == nil {
+		return status, nil
+	}
+	status.MaxEntries = c.maxEntries
+	status.MaxBytes = c.maxBytes
+	if maxKeys < 0 {
+		return status, errSyncQueryCacheResourceInventoryLimit
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if _, err := os.Stat(c.dir); err == nil {
+		status.Exists = true
+	} else if os.IsNotExist(err) {
+		return status, nil
+	} else {
+		return status, err
+	}
+
+	directory, err := os.Open(c.dir)
+	if err != nil {
+		return status, err
+	}
+	defer func() {
+		_ = directory.Close()
+	}()
+
+	files := make([]syncQueryDiskCacheResourceFile, 0)
+	if includeKeys {
+		files = make([]syncQueryDiskCacheResourceFile, 0, min(maxKeys, syncQueryCacheResourceReadDirChunk))
+	}
+	scanned := 0
+	for {
+		entries, readErr := directory.ReadDir(syncQueryCacheResourceReadDirChunk)
+		for _, entry := range entries {
+			scanned++
+			if scanned > maxSyncQueryCacheResourceScannedEntries {
+				return status, errSyncQueryCacheResourceInventoryLimit
+			}
+			if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !strings.HasSuffix(entry.Name(), ".json") {
+				continue
+			}
+			key := strings.TrimSuffix(entry.Name(), ".json")
+			canonicalName, keyErr := syncQueryDiskCacheFileName(key)
+			if keyErr != nil || canonicalName != entry.Name() {
+				continue
+			}
+			info, infoErr := entry.Info()
+			if infoErr != nil {
+				return status, infoErr
+			}
+			if !info.Mode().IsRegular() {
+				continue
+			}
+			if status.Entries >= maxKeys {
+				return status, errSyncQueryCacheResourceInventoryLimit
+			}
+			size := info.Size()
+			if size < 0 || status.Bytes > math.MaxInt64-size {
+				return status, fmt.Errorf("disk cache size accounting overflow")
+			}
+			status.Entries++
+			status.Bytes += size
+			if includeKeys {
+				files = append(files, syncQueryDiskCacheResourceFile{
+					key:     key,
+					size:    size,
+					modTime: info.ModTime(),
+				})
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			return status, readErr
+		}
+		if len(entries) == 0 {
+			break
+		}
+	}
+
+	if !includeKeys {
+		return status, nil
+	}
+	now := time.Now()
+	status.Keys = make([]syncQueryCacheKeyInfo, 0, len(files))
+	for _, file := range files {
+		age := now.Sub(file.modTime)
+		status.Keys = append(status.Keys, syncQueryCacheKeyInfo{
+			Key:       file.key,
+			AgeMs:     age.Milliseconds(),
+			Stale:     age > policy.ttl,
+			Storage:   "disk",
+			SizeBytes: file.size,
+		})
+	}
+	sort.Slice(status.Keys, func(i, j int) bool {
+		return status.Keys[i].Key < status.Keys[j].Key
+	})
+	return status, nil
 }
 
 func (c *syncQueryDiskCache) readEntryLocked(key string) (syncQueryDiskCacheFile, error) {

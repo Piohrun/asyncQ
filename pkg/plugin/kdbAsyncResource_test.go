@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	kdb "github.com/greg/asyncq/third_party/kdbgo"
 )
 
@@ -51,7 +52,7 @@ func TestDecodeAsyncRunAndWaitRequestDefaultsAndNormalizes(t *testing.T) {
 	}`)
 	ds := &KdbDatasource{}
 
-	liveReq, query, model, requestID, err := ds.decodeAsyncRunAndWaitRequest(raw)
+	liveReq, query, model, requestID, err := ds.decodeAsyncRunAndWaitRequest(backend.PluginContext{}, raw)
 	if err != nil {
 		t.Fatalf("decodeAsyncRunAndWaitRequest returned error: %v", err)
 	}

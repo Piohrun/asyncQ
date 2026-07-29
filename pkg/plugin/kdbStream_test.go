@@ -166,10 +166,11 @@ func TestDecodeLiveQueryRequestNormalizesModel(t *testing.T) {
 		}
 	}`)
 
-	liveReq, query, model, id, err := decodeLiveQueryRequest(raw, ExecutionModeAsync, "async/job-123")
+	admitted, err := (&KdbDatasource{}).admitLiveQueryRequest(backend.PluginContext{}, raw, "async/job-123")
 	if err != nil {
-		t.Fatalf("decodeLiveQueryRequest returned error: %v", err)
+		t.Fatalf("admitLiveQueryRequest returned error: %v", err)
 	}
+	liveReq, query, model, id := admitted.liveReq, admitted.query, admitted.model, admitted.id
 
 	if liveReq.RefID != "B" || query.RefID != "B" {
 		t.Fatalf("unexpected refID: live=%q query=%q", liveReq.RefID, query.RefID)
@@ -207,42 +208,13 @@ func TestDecodeLiveQueryRequestPreservesAsyncStrategy(t *testing.T) {
 		"executionMode": "pluginAsync"
 	}`)
 
-	_, _, model, _, err := decodeLiveQueryRequest(raw, ExecutionModeAsync, "async/job-1")
+	admitted, err := (&KdbDatasource{}).admitLiveQueryRequest(backend.PluginContext{}, raw, "async/job-1")
 	if err != nil {
-		t.Fatalf("decodeLiveQueryRequest returned error: %v", err)
+		t.Fatalf("admitLiveQueryRequest returned error: %v", err)
 	}
+	model := admitted.model
 	if model.ExecutionMode != ExecutionModePluginAsync {
 		t.Fatalf("execution mode was not preserved: %q", model.ExecutionMode)
-	}
-}
-
-func TestNormalizeAsyncQueryModelUsesDatasourceDefault(t *testing.T) {
-	liveReq := liveQueryRequest{QueryModel: QueryModel{}}
-	model := QueryModel{ExecutionMode: ExecutionModeAsync}
-	d := KdbDatasource{
-		ExecutionMode:     ExecutionModePluginAsync,
-		CompatibilityMode: CompatibilityModePanopticon,
-	}
-
-	d.normalizeAsyncQueryModel(liveReq, &model)
-
-	if model.ExecutionMode != ExecutionModePluginAsync {
-		t.Fatalf("execution mode did not use datasource default: %q", model.ExecutionMode)
-	}
-	if model.CompatibilityMode != CompatibilityModePanopticon {
-		t.Fatalf("compatibility mode did not use datasource default: %q", model.CompatibilityMode)
-	}
-}
-
-func TestNormalizeAsyncQueryModelFallsBackToHelperAsyncForSyncDefault(t *testing.T) {
-	liveReq := liveQueryRequest{QueryModel: QueryModel{}}
-	model := QueryModel{ExecutionMode: ExecutionModeAsync}
-	d := KdbDatasource{ExecutionMode: ExecutionModeSync}
-
-	d.normalizeAsyncQueryModel(liveReq, &model)
-
-	if model.ExecutionMode != ExecutionModeAsync {
-		t.Fatalf("execution mode should fall back to helper async on async path: %q", model.ExecutionMode)
 	}
 }
 

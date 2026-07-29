@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/data"
@@ -71,7 +73,7 @@ func TestDecodeExcelReportGenerateRequestAcceptsFormPayload(t *testing.T) {
 	raw := []byte(`payload=%7B%22reportId%22%3A%22demo%22%2C%22fileName%22%3A%22typed%22%7D`)
 	var request excelReportGenerateRequest
 
-	if err := decodeExcelReportGenerateRequest(raw, &request); err != nil {
+	if err := decodeExcelReportGenerateRequest(raw, resourceFormMediaType, &request); err != nil {
 		t.Fatalf("decodeExcelReportGenerateRequest returned error: %v", err)
 	}
 	if request.ReportID != "demo" || request.FileName != "typed" {
@@ -227,7 +229,10 @@ func TestExcelReportFileNameSupportsUserReportTypeAndMinuteToken(t *testing.T) {
 	}
 	now := time.Date(2026, 5, 26, 17, 53, 44, 0, time.UTC)
 
-	got := excelReportFileName(report, request, now)
+	got, err := excelReportFileName(report, request, now)
+	if err != nil {
+		t.Fatalf("excelReportFileName returned error: %v", err)
+	}
 	want := "42_risk_202605261753.xlsx"
 	if got != want {
 		t.Fatalf("unexpected filename: got %q want %q", got, want)
@@ -238,10 +243,97 @@ func TestExcelReportFileNameAllowsUserOverrideAndSanitizes(t *testing.T) {
 	report := excelReportDefinition{ID: "daily-risk", OutputName: "ignored-{timestamp}.xlsx"}
 	request := excelReportGenerateRequest{FileName: `../risk:bad`}
 
-	got := excelReportFileName(report, request, time.Date(2026, 5, 26, 17, 53, 44, 0, time.UTC))
+	got, err := excelReportFileName(report, request, time.Date(2026, 5, 26, 17, 53, 44, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("excelReportFileName returned error: %v", err)
+	}
 	want := ".._risk_bad.xlsx"
 	if got != want {
 		t.Fatalf("unexpected filename: got %q want %q", got, want)
+	}
+}
+
+func TestExcelReportFileNameIsHeaderSafeAndByteBounded(t *testing.T) {
+	const suffix = ".xlsx"
+	exactBase := strings.Repeat("a", maxExcelReportFileNameBytes-len(suffix))
+	exact, err := sanitizeExcelReportFileName(exactBase)
+	if err != nil || exact != exactBase+suffix || len(exact) != maxExcelReportFileNameBytes {
+		t.Fatalf("exact filename=%q bytes=%d error=%v", exact, len(exact), err)
+	}
+
+	over, err := sanitizeExcelReportFileName(exactBase + "b")
+	if err != nil || over != exact || len(over) != maxExcelReportFileNameBytes {
+		t.Fatalf("one-byte-over filename=%q bytes=%d error=%v", over, len(over), err)
+	}
+
+	multibyte, err := sanitizeExcelReportFileName(strings.Repeat("é", maxExcelReportFileNameBytes))
+	if err != nil {
+		t.Fatalf("multibyte filename failed: %v", err)
+	}
+	if len(multibyte) > maxExcelReportFileNameBytes || !utf8.ValidString(multibyte) || !strings.HasSuffix(multibyte, suffix) {
+		t.Fatalf("multibyte filename was not truncated safely: %q (%d bytes)", multibyte, len(multibyte))
+	}
+
+	for _, name := range []string{
+		"bad\nname",
+		"bad\rname",
+		"bad\x00name",
+		"bad\u0085name",
+		"bad\u2028name",
+		"bad\u2029name",
+		string([]byte{'b', 'a', 'd', 0xff}),
+	} {
+		if got, err := sanitizeExcelReportFileName(name); err == nil {
+			t.Fatalf("unsafe filename %q was accepted as %q", name, got)
+		}
+	}
+}
+
+func TestExcelReportWorkbookSenderRejectsUnsafeState(t *testing.T) {
+	var typedNil backend.CallResourceResponseSenderFunc
+	if err := sendExcelReportWorkbook(typedNil, excelReportGenerated{Body: []byte("x"), FileName: "report.xlsx"}); err == nil {
+		t.Fatal("typed nil report sender was accepted")
+	}
+
+	called := false
+	sender := backend.CallResourceResponseSenderFunc(func(*backend.CallResourceResponse) error {
+		called = true
+		return nil
+	})
+	for _, generated := range []excelReportGenerated{
+		{FileName: "report.xlsx"},
+		{Body: []byte("x"), FileName: "bad\nname.xlsx"},
+		{Body: []byte("x"), FileName: "needs:sanitizing.xlsx"},
+	} {
+		if err := sendExcelReportWorkbook(sender, generated); err == nil {
+			t.Fatalf("unsafe generated report was accepted: %#v", generated)
+		}
+	}
+	if called {
+		t.Fatal("unsafe generated report reached the response sender")
+	}
+}
+
+func TestExcelReportDownloadTokenMustBeCanonicalAndUnambiguous(t *testing.T) {
+	token := strings.Repeat("a", 32)
+	if got := excelReportDownloadToken(&backend.CallResourceRequest{
+		URL: "http://localhost/report/download?token=" + token,
+	}); got != token {
+		t.Fatalf("canonical token=%q want=%q", got, token)
+	}
+	for _, rawURL := range []string{
+		"",
+		"http://localhost/report/download",
+		"http://localhost/report/download?token=" + strings.Repeat("a", 31),
+		"http://localhost/report/download?token=" + strings.Repeat("A", 32),
+		"http://localhost/report/download?token=" + token + "&token=" + token,
+		"http://localhost/report/download?token=" + token + "&extra=1",
+		"http://localhost/report/download?token=+" + token,
+		`http://localhost/report/download?token=%zz`,
+	} {
+		if got := excelReportDownloadToken(&backend.CallResourceRequest{URL: rawURL}); got != "" {
+			t.Fatalf("invalid URL %q returned token %q", rawURL, got)
+		}
 	}
 }
 
@@ -342,7 +434,9 @@ func TestExcelReportValidateResourceReportsTemplateIssues(t *testing.T) {
 
 	var resourceResp *backend.CallResourceResponse
 	err := ds.CallResource(context.Background(), &backend.CallResourceRequest{
-		Path: "report/validate",
+		PluginContext: backend.PluginContext{User: &backend.User{Role: "Admin"}},
+		Path:          "report/validate",
+		Method:        http.MethodGet,
 	}, backend.CallResourceResponseSenderFunc(func(resp *backend.CallResourceResponse) error {
 		resourceResp = resp
 		return nil
@@ -375,8 +469,10 @@ func TestExcelReportGenerateLinkResourceDownloadsWorkbook(t *testing.T) {
 
 	var linkResp *backend.CallResourceResponse
 	err := ds.CallResource(context.Background(), &backend.CallResourceRequest{
-		Path: "report/generate-link",
-		Body: []byte(request),
+		Path:    "report/generate-link",
+		Method:  http.MethodPost,
+		Headers: map[string][]string{"Content-Type": {"application/json"}},
+		Body:    []byte(request),
 	}, backend.CallResourceResponseSenderFunc(func(resp *backend.CallResourceResponse) error {
 		linkResp = resp
 		return nil
@@ -397,8 +493,9 @@ func TestExcelReportGenerateLinkResourceDownloadsWorkbook(t *testing.T) {
 
 	var downloadResp *backend.CallResourceResponse
 	err = ds.CallResource(context.Background(), &backend.CallResourceRequest{
-		Path: "report/download",
-		URL:  "http://localhost/report/download?token=" + link.Token,
+		Path:   "report/download",
+		Method: http.MethodGet,
+		URL:    "http://localhost/report/download?token=" + link.Token,
 	}, backend.CallResourceResponseSenderFunc(func(resp *backend.CallResourceResponse) error {
 		downloadResp = resp
 		return nil
@@ -409,11 +506,19 @@ func TestExcelReportGenerateLinkResourceDownloadsWorkbook(t *testing.T) {
 	if downloadResp == nil || downloadResp.Status != 200 {
 		t.Fatalf("expected download success, got %#v", downloadResp)
 	}
-	if got := downloadResp.Headers["x-asyncq-file-name"][0]; got != "custom-report.xlsx" {
-		t.Fatalf("unexpected x-asyncq-file-name header: %q", got)
+	for key, want := range map[string]string{
+		"content-type":           excelReportContentType,
+		"x-asyncq-file-name":     "custom-report.xlsx",
+		"cache-control":          "no-store",
+		"x-content-type-options": "nosniff",
+		"referrer-policy":        "no-referrer",
+	} {
+		if got := downloadResp.Headers[key]; len(got) != 1 || got[0] != want {
+			t.Fatalf("download header %s=%v want=%q", key, got, want)
+		}
 	}
-	if got := downloadResp.Headers["content-disposition"][0]; !strings.Contains(got, "custom-report.xlsx") {
-		t.Fatalf("unexpected content-disposition header: %q", got)
+	if got := downloadResp.Headers["content-disposition"]; len(got) != 1 || !strings.Contains(got[0], "custom-report.xlsx") {
+		t.Fatalf("unexpected content-disposition header: %v", got)
 	}
 	workbook, err := excelize.OpenReader(bytes.NewReader(downloadResp.Body))
 	if err != nil {
@@ -426,6 +531,58 @@ func TestExcelReportGenerateLinkResourceDownloadsWorkbook(t *testing.T) {
 	}
 	if len(rows) != 3 || rows[0][0] != "sym" || rows[1][0] != "AAPL" || rows[2][0] != "MSFT" {
 		t.Fatalf("unexpected workbook rows: %#v", rows)
+	}
+
+	replayed := callResourceForTest(t, ds, &backend.CallResourceRequest{
+		Path:   "report/download",
+		Method: http.MethodGet,
+		URL:    "http://localhost/report/download?token=" + link.Token,
+	})
+	if replayed.Status != http.StatusNotFound {
+		t.Fatalf("single-use report token replay status=%d body=%s", replayed.Status, replayed.Body)
+	}
+	assertSecureJSONHeaders(t, replayed)
+}
+
+func TestExcelReportGenerationErrorsDoNotExposeTemplatePaths(t *testing.T) {
+	secretPath := filepath.Join(t.TempDir(), "operator-secret-template.xlsx")
+	catalog := excelReportCatalog{Reports: []excelReportDefinition{{
+		ID:           "r1",
+		TemplatePath: secretPath,
+		Bindings: []excelReportBinding{{
+			ID:    "A",
+			Sheet: "Data",
+			Cell:  "A1",
+		}},
+	}}}
+	rawCatalog, err := json.Marshal(catalog)
+	if err != nil {
+		t.Fatalf("marshal report catalog: %v", err)
+	}
+	ds := &KdbDatasource{ExcelReports: string(rawCatalog)}
+	response := callResourceForTest(t, ds, &backend.CallResourceRequest{
+		Path:    "report/generate",
+		Method:  http.MethodPost,
+		Headers: map[string][]string{"Content-Type": {"application/json"}},
+		Body: []byte(`{
+			"reportId":"r1",
+			"timeRange":{"from":"2026-05-26T10:00:00Z","to":"2026-05-26T10:01:00Z"},
+			"frames":[{"refId":"A","fields":[{"name":"value","values":[1]}]}]
+		}`),
+	})
+	if response.Status != http.StatusBadRequest {
+		t.Fatalf("report generation failure status=%d body=%s", response.Status, response.Body)
+	}
+	assertSecureJSONHeaders(t, response)
+	if bytes.Contains(response.Body, []byte(secretPath)) || bytes.Contains(response.Body, []byte("allowlist")) {
+		t.Fatalf("report response exposed template configuration: %s", response.Body)
+	}
+	var publicResponse excelReportResourceResponse
+	if err := json.Unmarshal(response.Body, &publicResponse); err != nil {
+		t.Fatalf("decode report error: %v", err)
+	}
+	if publicResponse.Code != "template-path" || publicResponse.Error != "report template configuration is invalid" {
+		t.Fatalf("unexpected public report error: %#v", publicResponse)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -397,7 +398,9 @@ func TestDisposeInterruptsAndJoinsAdmittedDirectAsyncWorker(t *testing.T) {
 		return nil
 	})
 	request := &backend.CallResourceRequest{
-		Path: "async/run-and-wait",
+		Path:    "async/run-and-wait",
+		Method:  http.MethodPost,
+		Headers: map[string][]string{"Content-Type": {"application/json"}},
 		Body: []byte(`{
 			"queryText": "1",
 			"executionMode": "pluginAsync",

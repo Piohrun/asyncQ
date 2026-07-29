@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -23,6 +22,10 @@ const (
 	maxQueryTextBytes              = 1 << 20
 	maxRefIDBytes                  = 64
 	maxQueryCount                  = 128
+	maxJSONTopLevelMembers         = 256
+	maxJSONStructuredValues        = 16384
+	maxJSONDepth                   = 32
+	maxJSONMemberNameBytes         = 256
 
 	maxHostBytes                = 1024
 	maxTimeoutTextBytes         = 32
@@ -51,6 +54,7 @@ const (
 	maxExcelBindingCount      = 1024
 
 	maxQueryTimeoutMs       = 3600000
+	maxQueryKeyBytes        = 256
 	minPollIntervalMs       = 100
 	maxPollIntervalMs       = 300000
 	maxStreamRows           = 1000000
@@ -58,6 +62,15 @@ const (
 	maxQueryCacheTTLSeconds = maxCacheTTLSeconds
 	maxQueryMaxDataPoints   = int64(10000000)
 	maxQueryInterval        = 365 * 24 * time.Hour
+	maxQueryCachingTTL      = int64(maxQueryInterval / time.Millisecond)
+	maxQueryDatasourceID    = int64(1<<53 - 1)
+	maxLivePathBytes        = len("stream/") + 128
+	maxLiveIDBytes          = 128
+	maxResourcePathBytes    = 256
+	maxResourceURLBytes     = 8 << 10
+	maxResourceJSONBytes    = 16 << 20
+	maxResourceResponseJSON = 32 << 20
+	maxAsyncStatusEvents    = 256
 )
 
 type jsonValueKind uint8
@@ -72,6 +85,7 @@ const (
 type jsonFieldSpec struct {
 	kind           jsonValueKind
 	maxStringBytes int
+	allowNull      bool
 }
 
 type admittedDataQuery struct {
@@ -79,6 +93,14 @@ type admittedDataQuery struct {
 	model     QueryModel
 	decodeMs  float64
 	prepareMs float64
+}
+
+type admittedLiveQuery struct {
+	liveReq liveQueryRequest
+	query   backend.DataQuery
+	model   QueryModel
+	family  string
+	id      string
 }
 
 var datasourceJSONFieldSpecs = map[string]jsonFieldSpec{
@@ -139,7 +161,7 @@ var (
 	maxQTimestamp   = qTimestampEpoch.Add(time.Duration(math.MaxInt64 - 1))
 )
 
-var queryJSONFieldSpecs = map[string]jsonFieldSpec{
+var commonQueryJSONFieldSpecs = map[string]jsonFieldSpec{
 	"queryText":                   {kind: jsonStringValue, maxStringBytes: maxQueryTextBytes},
 	"timeOut":                     {kind: jsonIntegerValue},
 	"useTimeColumn":               {kind: jsonBoolValue},
@@ -178,10 +200,56 @@ var queryJSONFieldSpecs = map[string]jsonFieldSpec{
 
 	// Grafana query-envelope metadata proven by the frontend model and demo
 	// dashboard fixtures. These values are validated but decoded by the SDK.
-	"datasource": {kind: jsonObjectValue},
+	"datasource": {kind: jsonObjectValue, allowNull: true},
+	"key":        {kind: jsonStringValue, maxStringBytes: maxQueryKeyBytes},
 	"refId":      {kind: jsonStringValue, maxStringBytes: maxRefIDBytes},
 	"hide":       {kind: jsonBoolValue},
 	"queryType":  {kind: jsonStringValue, maxStringBytes: maxQueryTypeBytes},
+}
+
+var queryJSONFieldSpecs = func() map[string]jsonFieldSpec {
+	specs := make(map[string]jsonFieldSpec, len(commonQueryJSONFieldSpecs)+4)
+	for key, spec := range commonQueryJSONFieldSpecs {
+		specs[key] = spec
+	}
+	// DataSourceWithBackend adds exactly these target-envelope members before
+	// posting to /api/ds/query. They stay out of QueryModel.
+	specs["datasourceId"] = jsonFieldSpec{kind: jsonIntegerValue}
+	specs["intervalMs"] = jsonFieldSpec{kind: jsonIntegerValue}
+	specs["maxDataPoints"] = jsonFieldSpec{kind: jsonIntegerValue}
+	specs["queryCachingTTL"] = jsonFieldSpec{kind: jsonIntegerValue, allowNull: true}
+	return specs
+}()
+
+var liveQueryJSONFieldSpecs = func() map[string]jsonFieldSpec {
+	specs := make(map[string]jsonFieldSpec, len(commonQueryJSONFieldSpecs)+3)
+	for key, spec := range commonQueryJSONFieldSpecs {
+		specs[key] = spec
+	}
+	specs["maxDataPoints"] = jsonFieldSpec{kind: jsonIntegerValue}
+	specs["intervalMs"] = jsonFieldSpec{kind: jsonIntegerValue}
+	specs["timeRange"] = jsonFieldSpec{kind: jsonObjectValue}
+	return specs
+}()
+
+var asyncRunAndWaitJSONFieldSpecs = func() map[string]jsonFieldSpec {
+	specs := make(map[string]jsonFieldSpec, len(liveQueryJSONFieldSpecs)+1)
+	for key, spec := range liveQueryJSONFieldSpecs {
+		specs[key] = spec
+	}
+	specs["requestId"] = jsonFieldSpec{kind: jsonStringValue, maxStringBytes: maxLiveIDBytes}
+	return specs
+}()
+
+var liveTimeRangeJSONFieldSpecs = map[string]jsonFieldSpec{
+	"from": {kind: jsonStringValue, maxStringBytes: maxTimeoutTextBytes * 2},
+	"to":   {kind: jsonStringValue, maxStringBytes: maxTimeoutTextBytes * 2},
+}
+
+var queryDatasourceJSONFieldSpecs = map[string]jsonFieldSpec{
+	"type":       {kind: jsonStringValue, maxStringBytes: maxFieldNameBytes},
+	"uid":        {kind: jsonStringValue, maxStringBytes: maxFieldNameBytes},
+	"apiVersion": {kind: jsonStringValue, maxStringBytes: maxFieldNameBytes},
 }
 
 func decodeDatasourceSettings(raw []byte, target *KdbDatasource) (map[string]json.RawMessage, error) {
@@ -208,6 +276,9 @@ func scanTopLevelJSONObject(raw []byte, maxBytes int, specs map[string]jsonField
 	if !utf8.Valid(raw) {
 		return nil, fmt.Errorf("%s must contain valid UTF-8", label)
 	}
+	if err := validateBoundedJSONStructure(raw, label); err != nil {
+		return nil, err
+	}
 
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
@@ -220,14 +291,14 @@ func scanTopLevelJSONObject(raw []byte, maxBytes int, specs map[string]jsonField
 		return nil, fmt.Errorf("%s must be a non-null JSON object", label)
 	}
 
-	canonicalKeys := make([]string, 0, len(specs))
-	for key := range specs {
-		canonicalKeys = append(canonicalKeys, key)
-	}
-	sort.Strings(canonicalKeys)
 	fields := make(map[string]json.RawMessage, len(specs))
-	seen := make(map[string]struct{}, len(specs))
+	seen := make(map[string]struct{}, min(len(specs), maxJSONTopLevelMembers))
+	memberCount := 0
 	for decoder.More() {
+		memberCount++
+		if memberCount > maxJSONTopLevelMembers {
+			return nil, fmt.Errorf("%s contains more than %d top-level members", label, maxJSONTopLevelMembers)
+		}
 		token, err := decoder.Token()
 		if err != nil {
 			return nil, fmt.Errorf("%s is malformed JSON", label)
@@ -243,7 +314,10 @@ func scanTopLevelJSONObject(raw []byte, maxBytes int, specs map[string]jsonField
 
 		spec, known := specs[key]
 		if !known {
-			for _, canonical := range canonicalKeys {
+			// Alias work is bounded by the fixed schema size and the hard
+			// top-level member cap. EqualFold intentionally catches Unicode
+			// simple-fold aliases such as the long-s spelling of "host".
+			for canonical := range specs {
 				if strings.EqualFold(key, canonical) {
 					return nil, fmt.Errorf("%s field %q must use its canonical spelling", label, canonical)
 				}
@@ -261,8 +335,8 @@ func scanTopLevelJSONObject(raw []byte, maxBytes int, specs map[string]jsonField
 			if err := validateJSONFieldValue(value, spec, key, label); err != nil {
 				return nil, err
 			}
+			fields[key] = append(json.RawMessage(nil), value...)
 		}
-		fields[key] = append(json.RawMessage(nil), value...)
 	}
 	if _, err := decoder.Token(); err != nil {
 		return nil, fmt.Errorf("%s is malformed JSON", label)
@@ -274,9 +348,87 @@ func scanTopLevelJSONObject(raw []byte, maxBytes int, specs map[string]jsonField
 	return fields, nil
 }
 
+type jsonStructureBudget struct {
+	values int
+}
+
+func validateBoundedJSONStructure(raw []byte, label string) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	budget := &jsonStructureBudget{}
+	if err := consumeBoundedJSONValue(decoder, 1, budget); err != nil {
+		return fmt.Errorf("%s %w", label, err)
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return fmt.Errorf("%s must not contain trailing JSON", label)
+	}
+	return nil
+}
+
+func consumeBoundedJSONValue(decoder *json.Decoder, depth int, budget *jsonStructureBudget) error {
+	if depth > maxJSONDepth {
+		return fmt.Errorf("exceeds the maximum JSON depth of %d", maxJSONDepth)
+	}
+	budget.values++
+	if budget.values > maxJSONStructuredValues {
+		return fmt.Errorf("contains more than %d structured values", maxJSONStructuredValues)
+	}
+	token, err := decoder.Token()
+	if err != nil {
+		return fmt.Errorf("is malformed JSON")
+	}
+	delim, isDelim := token.(json.Delim)
+	if !isDelim {
+		return nil
+	}
+	switch delim {
+	case '{':
+		for decoder.More() {
+			budget.values++
+			if budget.values > maxJSONStructuredValues {
+				return fmt.Errorf("contains more than %d structured values", maxJSONStructuredValues)
+			}
+			key, err := decoder.Token()
+			if err != nil {
+				return fmt.Errorf("is malformed JSON")
+			}
+			name, ok := key.(string)
+			if !ok {
+				return fmt.Errorf("contains an invalid object key")
+			}
+			if len(name) == 0 || len(name) > maxJSONMemberNameBytes {
+				return fmt.Errorf("contains an empty or oversized object key")
+			}
+			if err := consumeBoundedJSONValue(decoder, depth+1, budget); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil || closing != json.Delim('}') {
+			return fmt.Errorf("is malformed JSON")
+		}
+	case '[':
+		for decoder.More() {
+			if err := consumeBoundedJSONValue(decoder, depth+1, budget); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil || closing != json.Delim(']') {
+			return fmt.Errorf("is malformed JSON")
+		}
+	default:
+		return fmt.Errorf("is malformed JSON")
+	}
+	return nil
+}
+
 func validateJSONFieldValue(raw json.RawMessage, spec jsonFieldSpec, key string, label string) error {
 	value := bytes.TrimSpace(raw)
 	if bytes.Equal(value, []byte("null")) {
+		if spec.allowNull {
+			return nil
+		}
 		return fmt.Errorf("%s field %q must not be null", label, key)
 	}
 	switch spec.kind {
@@ -578,6 +730,9 @@ func decodeExactQueryModel(raw []byte) (QueryModel, map[string]json.RawMessage, 
 	if err != nil {
 		return QueryModel{}, nil, err
 	}
+	if err := validateQueryEnvelopeObjects(fields, false, "query JSON"); err != nil {
+		return QueryModel{}, nil, err
+	}
 	var model QueryModel
 	if err := json.Unmarshal(raw, &model); err != nil {
 		return QueryModel{}, nil, fmt.Errorf("query JSON could not be decoded")
@@ -585,7 +740,210 @@ func decodeExactQueryModel(raw []byte) (QueryModel, map[string]json.RawMessage, 
 	return model, fields, nil
 }
 
-func (d *KdbDatasource) normalizeAndValidateQueryModel(pCtx backend.PluginContext, query backend.DataQuery, model *QueryModel, fields map[string]json.RawMessage) error {
+func validateQueryEnvelopeObjects(fields map[string]json.RawMessage, requireTimeRange bool, label string) error {
+	if err := validateQueryEnvelopeText(fields, "key", label); err != nil {
+		return err
+	}
+	if raw, ok := fields["datasource"]; ok {
+		if !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			datasourceFields, err := scanTopLevelJSONObject(raw, maxQueryJSONBytes, queryDatasourceJSONFieldSpecs, false, label+" datasource")
+			if err != nil {
+				return err
+			}
+			for _, key := range []string{"type", "uid", "apiVersion"} {
+				if err := validateQueryEnvelopeText(datasourceFields, key, label+" datasource"); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	rawTimeRange, hasTimeRange := fields["timeRange"]
+	if !hasTimeRange {
+		if requireTimeRange {
+			return fmt.Errorf("%s field %q is required", label, "timeRange")
+		}
+		return nil
+	}
+	timeFields, err := scanTopLevelJSONObject(rawTimeRange, maxQueryJSONBytes, liveTimeRangeJSONFieldSpecs, false, label+" timeRange")
+	if err != nil {
+		return err
+	}
+	if _, ok := timeFields["from"]; !ok {
+		return fmt.Errorf("%s timeRange field %q is required", label, "from")
+	}
+	if _, ok := timeFields["to"]; !ok {
+		return fmt.Errorf("%s timeRange field %q is required", label, "to")
+	}
+	return nil
+}
+
+func validateQueryEnvelopeText(fields map[string]json.RawMessage, key string, label string) error {
+	raw, ok := fields[key]
+	if !ok {
+		return nil
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return fmt.Errorf("%s field %q could not be decoded", label, key)
+	}
+	if !utf8.ValidString(value) {
+		return fmt.Errorf("%s field %q must contain valid UTF-8", label, key)
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return fmt.Errorf("%s field %q must not contain control characters", label, key)
+		}
+	}
+	return nil
+}
+
+func admitLivePath(path string) (family string, id string, err error) {
+	if len(path) == 0 || len(path) > maxLivePathBytes || !utf8.ValidString(path) {
+		return "", "", fmt.Errorf("live path is invalid or exceeds the %d-byte limit", maxLivePathBytes)
+	}
+	separator := strings.IndexByte(path, '/')
+	if separator <= 0 || strings.IndexByte(path[separator+1:], '/') >= 0 {
+		return "", "", fmt.Errorf("live path must be exactly async/<id> or stream/<id>")
+	}
+	family, id = path[:separator], path[separator+1:]
+	if family != ExecutionModeAsync && family != ExecutionModeStream {
+		return "", "", fmt.Errorf("live path must be exactly async/<id> or stream/<id>")
+	}
+	if err := validateExternalID(id, "live path ID"); err != nil {
+		return "", "", err
+	}
+	return family, id, nil
+}
+
+func validateExternalID(value string, label string) error {
+	if value == "" {
+		return fmt.Errorf("%s must not be empty", label)
+	}
+	if value == "." || value == ".." {
+		return fmt.Errorf("%s must not be a dot path segment", label)
+	}
+	if len(value) > maxLiveIDBytes {
+		return fmt.Errorf("%s exceeds the %d-byte limit", label, maxLiveIDBytes)
+	}
+	if !utf8.ValidString(value) {
+		return fmt.Errorf("%s must contain valid UTF-8", label)
+	}
+	for index := 0; index < len(value); index++ {
+		c := value[index]
+		if (c >= 'A' && c <= 'Z') ||
+			(c >= 'a' && c <= 'z') ||
+			(c >= '0' && c <= '9') ||
+			c == '.' || c == '_' || c == '~' || c == '-' {
+			continue
+		}
+		return fmt.Errorf("%s must use only ASCII letters, digits, '.', '_', '~', or '-'", label)
+	}
+	return nil
+}
+
+func (d *KdbDatasource) admitLiveQueryRequest(pCtx backend.PluginContext, raw json.RawMessage, path string) (admittedLiveQuery, error) {
+	family, id, err := admitLivePath(path)
+	if err != nil {
+		return admittedLiveQuery{}, err
+	}
+	fields, err := scanTopLevelJSONObject(raw, maxQueryJSONBytes, liveQueryJSONFieldSpecs, false, "live query JSON")
+	if err != nil {
+		return admittedLiveQuery{}, err
+	}
+	if err := validateQueryEnvelopeObjects(fields, false, "live query JSON"); err != nil {
+		return admittedLiveQuery{}, err
+	}
+	if _, ok := fields["refId"]; !ok {
+		return admittedLiveQuery{}, fmt.Errorf("live query JSON field %q is required", "refId")
+	}
+	if _, ok := fields["queryText"]; !ok {
+		return admittedLiveQuery{}, fmt.Errorf("live query JSON field %q is required", "queryText")
+	}
+
+	var liveReq liveQueryRequest
+	if err := json.Unmarshal(raw, &liveReq); err != nil {
+		return admittedLiveQuery{}, fmt.Errorf("live query JSON could not be decoded")
+	}
+	if err := validateRefID(liveReq.RefID); err != nil {
+		return admittedLiveQuery{}, fmt.Errorf("live query RefID is invalid: %w", err)
+	}
+	from, to, err := parseLiveTimeRange(liveReq.TimeRange, fields)
+	if err != nil {
+		return admittedLiveQuery{}, err
+	}
+	queryType, err := decodedOptionalString(fields, "queryType")
+	if err != nil {
+		return admittedLiveQuery{}, err
+	}
+	model := liveReq.QueryModel
+	query := backend.DataQuery{
+		RefID:         liveReq.RefID,
+		QueryType:     queryType,
+		MaxDataPoints: liveReq.MaxDataPoints,
+		TimeRange:     backend.TimeRange{From: from, To: to},
+	}
+	if liveReq.IntervalMs < 0 || liveReq.IntervalMs > int64(maxQueryInterval/time.Millisecond) {
+		return admittedLiveQuery{}, fmt.Errorf("intervalMs must be between 0 and %d", maxQueryInterval/time.Millisecond)
+	}
+	query.Interval = time.Duration(liveReq.IntervalMs) * time.Millisecond
+	if err := validateQueryEnvelopeAndBounds(query, &model, fields); err != nil {
+		return admittedLiveQuery{}, err
+	}
+	if err := d.normalizeAndPrepareAsyncModel(pCtx, query, &model, fields, family); err != nil {
+		return admittedLiveQuery{}, err
+	}
+	queryJSON, err := json.Marshal(model)
+	if err != nil {
+		return admittedLiveQuery{}, fmt.Errorf("normalized live query could not be encoded")
+	}
+	if len(queryJSON) > maxQueryJSONBytes {
+		return admittedLiveQuery{}, fmt.Errorf("normalized live query exceeds the %d-byte limit", maxQueryJSONBytes)
+	}
+	query.JSON = queryJSON
+	return admittedLiveQuery{
+		liveReq: liveReq,
+		query:   query,
+		model:   model,
+		family:  family,
+		id:      id,
+	}, nil
+}
+
+func decodedOptionalString(fields map[string]json.RawMessage, key string) (string, error) {
+	raw, ok := fields[key]
+	if !ok {
+		return "", nil
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", fmt.Errorf("field %q could not be decoded", key)
+	}
+	return value, nil
+}
+
+func parseLiveTimeRange(value liveTimeRange, fields map[string]json.RawMessage) (time.Time, time.Time, error) {
+	if _, present := fields["timeRange"]; !present {
+		return time.Time{}, time.Time{}, nil
+	}
+	from, err := time.Parse(time.RFC3339Nano, value.From)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("timeRange.from must be an RFC3339 timestamp")
+	}
+	to, err := time.Parse(time.RFC3339Nano, value.To)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("timeRange.to must be an RFC3339 timestamp")
+	}
+	from, to = from.UTC(), to.UTC()
+	if from.After(to) {
+		return time.Time{}, time.Time{}, fmt.Errorf("timeRange.from must be before or equal to timeRange.to")
+	}
+	if from.Before(minQTimestamp) || to.After(maxQTimestamp) {
+		return time.Time{}, time.Time{}, fmt.Errorf("timeRange is outside the finite q timestamp range")
+	}
+	return from, to, nil
+}
+
+func validateQueryEnvelopeAndBounds(query backend.DataQuery, model *QueryModel, fields map[string]json.RawMessage) error {
 	if model == nil {
 		return fmt.Errorf("query model is nil")
 	}
@@ -622,6 +980,49 @@ func (d *KdbDatasource) normalizeAndValidateQueryModel(pCtx backend.PluginContex
 	if query.Interval < 0 || query.Interval > maxQueryInterval {
 		return fmt.Errorf("interval must be between 0 and %s", maxQueryInterval)
 	}
+	if raw, ok := fields["maxDataPoints"]; ok {
+		envelopeMaxDataPoints, err := decodeJSONInteger(raw, "maxDataPoints")
+		if err != nil {
+			return err
+		}
+		if envelopeMaxDataPoints < 0 || envelopeMaxDataPoints > maxQueryMaxDataPoints {
+			return fmt.Errorf("query JSON field %q must be between 0 and %d", "maxDataPoints", maxQueryMaxDataPoints)
+		}
+		if envelopeMaxDataPoints != query.MaxDataPoints {
+			return fmt.Errorf("query JSON field %q does not match the request max data points", "maxDataPoints")
+		}
+	}
+	if raw, ok := fields["intervalMs"]; ok {
+		envelopeIntervalMs, err := decodeJSONInteger(raw, "intervalMs")
+		if err != nil {
+			return err
+		}
+		maximumIntervalMs := int64(maxQueryInterval / time.Millisecond)
+		if envelopeIntervalMs < 0 || envelopeIntervalMs > maximumIntervalMs {
+			return fmt.Errorf("query JSON field %q must be between 0 and %d", "intervalMs", maximumIntervalMs)
+		}
+		if query.Interval%time.Millisecond != 0 || envelopeIntervalMs != query.Interval.Milliseconds() {
+			return fmt.Errorf("query JSON field %q does not match the request interval", "intervalMs")
+		}
+	}
+	if raw, ok := fields["datasourceId"]; ok {
+		datasourceID, err := decodeJSONInteger(raw, "datasourceId")
+		if err != nil {
+			return err
+		}
+		if datasourceID < 0 || datasourceID > maxQueryDatasourceID {
+			return fmt.Errorf("datasourceId must be between 0 and %d", maxQueryDatasourceID)
+		}
+	}
+	if raw, ok := fields["queryCachingTTL"]; ok && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		queryCachingTTL, err := decodeJSONInteger(raw, "queryCachingTTL")
+		if err != nil {
+			return err
+		}
+		if queryCachingTTL < 0 || queryCachingTTL > maxQueryCachingTTL {
+			return fmt.Errorf("queryCachingTTL must be null or between 0 and %d milliseconds", maxQueryCachingTTL)
+		}
+	}
 	from, to := query.TimeRange.From, query.TimeRange.To
 	if from.IsZero() != to.IsZero() {
 		return fmt.Errorf("time range must provide both from and to")
@@ -632,8 +1033,82 @@ func (d *KdbDatasource) normalizeAndValidateQueryModel(pCtx backend.PluginContex
 	if !from.IsZero() && (from.Before(minQTimestamp) || to.After(maxQTimestamp)) {
 		return fmt.Errorf("time range is outside the finite q timestamp range")
 	}
+	return validateExplicitQueryFields(*model, fields)
+}
 
-	if err := validateExplicitQueryFields(*model, fields); err != nil {
+func decodeJSONInteger(raw json.RawMessage, key string) (int64, error) {
+	value, err := strconv.ParseInt(string(bytes.TrimSpace(raw)), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("query JSON field %q must be an integer", key)
+	}
+	return value, nil
+}
+
+func (d *KdbDatasource) normalizeAndPrepareAsyncModel(pCtx backend.PluginContext, query backend.DataQuery, model *QueryModel, fields map[string]json.RawMessage, family string) error {
+	_, explicitMode := fields["executionMode"]
+	d.normalizeQueryModel(model)
+	switch family {
+	case ExecutionModeStream:
+		if explicitMode && model.ExecutionMode != ExecutionModeStream {
+			return fmt.Errorf("executionMode contradicts the stream live path")
+		}
+		model.ExecutionMode = ExecutionModeStream
+	case ExecutionModeAsync:
+		if explicitMode {
+			if !isAsyncExecutionMode(model.ExecutionMode) {
+				return fmt.Errorf("executionMode contradicts the async live path")
+			}
+		} else if !isAsyncExecutionMode(model.ExecutionMode) {
+			model.ExecutionMode = ExecutionModeAsync
+		}
+	default:
+		return fmt.Errorf("unsupported live path family")
+	}
+	if err := validateNormalizedQueryModel(*model); err != nil {
+		return err
+	}
+	if err := validatePluginContextExpansionInputs(pCtx); err != nil {
+		return err
+	}
+	if model.ExecutionMode == ExecutionModeDeferredAsync {
+		model.OriginalQueryText = model.QueryText
+		wrapped, err := applyDeferredQueryWrapper(model.QueryText, model.DeferredQueryWrapper)
+		if err != nil {
+			return err
+		}
+		if len(wrapped) > maxQueryTextBytes {
+			return fmt.Errorf("prepared queryText exceeds the %d-byte limit", maxQueryTextBytes)
+		}
+		model.QueryText = wrapped
+	}
+	if model.CompatibilityMode == CompatibilityModePanopticon {
+		if err := validatePanopticonExpansionBudget(pCtx, query, *model); err != nil {
+			return err
+		}
+	}
+	if err := prepareQueryForExecution(pCtx, query, model); err != nil {
+		return err
+	}
+	if strings.TrimSpace(model.QueryText) == "" {
+		return fmt.Errorf("queryText must not be blank")
+	}
+	if len(model.QueryText) > maxQueryTextBytes {
+		return fmt.Errorf("prepared queryText exceeds the %d-byte limit", maxQueryTextBytes)
+	}
+	return nil
+}
+
+func isAsyncExecutionMode(value string) bool {
+	switch value {
+	case ExecutionModeAsync, ExecutionModePluginAsync, ExecutionModeDeferredAsync, ExecutionModeLegacyAsync:
+		return true
+	default:
+		return false
+	}
+}
+
+func (d *KdbDatasource) normalizeAndValidateQueryModel(pCtx backend.PluginContext, query backend.DataQuery, model *QueryModel, fields map[string]json.RawMessage) error {
+	if err := validateQueryEnvelopeAndBounds(query, model, fields); err != nil {
 		return err
 	}
 	d.normalizeQueryModel(model)
@@ -717,6 +1192,19 @@ func validateExplicitQueryFields(model QueryModel, fields map[string]json.RawMes
 	}
 	if model.QueryCacheTimeBucketSeconds != nil && (*model.QueryCacheTimeBucketSeconds < 0 || *model.QueryCacheTimeBucketSeconds > maxCacheTimeBucketSeconds) {
 		return fmt.Errorf("queryCacheTimeBucketSeconds must be between 0 and %d", maxCacheTimeBucketSeconds)
+	}
+	for _, wrapper := range []struct {
+		field string
+		value string
+	}{
+		{field: "deferredQueryWrapper", value: model.DeferredQueryWrapper},
+		{field: "panopticonQueryWrapper", value: model.PanopticonQueryWrapper},
+	} {
+		if _, configured := fields[wrapper.field]; configured &&
+			strings.TrimSpace(wrapper.value) != "" &&
+			strings.Count(wrapper.value, "{Query}") != 1 {
+			return fmt.Errorf("%s must contain exactly one {Query} placeholder", wrapper.field)
+		}
 	}
 	return nil
 }

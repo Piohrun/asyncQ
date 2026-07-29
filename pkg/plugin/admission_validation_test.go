@@ -1,11 +1,13 @@
 package plugin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"math"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -18,11 +20,24 @@ import (
 func TestExactDecoderSpecsCoverTaggedModels(t *testing.T) {
 	assertSpecsCoverType(t, reflect.TypeOf(KdbDatasource{}), datasourceJSONFieldSpecs, nil)
 	assertSpecsCoverType(t, reflect.TypeOf(QueryModel{}), queryJSONFieldSpecs, map[string]struct{}{
-		"datasource": {},
-		"refId":      {},
-		"hide":       {},
-		"queryType":  {},
+		"datasource":      {},
+		"datasourceId":    {},
+		"intervalMs":      {},
+		"key":             {},
+		"maxDataPoints":   {},
+		"queryCachingTTL": {},
+		"refId":           {},
+		"hide":            {},
+		"queryType":       {},
 	})
+	for _, standardOnly := range []string{"datasourceId", "queryCachingTTL"} {
+		if _, ok := liveQueryJSONFieldSpecs[standardOnly]; ok {
+			t.Errorf("live schema unexpectedly admits standard-only field %q", standardOnly)
+		}
+		if _, ok := asyncRunAndWaitJSONFieldSpecs[standardOnly]; ok {
+			t.Errorf("async resource schema unexpectedly admits standard-only field %q", standardOnly)
+		}
+	}
 }
 
 func TestDatasourceSettingsExactObjectAdmission(t *testing.T) {
@@ -70,6 +85,46 @@ func TestDatasourceSettingsAllowUnknownGrafanaMetadata(t *testing.T) {
 	}
 	ds := instance.(*KdbDatasource)
 	t.Cleanup(ds.Dispose)
+}
+
+func TestExactJSONScannerBoundsMembersDepthAndUnknownRetention(t *testing.T) {
+	members := make([]string, 0, maxJSONTopLevelMembers+1)
+	for index := 0; index <= maxJSONTopLevelMembers; index++ {
+		members = append(members, fmt.Sprintf("%q:%d", fmt.Sprintf("future%d", index), index))
+	}
+	tooMany := []byte("{" + strings.Join(members, ",") + "}")
+	if _, err := scanTopLevelJSONObject(tooMany, maxDatasourceSettingsJSONBytes, datasourceJSONFieldSpecs, true, "settings"); err == nil {
+		t.Fatal("top-level member limit was not enforced")
+	}
+
+	deep := "0"
+	for range maxJSONDepth + 1 {
+		deep = "[" + deep + "]"
+	}
+	if _, err := scanTopLevelJSONObject([]byte(`{"future":`+deep+`}`), maxDatasourceSettingsJSONBytes, datasourceJSONFieldSpecs, true, "settings"); err == nil {
+		t.Fatal("JSON depth limit was not enforced")
+	}
+	oversizedKey := []byte(`{"` + strings.Repeat("k", maxJSONMemberNameBytes+1) + `":true}`)
+	if _, err := scanTopLevelJSONObject(oversizedKey, maxDatasourceSettingsJSONBytes, datasourceJSONFieldSpecs, true, "settings"); err == nil {
+		t.Fatal("JSON member-name limit was not enforced")
+	}
+
+	fields, err := scanTopLevelJSONObject(
+		[]byte(`{"host":"localhost","future":{"large":["metadata"]}}`),
+		maxDatasourceSettingsJSONBytes,
+		datasourceJSONFieldSpecs,
+		true,
+		"settings",
+	)
+	if err != nil {
+		t.Fatalf("forward-compatible metadata rejected: %v", err)
+	}
+	if _, retained := fields["future"]; retained {
+		t.Fatal("unknown datasource metadata was retained")
+	}
+	if _, retained := fields["host"]; !retained {
+		t.Fatal("known datasource field was not retained")
+	}
 }
 
 func TestDatasourceSettingsRejectInvalidEnumsAndResourceLimits(t *testing.T) {
@@ -252,7 +307,6 @@ func TestQueryDataExactQueryJSONAdmission(t *testing.T) {
 		{name: "wrong bool kind", raw: `{"queryText":"1","useTimeColumn":0}`},
 		{name: "wrong integer kind", raw: `{"queryText":"1","timeOut":"1000"}`},
 		{name: "fractional integer", raw: `{"queryText":"1","timeOut":1000.0}`},
-		{name: "null datasource", raw: `{"queryText":"1","datasource":null}`},
 		{name: "string datasource", raw: `{"queryText":"1","datasource":"legacy"}`},
 		{name: "wrong hide kind", raw: `{"queryText":"1","hide":0}`},
 		{name: "wrong query type kind", raw: `{"queryText":"1","queryType":1}`},
@@ -270,6 +324,307 @@ func TestQueryDataExactQueryJSONAdmission(t *testing.T) {
 			assertValidationResponses(t, response, "A")
 			if got := calls.Load(); got != 0 {
 				t.Fatalf("invalid query JSON executed %d q calls", got)
+			}
+		})
+	}
+}
+
+func TestQueryEnvelopeCommonMetadataAcceptedAcrossSurfaces(t *testing.T) {
+	tests := []struct {
+		name     string
+		fragment string
+	}{
+		{name: "explore key", fragment: `,"key":"explore-query-A"`},
+		{name: "maximum key", fragment: `,"key":"` + strings.Repeat("k", maxQueryKeyBytes) + `"`},
+		{name: "null datasource", fragment: `,"datasource":null`},
+		{
+			name:     "strict datasource ref",
+			fragment: `,"datasource":{"type":"asyncq-kdbbackend-datasource","uid":"asyncq-main","apiVersion":"v1"}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			raw := json.RawMessage(`{"queryText":"1","refId":"A"` + test.fragment + `}`)
+			t.Run("standard", func(t *testing.T) {
+				ds := &KdbDatasource{}
+				admitted, err := ds.admitDataQueries(&backend.QueryDataRequest{
+					Queries: []backend.DataQuery{{RefID: "A", JSON: raw}},
+				})
+				if err != nil {
+					t.Fatalf("standard query rejected common envelope metadata: %v", err)
+				}
+				if len(admitted) != 1 || admitted[0].model.QueryText != "1" {
+					t.Fatalf("unexpected standard admission: %#v", admitted)
+				}
+			})
+			t.Run("live", func(t *testing.T) {
+				if _, err := (&KdbDatasource{}).admitLiveQueryRequest(
+					backend.PluginContext{},
+					raw,
+					"async/request",
+				); err != nil {
+					t.Fatalf("live query rejected common envelope metadata: %v", err)
+				}
+			})
+			t.Run("async resource", func(t *testing.T) {
+				if _, _, _, _, err := (&KdbDatasource{}).decodeAsyncRunAndWaitRequest(
+					backend.PluginContext{},
+					raw,
+				); err != nil {
+					t.Fatalf("async resource rejected common envelope metadata: %v", err)
+				}
+			})
+		})
+	}
+}
+
+func TestQueryEnvelopeCommonMetadataRemainsStrictAcrossSurfaces(t *testing.T) {
+	tests := []struct {
+		name     string
+		fragment string
+	}{
+		{name: "key null", fragment: `,"key":null`},
+		{name: "key wrong type", fragment: `,"key":1`},
+		{name: "key control", fragment: `,"key":"explore\u0000A"`},
+		{name: "key oversized", fragment: `,"key":"` + strings.Repeat("k", maxQueryKeyBytes+1) + `"`},
+		{name: "key alias", fragment: `,"Key":"explore-A"`},
+		{name: "datasource string", fragment: `,"datasource":"legacy"`},
+		{name: "datasource duplicate field", fragment: `,"datasource":{"uid":"a","uid":"b"}`},
+		{name: "datasource alias", fragment: `,"datasource":{"UID":"a"}`},
+		{name: "datasource unknown field", fragment: `,"datasource":{"name":"main"}`},
+		{name: "datasource wrong type", fragment: `,"datasource":{"apiVersion":1}`},
+		{name: "datasource nested null", fragment: `,"datasource":{"uid":null}`},
+		{name: "datasource control", fragment: `,"datasource":{"uid":"a\u0000b"}`},
+		{name: "datasource type oversized", fragment: `,"datasource":{"type":"` + strings.Repeat("t", maxFieldNameBytes+1) + `"}`},
+		{name: "datasource uid oversized", fragment: `,"datasource":{"uid":"` + strings.Repeat("u", maxFieldNameBytes+1) + `"}`},
+		{name: "datasource API version oversized", fragment: `,"datasource":{"apiVersion":"` + strings.Repeat("v", maxFieldNameBytes+1) + `"}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			raw := json.RawMessage(`{"queryText":"1","refId":"A"` + test.fragment + `}`)
+			if _, err := (&KdbDatasource{}).admitDataQueries(&backend.QueryDataRequest{
+				Queries: []backend.DataQuery{{RefID: "A", JSON: raw}},
+			}); err == nil {
+				t.Fatal("standard query accepted invalid common envelope metadata")
+			}
+			if _, err := (&KdbDatasource{}).admitLiveQueryRequest(
+				backend.PluginContext{},
+				raw,
+				"async/request",
+			); err == nil {
+				t.Fatal("live query accepted invalid common envelope metadata")
+			}
+			if _, _, _, _, err := (&KdbDatasource{}).decodeAsyncRunAndWaitRequest(
+				backend.PluginContext{},
+				raw,
+			); err == nil {
+				t.Fatal("async resource accepted invalid common envelope metadata")
+			}
+		})
+	}
+}
+
+func TestQueryEnvelopeRejectsInvalidUTF8KeyAcrossSurfaces(t *testing.T) {
+	raw := append([]byte(`{"queryText":"1","refId":"A","key":"`), 0xff)
+	raw = append(raw, []byte(`"}`)...)
+	if _, err := (&KdbDatasource{}).admitDataQueries(&backend.QueryDataRequest{
+		Queries: []backend.DataQuery{{RefID: "A", JSON: raw}},
+	}); err == nil || !strings.Contains(err.Error(), "UTF-8") {
+		t.Fatalf("standard query invalid UTF-8 key error=%v", err)
+	}
+	if _, err := (&KdbDatasource{}).admitLiveQueryRequest(
+		backend.PluginContext{},
+		raw,
+		"async/request",
+	); err == nil || !strings.Contains(err.Error(), "UTF-8") {
+		t.Fatalf("live query invalid UTF-8 key error=%v", err)
+	}
+	if _, _, _, _, err := (&KdbDatasource{}).decodeAsyncRunAndWaitRequest(
+		backend.PluginContext{},
+		raw,
+	); err == nil || !strings.Contains(err.Error(), "UTF-8") {
+		t.Fatalf("async resource invalid UTF-8 key error=%v", err)
+	}
+}
+
+func TestStandardQueryAdmitsExactGrafanaRuntimeEnvelope(t *testing.T) {
+	raw := json.RawMessage(`{
+		"queryText":"select from trade",
+		"refId":"A",
+		"key":"explore-query-A",
+		"hide":false,
+		"queryType":"table",
+		"datasource":{"type":"asyncq-kdbbackend-datasource","uid":"asyncq-main","apiVersion":"v1"},
+		"datasourceId":42,
+		"intervalMs":1500,
+		"maxDataPoints":1234,
+		"queryCachingTTL":60000
+	}`)
+	query := backend.DataQuery{
+		RefID:         "A",
+		QueryType:     "table",
+		MaxDataPoints: 1234,
+		Interval:      1500 * time.Millisecond,
+		JSON:          raw,
+	}
+	admitted, err := (&KdbDatasource{}).admitDataQueries(&backend.QueryDataRequest{
+		Queries: []backend.DataQuery{query},
+	})
+	if err != nil {
+		t.Fatalf("Grafana runtime query envelope was rejected: %v", err)
+	}
+	if len(admitted) != 1 {
+		t.Fatalf("admitted query count=%d want=1", len(admitted))
+	}
+	if !bytes.Equal(admitted[0].query.JSON, raw) {
+		t.Fatal("standard admission did not retain the original SDK query JSON")
+	}
+	normalized, err := json.Marshal(admitted[0].model)
+	if err != nil {
+		t.Fatalf("marshal normalized query model: %v", err)
+	}
+	var modelFields map[string]json.RawMessage
+	if err := json.Unmarshal(normalized, &modelFields); err != nil {
+		t.Fatalf("decode normalized query model: %v", err)
+	}
+	for _, envelopeOnly := range []string{
+		"key",
+		"datasource",
+		"datasourceId",
+		"intervalMs",
+		"maxDataPoints",
+		"queryCachingTTL",
+	} {
+		if _, copied := modelFields[envelopeOnly]; copied {
+			t.Errorf("envelope-only field %q was copied into QueryModel", envelopeOnly)
+		}
+	}
+
+	nullTTL := bytes.Replace(raw, []byte(`60000`), []byte(`null`), 1)
+	query.JSON = nullTTL
+	if _, err := (&KdbDatasource{}).admitDataQueries(&backend.QueryDataRequest{
+		Queries: []backend.DataQuery{query},
+	}); err != nil {
+		t.Fatalf("Grafana runtime null queryCachingTTL was rejected: %v", err)
+	}
+}
+
+func TestStandardQueryRuntimeEnvelopeBoundsAndParity(t *testing.T) {
+	valid := `{
+		"queryText":"1",
+		"refId":"A",
+		"datasource":{"type":"asyncq-kdbbackend-datasource","uid":"main","apiVersion":"v1"},
+		"datasourceId":42,
+		"intervalMs":1000,
+		"maxDataPoints":500,
+		"queryCachingTTL":60000
+	}`
+	tests := []struct {
+		name          string
+		old           string
+		replacement   string
+		maxDataPoints int64
+		interval      time.Duration
+	}{
+		{name: "max data points mismatch", old: `"maxDataPoints":500`, replacement: `"maxDataPoints":501`, maxDataPoints: 500, interval: time.Second},
+		{name: "interval mismatch", old: `"intervalMs":1000`, replacement: `"intervalMs":1001`, maxDataPoints: 500, interval: time.Second},
+		{name: "interval sub-millisecond mismatch", old: `"intervalMs":1000`, replacement: `"intervalMs":1000`, maxDataPoints: 500, interval: time.Second + time.Nanosecond},
+		{name: "max data points negative", old: `"maxDataPoints":500`, replacement: `"maxDataPoints":-1`, maxDataPoints: 500, interval: time.Second},
+		{name: "max data points over bound", old: `"maxDataPoints":500`, replacement: fmt.Sprintf(`"maxDataPoints":%d`, maxQueryMaxDataPoints+1), maxDataPoints: 500, interval: time.Second},
+		{name: "max data points fractional", old: `"maxDataPoints":500`, replacement: `"maxDataPoints":500.0`, maxDataPoints: 500, interval: time.Second},
+		{name: "max data points null", old: `"maxDataPoints":500`, replacement: `"maxDataPoints":null`, maxDataPoints: 500, interval: time.Second},
+		{name: "interval negative", old: `"intervalMs":1000`, replacement: `"intervalMs":-1`, maxDataPoints: 500, interval: time.Second},
+		{name: "interval over bound", old: `"intervalMs":1000`, replacement: fmt.Sprintf(`"intervalMs":%d`, maxQueryInterval/time.Millisecond+1), maxDataPoints: 500, interval: time.Second},
+		{name: "interval fractional", old: `"intervalMs":1000`, replacement: `"intervalMs":1000.0`, maxDataPoints: 500, interval: time.Second},
+		{name: "interval null", old: `"intervalMs":1000`, replacement: `"intervalMs":null`, maxDataPoints: 500, interval: time.Second},
+		{name: "datasource id negative", old: `"datasourceId":42`, replacement: `"datasourceId":-1`, maxDataPoints: 500, interval: time.Second},
+		{name: "datasource id over bound", old: `"datasourceId":42`, replacement: fmt.Sprintf(`"datasourceId":%d`, maxQueryDatasourceID+1), maxDataPoints: 500, interval: time.Second},
+		{name: "datasource id fractional", old: `"datasourceId":42`, replacement: `"datasourceId":42.5`, maxDataPoints: 500, interval: time.Second},
+		{name: "datasource id null", old: `"datasourceId":42`, replacement: `"datasourceId":null`, maxDataPoints: 500, interval: time.Second},
+		{name: "cache TTL negative", old: `"queryCachingTTL":60000`, replacement: `"queryCachingTTL":-1`, maxDataPoints: 500, interval: time.Second},
+		{name: "cache TTL over bound", old: `"queryCachingTTL":60000`, replacement: fmt.Sprintf(`"queryCachingTTL":%d`, maxQueryCachingTTL+1), maxDataPoints: 500, interval: time.Second},
+		{name: "cache TTL fractional", old: `"queryCachingTTL":60000`, replacement: `"queryCachingTTL":60000.5`, maxDataPoints: 500, interval: time.Second},
+		{name: "cache TTL wrong type", old: `"queryCachingTTL":60000`, replacement: `"queryCachingTTL":"60000"`, maxDataPoints: 500, interval: time.Second},
+		{name: "unknown request member", old: `"queryCachingTTL":60000`, replacement: `"queryCachingTTL":60000,"scopedVars":{}`, maxDataPoints: 500, interval: time.Second},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			raw := json.RawMessage(strings.Replace(valid, test.old, test.replacement, 1))
+			_, err := (&KdbDatasource{}).admitDataQueries(&backend.QueryDataRequest{
+				Queries: []backend.DataQuery{{
+					RefID:         "A",
+					MaxDataPoints: test.maxDataPoints,
+					Interval:      test.interval,
+					JSON:          raw,
+				}},
+			})
+			if err == nil {
+				t.Fatal("invalid Grafana runtime envelope was accepted")
+			}
+			if strings.Contains(test.name, "mismatch") && !strings.Contains(err.Error(), "does not match") {
+				t.Fatalf("runtime/backend contradiction error=%v", err)
+			}
+		})
+	}
+
+	for _, surface := range []string{"live", "async resource"} {
+		for _, field := range []string{`"datasourceId":42`, `"queryCachingTTL":null`} {
+			t.Run("standard-only "+field+" rejected by "+surface, func(t *testing.T) {
+				prefix := `{"queryText":"1","refId":"A",`
+				if surface == "async resource" {
+					prefix = `{"queryText":"1","refId":"A","requestId":"request-1",`
+				}
+				raw := json.RawMessage(prefix + field + `}`)
+				if surface == "live" {
+					if _, err := (&KdbDatasource{}).admitLiveQueryRequest(backend.PluginContext{}, raw, "async/request"); err == nil {
+						t.Fatal("live query accepted a standard-only envelope field")
+					}
+					return
+				}
+				if _, _, _, _, err := (&KdbDatasource{}).decodeAsyncRunAndWaitRequest(backend.PluginContext{}, raw); err == nil {
+					t.Fatal("async resource accepted a standard-only envelope field")
+				}
+			})
+		}
+	}
+}
+
+func TestStandardQueryRuntimeEnvelopeAcceptsSafeBoundaries(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		datasourceID  int64
+		maxDataPoints int64
+		intervalMs    int64
+		cacheTTL      string
+	}{
+		{name: "zero and null", cacheTTL: "null"},
+		{
+			name:          "maximum",
+			datasourceID:  maxQueryDatasourceID,
+			maxDataPoints: maxQueryMaxDataPoints,
+			intervalMs:    int64(maxQueryInterval / time.Millisecond),
+			cacheTTL:      strconv.FormatInt(maxQueryCachingTTL, 10),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			raw := json.RawMessage(fmt.Sprintf(`{
+				"queryText":"1",
+				"refId":"A",
+				"datasource":null,
+				"datasourceId":%d,
+				"intervalMs":%d,
+				"maxDataPoints":%d,
+				"queryCachingTTL":%s
+			}`, test.datasourceID, test.intervalMs, test.maxDataPoints, test.cacheTTL))
+			if _, err := (&KdbDatasource{}).admitDataQueries(&backend.QueryDataRequest{
+				Queries: []backend.DataQuery{{
+					RefID:         "A",
+					MaxDataPoints: test.maxDataPoints,
+					Interval:      time.Duration(test.intervalMs) * time.Millisecond,
+					JSON:          raw,
+				}},
+			}); err != nil {
+				t.Fatalf("safe runtime boundary was rejected: %v", err)
 			}
 		})
 	}
