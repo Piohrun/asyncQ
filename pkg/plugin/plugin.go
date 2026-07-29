@@ -826,76 +826,7 @@ func parseKdbResponseToFrames(kdbResponse *kdb.K, model QueryModel, refID string
 			err = fmt.Errorf("unable to parse kdb+ response safely: unexpected parser failure for type %d", responseType)
 		}
 	}()
-	if err := validateKdbObject(kdbResponse); err != nil {
-		return nil, fmt.Errorf("invalid kdb+ response: %w", err)
-	}
-
-	switch {
-	case kdbResponse.Type == kdb.XT:
-		frame, err := ParseSimpleKdbTable(kdbResponse)
-		if err != nil {
-			return nil, err
-		}
-		frame.Name = refID
-		frame.RefID = refID
-		frames = append(frames, frame)
-	case kdbResponse.Type == kdb.XD:
-		if model.CompatibilityMode == CompatibilityModePanopticon {
-			frame, err := ParseKeyedKdbTableAsFrame(kdbResponse)
-			if err == nil {
-				frame.Name = refID
-				frame.RefID = refID
-				frames = append(frames, frame)
-				break
-			}
-			frame, err = ParseKdbDictAsFrame(kdbResponse)
-			if err != nil {
-				return nil, fmt.Errorf("unable to parse Panopticon dictionary result (%s): %w", describeKdbObject(kdbResponse), err)
-			}
-			frame.Name = refID
-			frame.RefID = refID
-			frames = append(frames, frame)
-			break
-		}
-		groupedFrames, err := ParseGroupedKdbTable(kdbResponse, model.IncludeKeyColumns)
-		if err != nil {
-			return nil, err
-		}
-		for _, frame := range groupedFrames {
-			frame.RefID = refID
-		}
-		frames = append(frames, groupedFrames...)
-	case model.CompatibilityMode == CompatibilityModePanopticon && kdbResponse.Type == kdb.K0:
-		frame, err := ParseKdbDictListAsFrame(kdbResponse)
-		if err != nil {
-			frame, err = ParseKdbObjectAsFrame(kdbResponse)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("unable to parse Panopticon generic list result (%s): %w", describeKdbObject(kdbResponse), err)
-		}
-		frame.Name = refID
-		frame.RefID = refID
-		frames = append(frames, frame)
-	case model.CompatibilityMode == CompatibilityModePanopticon && (kdbResponse.Type < kdb.K0 || (kdbResponse.Type > kdb.K0 && kdbResponse.Type <= kdb.KT)):
-		frame, err := ParseKdbObjectAsFrame(kdbResponse)
-		if err != nil {
-			return nil, fmt.Errorf("unable to parse Panopticon scalar/vector result (%s): %w", describeKdbObject(kdbResponse), err)
-		}
-		frame.Name = refID
-		frame.RefID = refID
-		frames = append(frames, frame)
-	default:
-		return nil, fmt.Errorf("returned unsupported kdb+ object (%s), only tables and grouped tables are supported in %s compatibility mode", describeKdbObject(kdbResponse), model.CompatibilityMode)
-	}
-
-	if model.UseTimeColumn {
-		for _, frame := range frames {
-			if err := moveTimeColumnToFront(frame, model.TimeColumn); err != nil {
-				return nil, err
-			}
-		}
-	}
-	return frames, nil
+	return parseKdbResponseToFramesWithLimits(kdbResponse, model, refID, defaultKdbFrameParseLimits)
 }
 
 func applyDeferredQueryWrapper(queryText string, wrapper string) (string, error) {

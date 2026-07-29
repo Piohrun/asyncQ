@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ func TestPanopticonCompatibilityReturnFixtures(t *testing.T) {
 		response   *kdb.K
 		wantFields []string
 		wantRows   int
+		wantError  string
 	}{
 		{
 			name: "function table",
@@ -36,8 +38,7 @@ func TestPanopticonCompatibilityReturnFixtures(t *testing.T) {
 				kdb.NewTable([]string{"sym"}, []*kdb.K{kdb.SymbolV([]string{"AAPL", "MSFT"})}),
 				kdb.NewTable([]string{"sym", "price"}, []*kdb.K{kdb.SymbolV([]string{"XNYS", "XNAS"}), kdb.FloatV([]float64{189.5, 421.25})}),
 			),
-			wantFields: []string{"sym", "sym_2", "price"},
-			wantRows:   2,
+			wantError: "duplicate field name",
 		},
 		{
 			name: "row dictionaries with time and missing values",
@@ -59,6 +60,12 @@ func TestPanopticonCompatibilityReturnFixtures(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			frames, err := parseKdbResponseToFrames(tt.response, QueryModel{CompatibilityMode: CompatibilityModePanopticon}, "A")
+			if tt.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantError, err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("parseKdbResponseToFrames returned error: %v", err)
 			}
